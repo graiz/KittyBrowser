@@ -59,9 +59,28 @@ kb ctl check                         # exit 1 if the page has errors
 ```
 
 `kb ctl --help` lists all the commands, and `kb ctl <command> --help`
-describes one. They cover: status, open, reload, check, viewport, back,
-forward, screenshot, console, network, eval, text, html, style, box, scroll,
-click, hover, dialog, type, select, press and wait.
+describes one. They cover:
+
+- **Navigating:** open, reload, back, forward, status, check, viewport.
+- **Reading:** outline (title and headings), text (the main content, one
+  element, or `--section HEADING`), find (where some words appear, with their
+  context and section), links (numbered links and buttons), tables, images,
+  html, screenshot.
+- **Acting:** click, hover, type, select, press, scroll, wait, dialog.
+- **Debugging:** console, network, eval, style, box.
+
+Anywhere a command takes a selector, it also takes `text=Some words` (the
+element showing that text), `@N` (a number from `kb ctl links`) or `:focus`,
+and selectors reach into shadow DOM.
+
+```sh
+kb ctl open en.wikipedia.org/wiki/Kitty_(terminal_emulator)
+kb ctl outline
+kb ctl text --section Features
+kb ctl find "Goyal"
+kb ctl links --match release
+kb ctl click @12
+```
 
 The same commands are available as MCP tools. The MCP server is off until you
 turn it on, and offers no tools while off:

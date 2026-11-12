@@ -15,7 +15,10 @@ fn usage() -> String {
         text.push_str(&format!("  {}\n      {}\n", command.synopsis(), command.help));
     }
     text.push_str(
-        "\nA <selector> is a CSS selector; the first matching element is used.\n\
+        "\nA <selector> is a CSS selector (the first match is used; it also finds\n\
+         elements inside shadow DOM, and a >>> b picks b inside a's shadow root),\n\
+         or text=Some words for the element showing that text, or @N for link N\n\
+         from kb ctl links, or :focus for whatever has focus.\n\
          kb ctl <command> --help describes one command and its arguments.\n\
          Exit status: 0 on success; 1 if the command failed, with the reason on\n\
          stderr; 2 if the command line was wrong. A command that worked but\n\

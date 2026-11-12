@@ -32,13 +32,335 @@ const MOVE_TIMEOUT: Duration = Duration::from_secs(10);
 const QUIET: Duration = Duration::from_millis(400);
 /// But a page that never goes quiet is reported on after this long.
 const QUIET_LIMIT: Duration = Duration::from_secs(4);
-/// How long after an action to collect the errors it caused.
-const SETTLE: Duration = Duration::from_millis(100);
+/// An action is answered once the page has been quiet this long after it,
+/// so that what it set off (a fetch, a client-side route change, a dialog
+/// taking focus) has happened and the errors it caused are counted.
+const SETTLE: Duration = Duration::from_millis(250);
+/// But a page that never goes quiet gets its answer after this long.
+const SETTLE_LIMIT: Duration = Duration::from_millis(1500);
 const DEFAULT_WAIT: f64 = 10.0;
 /// What `style` prints when no property is named, as a JavaScript array.
 const COMMON_STYLES: &str = "['display', 'position', 'width', 'height', 'margin', 'padding', 'border', \
      'left', 'top', 'z-index', 'visibility', 'opacity', 'color', 'background-color', 'font-family', 'font-size', \
      'font-weight', 'line-height', 'text-align']";
+
+/// Helpers every page script can use, as `__kb`: finding elements by CSS
+/// selector across shadow roots, by text (`text=…`), by number from `links`
+/// (`@3`), or by focus (`:focus`); text that includes shadow content; and
+/// hit testing that sees into shadow roots. Defined afresh with each script,
+/// since the page may have been replaced since the last one.
+const LIB: &str = r#"globalThis.__kb = {
+  name: e => '<' + e.localName + (e.id ? '#' + e.id : '') +
+    (e.classList && e.classList.length ? '.' + [...e.classList].join('.') : '') + '>',
+  roots(root = document) {
+    const out = [root];
+    for (const e of root.querySelectorAll('*')) if (e.shadowRoot) out.push(...this.roots(e.shadowRoot));
+    return out;
+  },
+  query(root, sel) {
+    try { return [...root.querySelectorAll(sel)]; }
+    catch (e) { throw new Error('not a valid CSS selector: ' + sel); }
+  },
+  all(sel) {
+    if (sel === ':focus') { const el = this.focused(); return el ? [el] : []; }
+    let m = /^@(\d+)$/.exec(sel);
+    if (m) { const el = (globalThis.__kbLinks || [])[m[1] - 1]; return el && el.isConnected ? [el] : []; }
+    m = /^text=([\s\S]+)$/.exec(sel);
+    if (m) return this.byText(m[1]);
+    if (sel.includes('>>>')) {
+      let scope = [document];
+      for (const part of sel.split('>>>')) scope = scope.flatMap(s => this.query(s.shadowRoot || s, part.trim()));
+      return scope;
+    }
+    return this.roots().flatMap(r => this.query(r, sel));
+  },
+  find(sel) { return this.all(sel)[0] || null; },
+  get(sel) {
+    const el = this.find(sel);
+    if (el) return el;
+    if (/^@\d+$/.test(sel)) throw new Error('there is no ' + sel + ' on this page now; number the links with: kb ctl links');
+    if (/^text=/.test(sel)) throw new Error('nothing visible on the page shows the text ' + JSON.stringify(sel.slice(5)));
+    if (sel === ':focus') throw new Error('nothing has focus');
+    if (/^[\w' ]+$/.test(sel) && sel.includes(' ')) throw new Error('no element matches ' + sel + '; to find one by its text, use text=' + sel);
+    throw new Error('no element matches ' + sel);
+  },
+  focused() {
+    let a = document.activeElement;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+    return a && a !== document.body && a !== document.documentElement ? a : null;
+  },
+  shown(el) {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility === 'visible';
+  },
+  label(el) {
+    const img = el.querySelector && el.querySelector('img[alt]');
+    return (el.innerText || el.value || el.getAttribute('aria-label') || el.title || (img && img.alt) || '')
+      .replace(/\s+/g, ' ').trim();
+  },
+  byText(want) {
+    const w = want.replace(/\s+/g, ' ').trim().toLowerCase();
+    const live = 'a[href], button, [role=button], [role=link], [role=tab], [role=menuitem], ' +
+      'input[type=submit], input[type=button], summary, label';
+    const controls = this.roots().flatMap(r => [...r.querySelectorAll(live)]).filter(e => this.shown(e));
+    const exact = controls.find(e => this.label(e).toLowerCase() === w);
+    const part = exact || controls.find(e => this.label(e).toLowerCase().includes(w));
+    if (part) return [part];
+    for (const r of this.roots()) {
+      const walk = document.createTreeWalker(r, NodeFilter.SHOW_TEXT);
+      for (let n; (n = walk.nextNode()); ) {
+        const p = n.parentElement;
+        if (p && n.data.toLowerCase().includes(w) && !p.closest('script, style, noscript') && this.shown(p)) return [p];
+      }
+    }
+    // Text split across elements ("Sort by: <b>Best match</b>"): the innermost element holding all of it.
+    return this.holding(w).slice(0, 1);
+  },
+  text(el) {
+    if (el.matches && el.matches('input, textarea, select')) return el.value;
+    let t = el.innerText || '';
+    for (const host of [el, ...el.querySelectorAll('*')].filter(h => h.shadowRoot)) {
+      const inner = [...host.shadowRoot.children].map(c => this.text(c)).filter(s => s.trim()).join('\n');
+      if (inner) t += (t ? '\n' : '') + inner;
+    }
+    return t;
+  },
+  at(x, y) {
+    let hit = document.elementFromPoint(x, y);
+    while (hit && hit.shadowRoot) {
+      const inner = hit.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    return hit;
+  },
+  within(outer, inner) {
+    for (let n = inner; n; n = n.parentNode || n.host) if (n === outer) return true;
+    return false;
+  },
+  main() {
+    const main = document.querySelector('main, [role=main]');
+    if (main) return main;
+    // One <article> is the page's content; several are a list of results or cards.
+    const articles = document.querySelectorAll('article');
+    return articles.length === 1 ? articles[0] : document.body;
+  },
+  // Innermost elements whose text (shadow content included) contains `w`,
+  // lower case, in page order. Matches words split across elements too.
+  holding(w) {
+    const flat = e => (e.textContent || '').replace(/\s+/g, ' ').toLowerCase();
+    const skip = 'script, style, noscript, template, head';
+    const out = [];
+    const descend = el => {
+      if (el.shadowRoot) for (const c of el.shadowRoot.children) if (!c.matches(skip) && flat(c).includes(w)) descend(c);
+      const kids = [...el.children].filter(c => !c.matches(skip) && flat(c).includes(w));
+      if (kids.length) kids.forEach(descend);
+      else if (flat(el).includes(w) && !out.some(o => this.within(el, o))) out.push(el);
+    };
+    const hosts = [document.body, ...this.roots().slice(1).map(r => r.host)];
+    for (const h of hosts) {
+      if (!h) continue;
+      const tops = h === document.body ? [h] : [...h.shadowRoot.children];
+      for (const t of tops) if (!t.matches(skip) && flat(t).includes(w)) descend(t);
+    }
+    return out.filter(e => this.shown(e));
+  },
+  // Where an element sits: inside a nav, sidebar, header or footer, if so.
+  region(e) {
+    const r = e.closest('nav, aside, header, footer, [role=navigation], [role=complementary], [role=banner], [role=contentinfo]');
+    if (!r) return '';
+    const role = r.getAttribute('role');
+    return {navigation: 'nav', complementary: 'aside', banner: 'header', contentinfo: 'footer'}[role] || r.localName;
+  },
+};
+"#;
+
+const LINKS: &str = r#"((sel, limit, match) => {
+  const regions = sel ? __kb.all(sel) : [__kb.main()];
+  if (!regions.length) __kb.get(sel);
+  const region = regions[0];
+  const live = 'a[href], button, [role=button], [role=link], [role=menuitem], [role=menuitemradio], [role=menuitemcheckbox], ' +
+    '[role=option], [role=tab], input[type=submit], input[type=button], summary';
+  const found = [];
+  for (const r of regions) {
+    const inner = [r, ...r.querySelectorAll('*')].filter(e => e.shadowRoot).flatMap(h => __kb.roots(h.shadowRoot));
+    const here = [...(r.matches && r.matches(live) ? [r] : []), ...[r, ...inner].flatMap(x => [...x.querySelectorAll(live)])];
+    for (const e of here) if (!found.includes(e) && __kb.shown(e)) found.push(e);
+  }
+  // One entry per link: a search result's title, domain and snippet often all point the same way.
+  const kept = [];
+  for (const e of found) {
+    const last = kept[kept.length - 1];
+    if (last && e.matches('a[href]') && last.matches('a[href]') && last.href === e.href) {
+      if (!__kb.label(last) && __kb.label(e)) kept[kept.length - 1] = e;
+      continue;
+    }
+    kept.push(e);
+  }
+  found.length = 0;
+  found.push(...kept);
+  // Where a redirect wrapper (a search engine's click tracking) really goes.
+  const target = href => {
+    try {
+      const u = new URL(href);
+      const real = u.searchParams.get('uddg') || u.searchParams.get('url') || (u.pathname === '/url' && u.searchParams.get('q'));
+      return real && /^https?:/.test(real) ? real + ' (via ' + u.hostname + ')' : href;
+    } catch (e) { return href; }
+  };
+  globalThis.__kbLinks = found;
+  const here = location.origin;
+  const m = match ? match.toLowerCase() : '';
+  const wanted = found.map((e, i) => [e, i]).filter(([e]) => !m || __kb.label(e).toLowerCase().includes(m)
+    || (e.href || '').toLowerCase().includes(m));
+  const lines = wanted.slice(0, limit).map(([e, i]) => {
+    const text = __kb.label(e).slice(0, 80) || '(no text)';
+    const where = __kb.region(e) ? ' (in ' + __kb.region(e) + ')' : '';
+    if (!e.matches('a[href]')) {
+      const role = e.getAttribute('role');
+      return '@' + (i + 1) + ' [' + (role && role !== 'button' ? role : 'button') + '] ' + text + where;
+    }
+    const href = target(e.href.startsWith(here + '/') ? e.href.slice(here.length) : e.href);
+    return '@' + (i + 1) + ' ' + text + ' -> ' + href + where;
+  });
+  const where = sel ? 'in ' + sel : region === document.body ? 'on the page'
+    : 'in the main content, ' + __kb.name(region) + ' (for the whole page: kb ctl links body)';
+  if (wanted.length > limit) lines.push('… ' + (wanted.length - limit) + ' more; narrow with a selector or --match, or raise --limit');
+  if (region !== document.body && found.length < 5 && !sel)
+    lines.push('(few links in the main content; for the whole page: kb ctl links body)');
+  const matching = m ? ', ' + wanted.length + ' matching ' + JSON.stringify(match) : '';
+  return [found.length + ' links and buttons ' + where + matching + '; click one with kb ctl click @N', ...lines].join('\n');
+})"#;
+
+const OUTLINE: &str = r#"(() => {
+  const all = __kb.roots().flatMap(r => [...r.querySelectorAll('h1, h2, h3, h4, h5, h6')]).filter(h => __kb.shown(h));
+  const lines = ['title: ' + document.title];
+  const main = __kb.main();
+  if (main !== document.body) lines.push('main content: ' + __kb.name(main) + '; headings outside it are marked');
+  const outside = h => main !== document.body && !__kb.within(main, h) ? ' (in ' + (__kb.region(h) || 'page') + ')' : '';
+  for (const h of all.slice(0, 150)) lines.push('  '.repeat(+h.localName[1] - 1) + h.localName + ' ' + __kb.label(h).slice(0, 100) + outside(h));
+  if (all.length > 150) lines.push('… ' + (all.length - 150) + ' more headings');
+  if (!all.length) lines.push('(the page has no visible headings)');
+  return lines.join('\n');
+})()"#;
+
+const SECTION: &str = r#"((scope, want) => {
+  const w = want.replace(/\s+/g, ' ').trim().toLowerCase();
+  const tags = 'h1, h2, h3, h4, h5, h6, [role=heading]';
+  const within = scope ? [__kb.get(scope)] : __kb.roots();
+  const heads = within.flatMap(r => [...r.querySelectorAll(tags)]).filter(h => __kb.shown(h));
+  const head = heads.find(h => __kb.label(h).toLowerCase() === w) || heads.find(h => __kb.label(h).toLowerCase().includes(w));
+  if (!head) throw new Error('no heading reads ' + JSON.stringify(want) + '; see the headings with: kb ctl outline');
+  const levelOf = h => +(/^h(\d)$/.exec(h.localName) || [])[1] || +h.getAttribute('aria-level') || 6;
+  const level = levelOf(head);
+  // Up past wrappers that hold little but the heading (Wikipedia's [edit] links).
+  let node = head;
+  while (node.parentElement && node.parentElement !== document.body
+         && __kb.text(node.parentElement).trim().length <= __kb.label(head).length + 20) node = node.parentElement;
+  const parts = [];
+  for (let s = node.nextElementSibling; s; s = s.nextElementSibling) {
+    const h = s.matches(tags) ? s : s.querySelector(tags);
+    if (h && levelOf(h) <= level) break;
+    const t = __kb.text(s).trim();
+    if (t) parts.push(t);
+  }
+  // Nothing after it: the heading tops a card, whose box holds the content.
+  const body = parts.length ? parts.join('\n') : node.parentElement ? __kb.text(node.parentElement).trim() : '';
+  return '[' + __kb.label(head) + ']\n' + (body || '(nothing under this heading)');
+})"#;
+
+const TABLES: &str = r#"((index, limit) => {
+  const tables = __kb.roots().flatMap(r => [...r.querySelectorAll('table')]).filter(t => __kb.shown(t) && t.rows.length > 1);
+  if (!tables.length) return 'the page has no visible tables';
+  const cells = row => [...row.cells].map(c => __kb.text(c).replace(/\s+/g, ' ').trim());
+  if (index === null) {
+    const lines = [tables.length + ' tables; read one with kb ctl tables N'];
+    tables.forEach((t, i) => {
+      let title = t.caption ? __kb.label(t.caption) : '';
+      // The nearest heading before the table, looking back through earlier siblings and up.
+      for (let e = t, steps = 0; !title && e && e !== document.body && steps < 60; steps++) {
+        const prev = e.previousElementSibling;
+        if (!prev) { e = e.parentElement; continue; }
+        e = prev;
+        const inside = e.querySelectorAll('h1, h2, h3, h4, h5, h6');
+        const h = e.matches('h1, h2, h3, h4, h5, h6') ? e : inside[inside.length - 1];
+        if (h) title = __kb.label(h);
+      }
+      const head = cells(t.rows[0]).join(' | ').slice(0, 120);
+      lines.push((i + 1) + '. ' + t.rows.length + ' rows x ' + t.rows[0].cells.length + ' columns' +
+        (title ? ', under "' + title.slice(0, 60) + '"' : '') + ': ' + head);
+    });
+    return lines.join('\n');
+  }
+  const t = tables[index - 1];
+  if (!t) throw new Error('there are ' + tables.length + ' tables; give a number from 1 to ' + tables.length);
+  t.scrollIntoView({block: 'start', behavior: 'instant'});
+  const rows = [...t.rows].slice(0, limit).map(r => cells(r).join('\t'));
+  if (t.rows.length > limit) rows.push('… ' + (t.rows.length - limit) + ' more rows; raise --limit');
+  return ['table ' + index + ': ' + t.rows.length + ' rows, tab separated', ...rows].join('\n');
+})"#;
+
+const IMAGES: &str = r#"((sel, limit) => {
+  const region = sel ? __kb.get(sel) : __kb.main();
+  const all = [region, ...__kb.roots().slice(1).map(r => r.host).filter(h => h && __kb.within(region, h)).map(h => h.shadowRoot)]
+    .flatMap(r => [...r.querySelectorAll('img, svg[role=img], picture img')])
+    .filter((e, i, list) => list.indexOf(e) === i && __kb.shown(e) && e.getBoundingClientRect().width >= 24);
+  if (!all.length) return 'no visible images' + (sel ? ' in ' + sel : ' in the main content (try: kb ctl images body)');
+  const lines = [all.length + ' images' + (sel ? ' in ' + sel : region === document.body ? '' : ' in the main content') +
+    '; look at one with kb ctl screenshot --selector'];
+  all.slice(0, limit).forEach((e, i) => {
+    const r = e.getBoundingClientRect();
+    const figure = e.closest('figure');
+    const caption = figure && figure.querySelector('figcaption') ? __kb.label(figure.querySelector('figcaption')) : '';
+    const link = e.closest('a[href]');
+    lines.push((i + 1) + '. ' + (e.alt ? 'alt "' + e.alt.slice(0, 100) + '"' : 'no alt text') +
+      ', shown ' + Math.round(r.width) + 'x' + Math.round(r.height) +
+      (e.naturalWidth ? ', file ' + e.naturalWidth + 'x' + e.naturalHeight : '') +
+      (caption ? '\n   caption: ' + caption.slice(0, 160) : '') +
+      '\n   src: ' + (e.currentSrc || e.src || '(inline svg)') + (link ? '\n   links to: ' + link.href : ''));
+  });
+  if (all.length > limit) lines.push('… ' + (all.length - limit) + ' more');
+  return lines.join('\n');
+})"#;
+
+const FIND: &str = r#"((want, limit) => {
+  const w = want.toLowerCase();
+  const heads = __kb.roots().flatMap(r => [...r.querySelectorAll('h1, h2, h3, h4, h5, h6')]).filter(h => __kb.shown(h));
+  const top = n => { while (n.getRootNode() !== document && n.getRootNode().host) n = n.getRootNode().host; return n; };
+  // In document order, counting a heading in a shadow root at its host.
+  heads.sort((a, b) => top(a) === top(b) ? 0 : top(a).compareDocumentPosition(top(b)) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+  const blockOf = n => {
+    let e = n.parentElement;
+    while (e && e.parentElement && getComputedStyle(e).display.startsWith('inline')) e = e.parentElement;
+    return e;
+  };
+  const blocks = [];
+  for (const el of __kb.holding(w)) {
+    const block = blockOf({parentElement: el});
+    if (block && !blocks.includes(block)) blocks.push(block);
+  }
+  blocks.sort((a, b) => top(a) === top(b) ? 0 : top(a).compareDocumentPosition(top(b)) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+  if (!blocks.length) return 'no visible text matches ' + JSON.stringify(want) + ' (text in images, canvases and iframes is not searched)';
+  blocks[0].scrollIntoView({block: 'center', behavior: 'instant'});
+  const lines = blocks.slice(0, limit).map((block, i) => {
+    // A label alone ("Latest", "Downloads") says little: widen to its row or card.
+    let ctx = block;
+    for (let i = 0; i < 3 && ctx.parentElement && (ctx.innerText || '').trim().length < 60
+         && (ctx.parentElement.innerText || '').length < 400; i++) ctx = ctx.parentElement;
+    const text = (__kb.text(ctx) || ctx.textContent).replace(/\s+/g, ' ').trim();
+    const at = Math.max(0, text.toLowerCase().indexOf(w));
+    const from = Math.max(0, at - 120), to = Math.min(text.length, at + w.length + 120);
+    const context = (from > 0 ? '…' : '') + text.slice(from, to) + (to < text.length ? '…' : '');
+    let heading = '';
+    for (const h of heads) {
+      if (h === block || h.contains(block) || block.contains(h)) { heading = __kb.label(h); continue; }
+      if (top(h) !== top(block) && top(h).compareDocumentPosition(top(block)) & Node.DOCUMENT_POSITION_FOLLOWING) heading = __kb.label(h);
+      else if (top(h) !== top(block)) break;
+    }
+    return (i + 1) + '. ' + (heading ? '[' + heading.slice(0, 60) + '] ' : '') + context;
+  });
+  const shown = blocks.length > limit ? ', the first ' + limit + ' shown' : '';
+  return [blocks.length + ' places show ' + JSON.stringify(want) + shown + '; the window is scrolled to the first', ...lines].join('\n');
+})"#;
 
 /// Script fragment: how an element is named in answers, `<div#id>`.
 const NAME_OF: &str = "(e => '<' + e.localName + (e.id ? '#' + e.id : '') + \
@@ -46,25 +368,23 @@ const NAME_OF: &str = "(e => '<' + e.localName + (e.id ? '#' + e.id : '') + \
 
 /// For `locate`, before a click: refuse if the click would land elsewhere.
 const CLICKABLE: &str = "{ const b = el.getBoundingClientRect(); \
-     const hit = b.width > 0 && b.height > 0 ? document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2) : el; \
+     const hit = b.width > 0 && b.height > 0 ? __kb.at(b.left + b.width / 2, b.top + b.height / 2) : el; \
      if (!hit) throw new Error('the element is off screen, at ' + Math.round(b.left) + ',' + Math.round(b.top) + \
        ' in the window, and can\\'t be scrolled into view, so it can\\'t be clicked; see: kb ctl box'); \
      const labels = el.labels ? [...el.labels] : []; \
-     if (hit !== el && !el.contains(hit) && !hit.contains(el) && !labels.some(label => label.contains(hit))) \
+     if (hit !== el && !__kb.within(el, hit) && !__kb.within(hit, el) && !labels.some(label => __kb.within(label, hit))) \
        throw new Error('the element is covered by ' + NAME(hit) + ', which would get the click instead; see: kb ctl box'); \
-     if (hit !== el && el.contains(hit)) landed = NAME(hit); }";
+     if (hit !== el && __kb.within(el, hit)) landed = NAME(hit); }";
 
 /// Where an element is on the page, without moving the page, for a screenshot.
-const SHOT_RECT: &str = "(sel => { const el = document.querySelector(sel); \
-     if (!el) throw new Error('no element matches ' + sel); \
+const SHOT_RECT: &str = "(sel => { const el = __kb.get(sel); \
      const r = el.getBoundingClientRect(), x = r.left + scrollX, y = r.top + scrollY; \
      if (r.width <= 0 || r.height <= 0) throw new Error('the element has no size, so there is nothing to capture'); \
      if (x + r.width <= 0 || y + r.height <= 0) throw new Error('the element is outside the page, at ' + \
        Math.round(x) + ',' + Math.round(y) + ', so there is nothing to capture; see: kb ctl box'); \
      return {x, y, width: r.width, height: r.height}; })";
 
-const BOX: &str = "(sel => { const el = document.querySelector(sel); \
-     if (!el) throw new Error('no element matches ' + sel); \
+const BOX: &str = "(sel => { const el = __kb.get(sel); \
      const r = el.getBoundingClientRect(), style = getComputedStyle(el), n = Math.round; \
      const hidden = style.display === 'none' ? 'display: none' \
        : style.visibility !== 'visible' ? 'visibility: ' + style.visibility \
@@ -79,23 +399,24 @@ const BOX: &str = "(sel => { const el = document.querySelector(sel); \
        'rendered: ' + (hidden ? 'no (' + hidden + ')' : 'yes'), \
        'in the window: ' + (outside ? 'no (' + outside + ')' : 'yes')]; \
      if (!hidden && !outside) { \
-       const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); \
-       const covered = hit && hit !== el && !el.contains(hit) && !hit.contains(el); \
+       const hit = __kb.at(r.left + r.width / 2, r.top + r.height / 2); \
+       const covered = hit && hit !== el && !__kb.within(el, hit) && !__kb.within(hit, el); \
        lines.push('covered: ' + (covered ? 'yes, by ' + NAME(hit) + ' at its centre' : 'no')); } \
      return lines.join('\\n'); })";
 
-const SCROLL: &str = "(to => { \
+const SCROLL: &str = "(async to => { const before = document.documentElement.scrollHeight; \
      if (to === 'top') scrollTo(0, 0); \
      else if (to === 'bottom') scrollTo(0, document.documentElement.scrollHeight); \
      else if (/^\\d+$/.test(to)) scrollTo(0, +to); \
-     else { const el = document.querySelector(to); \
+     else { const el = __kb.find(to); \
        if (!el) throw new Error('no element matches ' + to + '; scroll takes top, bottom, a number of pixels, or a selector'); \
        el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'}); } \
-     const most = Math.max(0, document.documentElement.scrollHeight - innerHeight); \
-     return 'scrolled to ' + Math.min(most, Math.round(scrollY)) + ' of ' + most + ' pixels'; })";
+     for (let i = 0; i < 10 && document.documentElement.scrollHeight === before; i++) await new Promise(r => setTimeout(r, 100)); \
+     const after = document.documentElement.scrollHeight, most = Math.max(0, after - innerHeight); \
+     return 'scrolled to ' + Math.min(most, Math.round(scrollY)) + ' of ' + most + ' pixels' + \
+       (after > before ? '; the page grew from ' + before + ' to ' + after + ' pixels as it loaded more' : ''); })";
 
-const SELECT: &str = "((sel, want) => { const el = document.querySelector(sel); \
-     if (!el) throw new Error('no element matches ' + sel); \
+const SELECT: &str = "((sel, want) => { const el = __kb.get(sel); \
      if (el.localName !== 'select') throw new Error('that element is a <' + el.localName + '>, not a <select>'); \
      const options = [...el.options], label = o => o.label.trim(); \
      const option = options.find(o => o.value === want) || options.find(o => label(o) === want) \
@@ -113,9 +434,14 @@ const CONTENTS: &str = "function() { \
      if (this instanceof NodeList || this instanceof HTMLCollection || Array.isArray(this)) return [...this].map(show); \
      return this; }";
 
-/// A script from one of the templates above, with `NAME` filled in.
-fn script(template: &str) -> String {
+/// A template above with `NAME` filled in.
+fn names(template: &str) -> String {
     template.replace("NAME", NAME_OF)
+}
+
+/// A script from a template above, with the `__kb` helpers in front.
+fn script(template: &str) -> String {
+    format!("{LIB}\n{}", names(template))
 }
 const MAX_WAIT: f64 = 60.0;
 
@@ -193,6 +519,8 @@ struct Baseline {
     url: String,
     /// How many page loads had started.
     loads: u64,
+    /// The document then, to tell a new page from a move within this one.
+    loader: String,
 }
 
 /// A command waiting for the page to finish loading.
@@ -428,8 +756,7 @@ fn parse_key(name: &str) -> Option<Key> {
 /// is in the viewport.
 fn locate(selector: &str, prepare: &str) -> String {
     format!(
-        "(() => {{ const el = document.querySelector({sel}); \
-         if (!el) throw new Error('no element matches ' + {sel}); \
+        "{LIB}\n(() => {{ const el = __kb.get({sel}); \
          el.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}}); \
          let landed = ''; {prepare} const r = el.getBoundingClientRect(); \
          return {{x: r.x, y: r.y, width: r.width, height: r.height, landed}}; }})()",
@@ -450,7 +777,15 @@ const FOCUS: &str = "if (el.localName === 'select') throw new Error('that elemen
 const SELECT_ALL: &str = "if (el.select) el.select(); else document.execCommand('selectAll');";
 
 /// Script fragment: the text of `el`, or what is typed in it if it is a field.
-const TEXT_OF: &str = "(el.matches('input, textarea, select') ? el.value : el.innerText)";
+const TEXT_OF: &str = "__kb.text(el)";
+
+/// Whether a page title is a bot check's rather than the site's.
+fn is_bot_check(title: &str) -> bool {
+    let title = title.to_lowercase();
+    ["just a moment", "client challenge", "attention required", "captcha", "verify you are human", "are you a robot", "security check"]
+        .iter()
+        .any(|sign| title.contains(sign))
+}
 
 /// Whether a request is the browser's own look for a site icon, which a
 /// page under development rarely has and nobody asked for.
@@ -467,7 +802,7 @@ impl Devtools {
     fn evaluate(&mut self, chrome: &mut Chrome, expression: &str, pending: Pending) {
         let id = chrome.request(
             "Runtime.evaluate",
-            json!({"expression": expression, "returnByValue": true, "userGesture": true}),
+            json!({"expression": expression, "returnByValue": true, "userGesture": true, "awaitPromise": true}),
         );
         self.park(id, pending);
     }
@@ -478,6 +813,7 @@ impl Devtools {
             failed: self.requests.iter().filter(|r| r.failed()).count(),
             url: self.url.clone(),
             loads: self.loads,
+            loader: self.loader.clone(),
         }
     }
 
@@ -485,7 +821,11 @@ impl Devtools {
     /// answer; empty if nothing did.
     fn fallout(&self, since: &Baseline) -> String {
         let mut out = String::new();
-        if self.url != since.url {
+        let base = |url: &str| url.split('#').next().unwrap_or("").to_owned();
+        if self.url != since.url && base(&self.url) == base(&since.url) {
+            let fragment = self.url.split_once('#').map_or("", |(_, fragment)| fragment);
+            let _ = write!(out, "\nmoved within the page, to #{fragment}");
+        } else if self.url != since.url {
             let _ = write!(out, "\nthe page is now {}", self.url);
         }
         let errors: Vec<String> =
@@ -544,12 +884,18 @@ impl Devtools {
                 "status" => {
                     let (width, height) = page.viewport;
                     let url = if page.url.is_empty() { "about:blank" } else { page.url };
-                    let rest = format!(
+                    let mut rest = format!(
                         "loading: {}\nviewport: {width}x{height} CSS pixels, scale {}\n{}",
                         if page.loading { "yes" } else { "no" },
                         page.scale,
                         self.health(),
                     );
+                    if width < 600 {
+                        rest.push_str(
+                            "\nnote: the viewport is narrow, so many sites show their phone layout, with menus \
+                             collapsed; kb ctl viewport 1280x800 lays pages out as on a desktop",
+                        );
+                    }
                     // The title has to be asked for; the rest is already known.
                     let pending = Pending::Status(reply.clone(), format!("url: {url}"), rest);
                     self.evaluate(chrome, "document.title", pending);
@@ -572,7 +918,7 @@ impl Devtools {
                 "screenshot" => match arg("selector") {
                     Some(selector) => {
                         {
-                        let find = format!("{SHOT_RECT}({})", quote(selector));
+                        let find = format!("{}({})", script(SHOT_RECT), quote(selector));
                         self.evaluate(chrome, &find, Pending::Rect(reply.clone(), Then::Screenshot))
                     }
                     }
@@ -588,7 +934,7 @@ impl Devtools {
                     for message in self.console.iter().filter(|m| all || m.seq >= self.page_seq) {
                         let wanted = match message.level.as_str() {
                             PAGE => all,
-                            "error" | "warning" => true,
+                            "error" => true,
                             _ => !errors,
                         };
                         if wanted {
@@ -596,11 +942,11 @@ impl Devtools {
                             out.push('\n');
                         }
                     }
-                    if !self.page_console().any(|m| !errors || matches!(m.level.as_str(), "error" | "warning")) {
+                    if !self.page_console().any(|m| !errors || m.level == "error") {
                         let _ = write!(
                             out,
                             "no console {} since the page loaded",
-                            if errors { "errors or warnings" } else { "messages" }
+                            if errors { "errors" } else { "messages" }
                         );
                     }
                     text(&reply, out.trim_end());
@@ -631,8 +977,7 @@ impl Devtools {
                         None => COMMON_STYLES.to_owned(),
                     };
                     let script = format!(
-                        "(() => {{ const el = document.querySelector({sel}); \
-                         if (!el) throw new Error('no element matches ' + {sel}); \
+                        "{LIB}\n(() => {{ const el = __kb.get({sel}); \
                          const style = getComputedStyle(el); \
                          return {names}.map(name => name + ': ' + (style.getPropertyValue(name) || '(not set)')).join('\\n'); }})()",
                         sel = quote(need("selector")?),
@@ -640,19 +985,57 @@ impl Devtools {
                     self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
                 }
                 "text" | "html" => {
-                    let (value, whole) = match command.as_str() {
-                        "text" => (TEXT_OF, "document.body.innerText"),
-                        _ => ("el.outerHTML", "document.documentElement.outerHTML"),
-                    };
-                    let script = match arg("selector") {
-                        Some(selector) => format!(
-                            "(() => {{ const el = document.querySelector({sel}); \
-                             if (!el) throw new Error('no element matches ' + {sel}); \
-                             return {value}; }})()",
+                    let value = if command == "text" { TEXT_OF } else { "el.outerHTML" };
+                    let body = match arg("selector") {
+                        _ if command == "text" && arg("section").is_some() => format!(
+                            "{}({}, {})",
+                            names(SECTION),
+                            arg("selector").map_or("null".to_owned(), quote),
+                            quote(arg("section").unwrap_or(""))
+                        ),
+                        Some(selector) if flag("all") => format!(
+                            "(() => {{ const all = __kb.all({sel}); \
+                             if (!all.length) __kb.get({sel}); \
+                             return all.map(el => {value}).join('\\n---\\n'); }})()",
                             sel = quote(selector),
                         ),
-                        None => whole.to_owned(),
+                        Some(selector) => format!("(() => {{ const el = __kb.get({}); return {value}; }})()", quote(selector)),
+                        None if command == "html" => "document.documentElement.outerHTML".to_owned(),
+                        // An agent rarely wants the menus and footers: start from the main content.
+                        None => "(() => { const el = __kb.main(); const t = __kb.text(el); \
+                                 return (el === document.body ? '(the whole page: it marks no <main> or <article>; \
+                                 kb ctl outline and kb ctl text --section HEADING read less)' : '(the main content, ' + \
+                                 __kb.name(el) + '; for the whole page: kb ctl text body)') + '\\n' + t; })()"
+                            .to_owned(),
                     };
+                    let script = format!("{LIB}\n{body}");
+                    self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
+                }
+                "links" => {
+                    let limit = arg("limit").and_then(|n| n.parse::<u32>().ok()).unwrap_or(60);
+                    let region = arg("selector").map_or("null".to_owned(), quote);
+                    let filter = arg("match").map_or("null".to_owned(), quote);
+                    let script = format!("{}({region}, {limit}, {filter})", script(LINKS));
+                    self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
+                }
+                "outline" => self.evaluate(chrome, &script(OUTLINE), Pending::Eval(reply.clone())),
+                "tables" => {
+                    let index = match arg("number") {
+                        Some(n) => n.parse::<u32>().ok().filter(|n| *n > 0).ok_or("tables takes a table number, such as 2")?.to_string(),
+                        None => "null".to_owned(),
+                    };
+                    let limit = arg("limit").and_then(|n| n.parse::<u32>().ok()).unwrap_or(200);
+                    let script = format!("{}({index}, {limit})", script(TABLES));
+                    self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
+                }
+                "images" => {
+                    let region = arg("selector").map_or("null".to_owned(), quote);
+                    let script = format!("{}({region}, 20)", script(IMAGES));
+                    self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
+                }
+                "find" => {
+                    let limit = arg("limit").and_then(|n| n.parse::<u32>().ok()).unwrap_or(10);
+                    let script = format!("{}({}, {limit})", script(FIND), quote(need("text")?));
                     self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
                 }
                 "box" => {
@@ -660,17 +1043,17 @@ impl Devtools {
                     self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
                 }
                 "scroll" => {
-                    let script = format!("{SCROLL}({})", quote(need("to")?));
+                    let script = format!("{}({})", script(SCROLL), quote(need("to")?));
                     self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
                 }
                 "select" => {
-                    let script = format!("{SELECT}({}, {})", quote(need("selector")?), quote(need("option")?));
+                    let script = format!("{}({}, {})", script(SELECT), quote(need("selector")?), quote(need("option")?));
                     self.evaluate(chrome, &script, Pending::Acted(reply.clone(), self.baseline()));
                 }
                 "hover" => {
                     let selector = need("selector")?;
                     let then = Then::Hover(selector.to_owned());
-                    self.evaluate(chrome, &locate(selector, &script(CLICKABLE)), Pending::Rect(reply.clone(), then));
+                    self.evaluate(chrome, &locate(selector, &names(CLICKABLE)), Pending::Rect(reply.clone(), then));
                 }
                 "dialog" => {
                     self.dismiss = match need("answer")? {
@@ -691,13 +1074,13 @@ impl Devtools {
                 "click" => {
                     let selector = need("selector")?;
                     let then = Then::Click(selector.to_owned());
-                    self.evaluate(chrome, &locate(selector, &script(CLICKABLE)), Pending::Rect(reply.clone(), then));
+                    self.evaluate(chrome, &locate(selector, &names(CLICKABLE)), Pending::Rect(reply.clone(), then));
                 }
                 "type" => {
                     let selector = need("selector")?;
                     let then = Then::Type(selector.to_owned(), need("text")?.to_owned());
                     let clear = if flag("clear") { SELECT_ALL } else { "" };
-                    let prepare = format!("{} {FOCUS} {clear}", script(CLICKABLE).replace("clicked", "typed into"));
+                    let prepare = format!("{} {FOCUS} {clear}", names(CLICKABLE).replace("clicked", "typed into"));
                     self.evaluate(chrome, &locate(selector, &prepare), Pending::Rect(reply.clone(), then));
                 }
                 "press" => {
@@ -723,6 +1106,10 @@ impl Devtools {
                     let selector = need("selector")?;
                     let (what, condition) = match arg("text") {
                         _ if flag("gone") => (format!("{selector} to be gone"), "all.length === 0".to_owned()),
+                        _ if arg("count").is_some() => {
+                            let count = arg("count").and_then(|n| n.parse::<u32>().ok()).ok_or("--count needs a number")?;
+                            (format!("{count} or more of {selector}"), format!("all.length >= {count}"))
+                        }
                         Some(wanted) => (
                             format!("{selector} containing {wanted:?}"),
                             format!("all.some(el => {TEXT_OF}.includes({}))", quote(wanted)),
@@ -733,7 +1120,7 @@ impl Devtools {
                     self.waits.push(Wait {
                         id: self.next_wait,
                         check: format!(
-                            "(() => {{ const all = [...document.querySelectorAll({})]; return {condition}; }})()",
+                            "{LIB}\n(() => {{ const all = __kb.all({}); return {condition}; }})()",
                             quote(selector)
                         ),
                         what,
@@ -882,7 +1269,12 @@ impl Devtools {
                 if loader != self.loader {
                     self.new_page(loader, params["frame"]["url"].as_str().unwrap_or(""));
                 }
-                self.url = params["frame"]["url"].as_str().unwrap_or("").to_owned();
+                let frame = &params["frame"];
+                self.url = format!(
+                    "{}{}",
+                    frame["url"].as_str().unwrap_or(""),
+                    frame["urlFragment"].as_str().unwrap_or("")
+                );
                 self.moved();
             }
             "Page.navigatedWithinDocument" if main_frame => {
@@ -938,7 +1330,7 @@ impl Devtools {
     }
 
     /// Tell a command that waited for the page how the load went.
-    fn report_load(&self, wait: LoadWait) {
+    fn report_load(&mut self, wait: LoadWait, chrome: &mut Chrome) {
         let document = self.requests.iter().find(|request| request.page);
         if self.url.starts_with("chrome-error://") {
             let why = self.document_error.as_deref().unwrap_or("the browser shows an error page");
@@ -949,7 +1341,9 @@ impl Devtools {
             _ => String::new(),
         };
         if !wait.check {
-            return text(&wait.reply, format!("{}loaded {}{refused}\n{}", wait.said, self.url, self.health()));
+            let before = format!("{}loaded {}{refused}", wait.said, self.url);
+            let pending = Pending::Status(wait.reply, before, self.health());
+            return self.evaluate(chrome, "document.title", pending);
         }
         let mut problems: Vec<String> = self.page_console().filter(|m| m.level == "error").map(Message::line).collect();
         problems.extend(self.requests.iter().filter(|r| r.failed()).map(NetRequest::line));
@@ -983,7 +1377,7 @@ impl Devtools {
                             "Runtime.callFunctionOn",
                             json!({
                                 "objectId": id, "returnByValue": true,
-                                "functionDeclaration": script(CONTENTS),
+                                "functionDeclaration": names(CONTENTS),
                             }),
                         );
                         self.park(id, Pending::Contents(reply, description.to_owned()));
@@ -1013,7 +1407,11 @@ impl Devtools {
                 let number = |name: &str| rect[name].as_f64().unwrap_or(0.0);
                 let (x, y, width, height) = (number("x"), number("y"), number("width"), number("height"));
                 if width <= 0.0 || height <= 0.0 {
-                    return fail(&reply, "the element has no size, so it isn't visible");
+                    return fail(
+                        &reply,
+                        "the element has no size, so it isn't visible; it may be in a collapsed menu, or shown \
+                         only at other widths (see: kb ctl box, kb ctl viewport)",
+                    );
                 }
                 match then {
                     Then::Hover(selector) => {
@@ -1090,7 +1488,11 @@ impl Devtools {
             },
             Pending::Status(reply, before, after) => {
                 let title = evaluated(result).map(show).unwrap_or_default();
-                text(&reply, format!("{before}\ntitle: {title}\n{after}"));
+                let mut out = format!("{before}\ntitle: {title}\n{after}");
+                if is_bot_check(&title) {
+                    out.push_str("\nnote: this looks like a bot check or CAPTCHA, not the page itself; kb can't get past it");
+                }
+                text(&reply, out);
             }
             Pending::Acted(reply, since) => match evaluated(result) {
                 Ok(object) => self.settling.push(Settling { reply, message: show(object), since, at: Instant::now() }),
@@ -1122,7 +1524,7 @@ impl Devtools {
                 Some(stopped) => {
                     let quiet_since = self.active.map_or(stopped, |active| active.max(stopped));
                     if now.duration_since(quiet_since) >= QUIET || now.duration_since(stopped) >= QUIET_LIMIT {
-                        self.report_load(wait);
+                        self.report_load(wait, chrome);
                     } else {
                         self.loading.push(wait);
                     }
@@ -1144,12 +1546,21 @@ impl Devtools {
         });
 
         let (settled, settling): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.settling).into_iter().partition(|action| action.at + SETTLE <= now);
+            std::mem::take(&mut self.settling).into_iter().partition(|action| {
+                let quiet_since = self.active.map_or(action.at, |active| active.max(action.at));
+                now.duration_since(quiet_since) >= SETTLE || now.duration_since(action.at) >= SETTLE_LIMIT
+            });
         self.settling = settling;
         for action in settled {
-            if self.busy && self.loads != action.since.loads {
-                // It led to another page: answer when that has loaded.
+            // A new page, not a move within this one (an anchor, a client-side route).
+            let new_page = self.loader != action.since.loader || self.busy;
+            if self.loads != action.since.loads && new_page {
+                // It led to another page: answer when that has loaded and gone quiet.
+                let stopped = (!self.busy).then_some(now);
                 self.await_load(action.reply, format!("{}\n", action.message));
+                if let Some(wait) = self.loading.last_mut() {
+                    wait.stopped = stopped;
+                }
             } else {
                 text(&action.reply, format!("{}{}", action.message, self.fallout(&action.since)));
             }
@@ -1176,6 +1587,13 @@ impl Devtools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bot_checks() {
+        assert!(is_bot_check("Just a moment..."));
+        assert!(is_bot_check("Client Challenge"));
+        assert!(!is_bot_check("gap CSS property - CSS | MDN"));
+    }
 
     #[test]
     fn keys() {

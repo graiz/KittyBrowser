@@ -45,7 +45,7 @@ const fn flag(name: &'static str, help: &'static str) -> Param {
     Param { name, kind: Kind::Flag, required: false, value: "", help }
 }
 
-const SELECTOR: &str = "CSS selector; the first match is used";
+const SELECTOR: &str = "CSS selector (first match), text=Words, @N from links, or :focus";
 
 pub const COMMANDS: &[Command] = &[
     Command {
@@ -70,7 +70,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "viewport",
-        help: "Lay the page out at a given size instead of the pane's, to test other widths and media queries. If it is bigger than the pane it is shown shrunk to fit. Stays until reset.",
+        help: "Lay the page out at a given size instead of the pane's, to test other widths and media queries, or to get a site's desktop layout in a small pane. If it is bigger than the pane it is shown shrunk to fit. Stays until kb ctl viewport reset.",
         params: &[required("size", "WIDTHxHEIGHT in CSS pixels (such as 1280x800), a width alone, or reset")],
     },
     Command { name: "back", help: "Go back one page in history.", params: &[] },
@@ -88,7 +88,7 @@ pub const COMMANDS: &[Command] = &[
         name: "console",
         help: "Show the current page's console messages and uncaught exceptions, with the file and line each came from, and any alert, confirm or prompt dialogs with how they were answered.",
         params: &[
-            flag("errors", "only errors and warnings"),
+            flag("errors", "only errors"),
             flag("all", "also show messages from pages visited earlier, under a line naming each page"),
         ],
     },
@@ -99,18 +99,51 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "eval",
-        help: "Evaluate JavaScript in the page and print the result: strings as they are, other values as JSON, elements as <tag#id>. A promise is awaited and its value printed; top-level await works.",
+        help: "Evaluate JavaScript in the page and print the result: strings as they are, other values as JSON, elements as <tag#id>. A promise is awaited and its value printed; top-level await works. It runs as at the console, so a declaration can clash with the window's own names (top, name, status): wrap code in (() => { ... })() to avoid that.",
         params: &[required("expression", "JavaScript expression")],
     },
     Command {
         name: "text",
-        help: "Print the text of the page, or of one element, as rendered: elements hidden with CSS are left out, but text that is off screen or the colour of its background is not. For a text field or select, prints its value.",
-        params: &[optional("selector", SELECTOR)],
+        help: "Print the text of the page's main content (its <main> or <article>, if it has one), or of one element, as rendered, including text in shadow DOM. Elements hidden with CSS are left out, but text that is off screen or the colour of its background is not. For a text field or select, prints its value. On a long page, find or outline are usually better first steps.",
+        params: &[
+            optional("selector", SELECTOR),
+            option("section", "HEADING", "print only what is under the heading with this text (in the element, if one is given)"),
+            flag("all", "print every element the selector matches, separated by ---"),
+        ],
     },
     Command {
         name: "html",
         help: "Print the HTML of the page as it is now, or of one element.",
         params: &[optional("selector", SELECTOR)],
+    },
+    Command {
+        name: "outline",
+        help: "Show the page's title and its headings, indented by level: a table of contents to decide what to read with text --section. Headings outside the main content are marked with where they are.",
+        params: &[],
+    },
+    Command {
+        name: "links",
+        help: "List the visible links, buttons, tabs and menu items in the main content (or in the elements a selector matches), numbered, with their text and where they go. Click one with kb ctl click @N. Each is marked if it sits in a nav, aside, header or footer; links that go to the same place are listed once; a search engine's redirect is shown with where it really goes. The numbers last until the next links command, and stop working rather than pointing elsewhere if the page is replaced.",
+        params: &[
+            optional("selector", "CSS selector of the parts of the page to list; body for all of it"),
+            option("match", "TEXT", "list only those whose text or address contains this"),
+            option("limit", "N", "list at most this many (default 60)"),
+        ],
+    },
+    Command {
+        name: "tables",
+        help: "List the page's tables with their size, the heading above each, and their first row; or, given a number, print that table with its cells separated by tabs.",
+        params: &[optional("number", "which table to print, from the list"), option("limit", "N", "print at most this many rows (default 200)")],
+    },
+    Command {
+        name: "images",
+        help: "List the visible images in the main content (or in an element): alt text, shown and file size, caption, source and where each links to. To see one, use screenshot --selector.",
+        params: &[optional("selector", "CSS selector of the part of the page to look in; body for all of it")],
+    },
+    Command {
+        name: "find",
+        help: "Find visible text on the page: lists each place it appears with the words around it and the heading it falls under, and scrolls the window to the first. Not case sensitive.",
+        params: &[required("text", "the words to look for"), option("limit", "N", "show at most this many places (default 10)")],
     },
     Command {
         name: "style",
@@ -124,12 +157,12 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "scroll",
-        help: "Scroll the page: to top, to bottom, to a number of pixels from the top, or until an element is in the middle of the window.",
+        help: "Scroll the page: to top, to bottom, to a number of pixels from the top, or until an element is in the middle of the window. Waits up to a second and says if the page grew, as pages that load more as you scroll do.",
         params: &[required("to", "top, bottom, a number of pixels, or a CSS selector")],
     },
     Command {
         name: "click",
-        help: "Click the middle of an element with the mouse, scrolling it into view first. Fails if the element is off screen or something else covers it. Reports any console errors and dialogs the click causes and, if it leads to another page, waits for that page to load. The mouse stays there, so :hover styles apply until it moves.",
+        help: "Click the middle of an element with the mouse, scrolling it into view first. Fails if the element is off screen or something else covers it. Answers once the page has settled: reports any console errors and dialogs the click caused and a change of address, and if it led to another page, waits for that page to load. The mouse stays there, so :hover styles apply until it moves.",
         params: &[required("selector", SELECTOR)],
     },
     Command {
@@ -147,7 +180,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "type",
-        help: "Focus a text field and type into it. The text is added to what is already there unless --clear is given. Fails if the field is off screen or covered, since a user couldn't click into it. Reports any console errors the typing causes. For a <select> use select; for a checkbox or radio button use click.",
+        help: "Focus a text field and type into it (with :focus as the selector, type into whatever has focus). The text is added to what is already there unless --clear is given. Fails if the field is off screen or covered, since a user couldn't click into it. Reports any console errors the typing causes. For a <select> use select; for a checkbox or radio button use click.",
         params: &[
             required("selector", SELECTOR),
             required("text", "text to type"),
@@ -171,6 +204,7 @@ pub const COMMANDS: &[Command] = &[
             required("selector", "CSS selector; any match counts"),
             option("text", "TEXT", "wait until a matching element's text (or a field's value) contains this"),
             flag("gone", "wait until nothing matches the selector"),
+            option("count", "N", "wait until at least N elements match"),
             option("timeout", "SECONDS", "how long to wait before failing (default 10, at most 60)"),
         ],
     },
@@ -328,7 +362,7 @@ mod tests {
     #[test]
     fn synopsis_and_tool() {
         let wait = find("wait").unwrap();
-        assert_eq!(wait.synopsis(), "wait <selector> [--text TEXT] [--gone] [--timeout SECONDS]");
+        assert_eq!(wait.synopsis(), "wait <selector> [--text TEXT] [--gone] [--count N] [--timeout SECONDS]");
         assert!(wait.describe().contains("--timeout SECONDS    how long to wait"));
         // Saving to a file is the command line's business only.
         let shot = find("screenshot").unwrap();
