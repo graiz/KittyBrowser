@@ -9,7 +9,9 @@ fn usage() -> String {
     let mut text = String::from(
         "usage: kb ctl <command> [arguments]\n\n\
          Controls the kb browser running in a terminal pane: what you do here\n\
-         happens on the page the user is looking at.\n\n",
+         happens on the page the user is looking at. With several kbs running,\n\
+         kb ctl -i N <command> picks one (kb list numbers them); the default is\n\
+         the lowest-numbered.\n\n",
     );
     for command in COMMANDS {
         text.push_str(&format!("  {}\n      {}\n", command.synopsis(), command.help));
@@ -48,7 +50,14 @@ fn looks_like_a_file(address: &str) -> bool {
 }
 
 /// Run `kb ctl` with the words after it. Returns the exit status.
-pub fn run(words: &[String]) -> i32 {
+pub fn run(mut words: &[String]) -> i32 {
+    // Which kb, when several are running.
+    if let [flag, number, rest @ ..] = words {
+        if flag == "-i" || flag == "--instance" {
+            std::env::set_var("KB_INSTANCE", number);
+            words = rest;
+        }
+    }
     let Some(name) = words.first().filter(|word| !matches!(word.as_str(), "-h" | "--help" | "help")) else {
         println!("{}", usage());
         return 0;
@@ -124,6 +133,30 @@ pub fn run(words: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `kb list`: the kbs running now, one per line, numbered. Returns the
+/// exit status.
+pub fn list() -> i32 {
+    let running = control::running();
+    if running.is_empty() {
+        eprintln!("kb: {}", control::NOT_RUNNING);
+        return 1;
+    }
+    for instance in running {
+        std::env::set_var("KB_INSTANCE", instance.to_string());
+        let (page, pane) = match control::request("status", json!({})) {
+            Ok(Output::Text(status)) => {
+                let field = |name: &str| status.lines().find_map(|line| line.strip_prefix(name)).unwrap_or("").to_owned();
+                let url = field("url: ");
+                (if url.is_empty() { "about:blank".to_owned() } else { url }, field("pane: "))
+            }
+            _ => ("(not answering)".to_owned(), String::new()),
+        };
+        // The pane tells kbs apart: an agent knows the one it split.
+        println!("{instance}\t{page}\t{pane}");
+    }
+    0
 }
 
 #[cfg(test)]

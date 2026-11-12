@@ -82,6 +82,9 @@ const LIB: &str = r#"globalThis.__kb = {
     if (/^text=/.test(sel)) throw new Error('nothing visible on the page shows the text ' + JSON.stringify(sel.slice(5)));
     if (sel === ':focus') throw new Error('nothing has focus');
     if (/^[\w' ]+$/.test(sel) && sel.includes(' ')) throw new Error('no element matches ' + sel + '; to find one by its text, use text=' + sel);
+    const frames = document.querySelectorAll('iframe').length;
+    if (frames) throw new Error('no element matches ' + sel + ' (the page has ' + frames + (frames === 1 ? ' iframe' : ' iframes') +
+      ', and kb does not look inside them; open the frame\'s own address to work in it)');
     throw new Error('no element matches ' + sel);
   },
   focused() {
@@ -96,7 +99,7 @@ const LIB: &str = r#"globalThis.__kb = {
   label(el) {
     const img = el.querySelector && el.querySelector('img[alt]');
     return (el.innerText || el.value || el.getAttribute('aria-label') || el.title || (img && img.alt) || '')
-      .replace(/\s+/g, ' ').trim();
+      .replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
   },
   byText(want) {
     const w = want.replace(/\s+/g, ' ').trim().toLowerCase();
@@ -116,8 +119,14 @@ const LIB: &str = r#"globalThis.__kb = {
     // Text split across elements ("Sort by: <b>Best match</b>"): the innermost element holding all of it.
     return this.holding(w).slice(0, 1);
   },
+  // Whether the element is drawn at all: not display: none, hidden or transparent.
+  visible(el) {
+    if (el.checkVisibility) return el.checkVisibility({visibilityProperty: true, opacityProperty: true});
+    return this.shown(el);
+  },
   text(el) {
-    if (el.matches && el.matches('input, textarea, select')) return el.value;
+    if (el.matches && el.matches('select')) return [...el.selectedOptions].map(o => o.label.trim()).join(', ');
+    if (el.matches && el.matches('input, textarea')) return el.value;
     let t = el.innerText || '';
     for (const host of [el, ...el.querySelectorAll('*')].filter(h => h.shadowRoot)) {
       const inner = [...host.shadowRoot.children].map(c => this.text(c)).filter(s => s.trim()).join('\n');
@@ -227,7 +236,7 @@ const LINKS: &str = r#"((sel, limit, match) => {
   if (wanted.length > limit) lines.push('… ' + (wanted.length - limit) + ' more; narrow with a selector or --match, or raise --limit');
   if (region !== document.body && found.length < 5 && !sel)
     lines.push('(few links in the main content; for the whole page: kb ctl links body)');
-  const matching = m ? ', ' + wanted.length + ' matching ' + JSON.stringify(match) : '';
+  const matching = m ? ', ' + wanted.length + ' matching ' + JSON.stringify(match) + ' (numbered as in the full list)' : '';
   return [found.length + ' links and buttons ' + where + matching + '; click one with kb ctl click @N', ...lines].join('\n');
 })"#;
 
@@ -250,6 +259,8 @@ const SECTION: &str = r#"((scope, want) => {
   const heads = within.flatMap(r => [...r.querySelectorAll(tags)]).filter(h => __kb.shown(h));
   const head = heads.find(h => __kb.label(h).toLowerCase() === w) || heads.find(h => __kb.label(h).toLowerCase().includes(w));
   if (!head) throw new Error('no heading reads ' + JSON.stringify(want) + '; see the headings with: kb ctl outline');
+  // Show the user the part being read.
+  head.scrollIntoView({block: 'start', behavior: 'instant'});
   const levelOf = h => +(/^h(\d)$/.exec(h.localName) || [])[1] || +h.getAttribute('aria-level') || 6;
   const level = levelOf(head);
   // Up past wrappers that hold little but the heading (Wikipedia's [edit] links).
@@ -267,6 +278,19 @@ const SECTION: &str = r#"((scope, want) => {
   const body = parts.length ? parts.join('\n') : node.parentElement ? __kb.text(node.parentElement).trim() : '';
   return '[' + __kb.label(head) + ']\n' + (body || '(nothing under this heading)');
 })"#;
+
+const STORAGE: &str = r#"(() => {
+  const show = (name, store) => {
+    let keys = [];
+    try { keys = Object.keys(store); } catch (e) { return [name + ': not available here']; }
+    if (!keys.length) return [name + ': empty'];
+    return [name + ': ' + keys.length + (keys.length === 1 ? ' key' : ' keys'),
+      ...keys.slice(0, 40).map(k => '  ' + k + ' = ' + String(store.getItem(k)).slice(0, 120))];
+  };
+  const cookies = document.cookie ? document.cookie.split('; ').map(c => c.split('=')[0]) : [];
+  return [...show('localStorage', localStorage), ...show('sessionStorage', sessionStorage),
+    'cookies readable by the page: ' + (cookies.length ? cookies.join(', ') : 'none')].join('\n');
+})()"#;
 
 const TABLES: &str = r#"((index, limit) => {
   const tables = __kb.roots().flatMap(r => [...r.querySelectorAll('table')]).filter(t => __kb.shown(t) && t.rows.length > 1);
@@ -366,6 +390,11 @@ const FIND: &str = r#"((want, limit) => {
 const NAME_OF: &str = "(e => '<' + e.localName + (e.id ? '#' + e.id : '') + \
      (e.classList.length ? '.' + [...e.classList].join('.') : '') + '>')";
 
+/// For `locate`, before a click: listen for it, to tell afterwards whether
+/// it reached the page.
+const HEAR: &str = "globalThis.__kbHeard = false; \
+     addEventListener('mousedown', () => { globalThis.__kbHeard = true; }, {capture: true, once: true});";
+
 /// For `locate`, before a click: refuse if the click would land elsewhere.
 const CLICKABLE: &str = "{ const b = el.getBoundingClientRect(); \
      const hit = b.width > 0 && b.height > 0 ? __kb.at(b.left + b.width / 2, b.top + b.height / 2) : el; \
@@ -434,6 +463,17 @@ const CONTENTS: &str = "function() { \
      if (this instanceof NodeList || this instanceof HTMLCollection || Array.isArray(this)) return [...this].map(show); \
      return this; }";
 
+/// `CLICKABLE`, testing the point `at` in the element rather than its middle.
+fn clickable(at: Option<(f64, f64)>) -> String {
+    let template = names(CLICKABLE);
+    match at {
+        Some((x, y)) => template
+            .replace("b.left + b.width / 2", &format!("b.left + {x}"))
+            .replace("b.top + b.height / 2", &format!("b.top + {y}")),
+        None => template,
+    }
+}
+
 /// A template above with `NAME` filled in.
 fn names(template: &str) -> String {
     template.replace("NAME", NAME_OF)
@@ -452,6 +492,8 @@ struct Message {
     text: String,
     /// Where it came from, as `file:line`, when known.
     source: String,
+    /// The full address it came from, for `check --ignore`.
+    url: String,
 }
 
 struct NetRequest {
@@ -505,10 +547,49 @@ impl NetRequest {
 
 /// What to do with an element once its position is known.
 enum Then {
-    Click(String),
+    /// The selector, 1 for a click or 2 for a double click, and where in
+    /// the element (CSS pixels from its top left) if not the middle.
+    Click(String, u32, Option<(f64, f64)>),
     Hover(String),
     Type(String, String),
-    Screenshot,
+    Screenshot(ShotSize),
+}
+
+/// How big a screenshot comes out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ShotSize {
+    /// Image pixels per CSS pixel: 0.5, 1, or the device pixel ratio.
+    Factor(f64),
+    Sharp,
+    /// An image this many pixels wide.
+    Width(f64),
+}
+
+/// The tallest screenshot kb makes; taller ones are scaled down to fit.
+const MAX_SHOT_HEIGHT: f64 = 8000.0;
+
+impl ShotSize {
+    fn parse(text: Option<&str>) -> Result<ShotSize, String> {
+        match text.unwrap_or("normal") {
+            "normal" => Ok(ShotSize::Factor(1.0)),
+            "small" => Ok(ShotSize::Factor(0.5)),
+            "sharp" => Ok(ShotSize::Sharp),
+            width => match width.trim_end_matches("px").parse::<f64>() {
+                Ok(width) if (16.0..=10_000.0).contains(&width) => Ok(ShotSize::Width(width)),
+                _ => Err(format!("{width:?} isn't a size; give small, normal, sharp, or a width in pixels such as 800")),
+            },
+        }
+    }
+
+    /// Image pixels per CSS pixel for a region `width` CSS pixels wide.
+    fn factor(self, width: f64, dpr: f64) -> f64 {
+        match self {
+            ShotSize::Factor(factor) => factor,
+            ShotSize::Sharp => dpr,
+            // Never sharper than the screen: that would only invent pixels.
+            ShotSize::Width(pixels) => (pixels / width.max(1.0)).min(dpr),
+        }
+    }
 }
 
 /// How things stood before an action, to tell what it caused.
@@ -533,6 +614,8 @@ struct LoadWait {
     stopped: Option<Instant>,
     /// Whether this is `check`, for which an unhealthy page is a failure.
     check: bool,
+    /// For `check`: hosts whose errors and failed requests don't count.
+    ignore: Vec<String>,
 }
 
 /// An action that is done but not yet answered: errors it causes take a
@@ -542,6 +625,9 @@ struct Settling {
     message: String,
     since: Baseline,
     at: Instant,
+    /// For a click: the element, to check the page heard the click (unless
+    /// it moved on) and to click it by script if not.
+    verify: Option<String>,
 }
 
 /// A command waiting on a reply from Chrome.
@@ -554,14 +640,30 @@ enum Pending {
     Navigate(Reply),
     /// The element's rectangle is coming; then act on it.
     Rect(Reply, Then),
-    /// The page's full size is coming; then capture all of it.
-    PageSize(Reply),
+    /// The page's layout is coming; then capture the window, or with `true`
+    /// the whole page.
+    PageSize(Reply, ShotSize, bool),
     Image(Reply),
     /// The history list is coming; then step this far through it.
     History(Reply, i64),
     /// Once Chrome confirms the action, answer with this text and whatever
-    /// went wrong on the page since the baseline.
-    Done(Reply, String, Baseline),
+    /// went wrong on the page since the baseline; and if set, first check
+    /// the page heard the click.
+    Done(Reply, String, Baseline, Option<String>),
+    /// For `style --why`: an element by reference, then its DOM node, then
+    /// the rules that match it, then its computed value.
+    StyleOf(Reply, String, String),
+    StyleNode(Reply, String, String),
+    StyleRules(Reply, String, String, u64),
+    StyleValue(Reply, String, String, String),
+    /// Whether the page heard a click is coming.
+    Heard(Settling),
+    /// A click by script is done; answer once the page settles.
+    Clicked(Reply, String, Baseline),
+    /// An element is coming by reference, to list its event listeners.
+    ListenersOf(Reply, String),
+    /// Its event listeners are coming.
+    Listeners(Reply, String),
     /// The page's title is coming; answer with it between these two parts.
     Status(Reply, String, String),
     /// A script that acts on the page is running; answer with what it
@@ -590,7 +692,10 @@ pub struct Page<'a> {
     pub loading: bool,
     /// Viewport in CSS pixels.
     pub viewport: (u32, u32),
+    /// Device pixels per CSS pixel in Chrome's images.
     pub scale: f64,
+    /// Browser zoom, 1 for 100%.
+    pub zoom: f64,
 }
 
 #[derive(Default)]
@@ -618,6 +723,14 @@ pub struct Devtools {
     waits: Vec<Wait>,
     next_wait: u64,
     settling: Vec<Settling>,
+    /// Device pixels per CSS pixel, as of the last screenshot command.
+    dpr: f64,
+    /// The network speed being imitated, if any.
+    throttle: String,
+    /// Whether the DOM and CSS domains are on, for `style --why`.
+    css_on: bool,
+    /// Stylesheets by id: where each came from and the line it starts at.
+    sheets: HashMap<String, (String, u64, bool)>,
     /// How dialogs are answered: dismissed if set, else accepted, and with
     /// this text typed into prompts if given.
     dismiss: bool,
@@ -713,7 +826,7 @@ fn source(url: &str, line: Option<u64>) -> String {
 
 /// `Ctrl+a`, `Shift+Tab`, `Enter`, `x`.
 fn parse_key(name: &str) -> Option<Key> {
-    let mut key = Key { code: KeyCode::Esc, ctrl: false, alt: false, shift: false };
+    let mut key = Key { code: KeyCode::Esc, ctrl: false, alt: false, shift: false, cmd: false };
     let mut parts = name.split('+').peekable();
     while let Some(part) = parts.next() {
         if parts.peek().is_some() {
@@ -759,7 +872,7 @@ fn locate(selector: &str, prepare: &str) -> String {
         "{LIB}\n(() => {{ const el = __kb.get({sel}); \
          el.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}}); \
          let landed = ''; {prepare} const r = el.getBoundingClientRect(); \
-         return {{x: r.x, y: r.y, width: r.width, height: r.height, landed}}; }})()",
+         return {{x: r.x, y: r.y, width: r.width, height: r.height, landed, target: {sel}}}; }})()",
         sel = quote(selector),
     )
 }
@@ -807,6 +920,91 @@ impl Devtools {
         self.park(id, pending);
     }
 
+    /// Explain which rules set `property` on an element, from Chrome's
+    /// matched styles: the winner first, then those it beat.
+    fn cascade(&self, matched: &Value, property: &str) -> String {
+        // (selector, value, important, where), in cascade order: later wins.
+        let mut found: Vec<(String, String, bool, String)> = Vec::new();
+        let declarations = |style: &Value| -> Vec<(String, bool)> {
+            let mut out: Vec<(String, bool)> = Vec::new();
+            // Chrome lists a declaration both as written and as parsed: keep one of each.
+            for p in style["cssProperties"].as_array().into_iter().flatten() {
+                if p["name"] != property || p["disabled"] == true || p["parsedOk"] == false {
+                    continue;
+                }
+                let value = p["value"].as_str().unwrap_or("").trim_end_matches("!important").trim().to_owned();
+                let declaration = (value, p["important"] == true);
+                if !out.contains(&declaration) {
+                    out.push(declaration);
+                }
+            }
+            out
+        };
+        let place = |rule: &Value| -> String {
+            if rule["origin"] == "user-agent" {
+                return "browser default".to_owned();
+            }
+            let line = rule["style"]["range"]["startLine"].as_u64();
+            match rule["styleSheetId"].as_str().and_then(|id| self.sheets.get(id)) {
+                Some((url, start, true)) => {
+                    let page = source(url, None);
+                    let page = if page.is_empty() { String::new() } else { format!(" of {page}") };
+                    format!("a <style>{page}, line {}", line.map_or(1, |l| l + start + 1))
+                }
+                Some((url, start, false)) => source(url, line.map(|l| l + start)),
+                None => "a stylesheet".to_owned(),
+            }
+        };
+        let selector_of = |entry: &Value| -> String {
+            let rule = &entry["rule"];
+            let all = rule["selectorList"]["selectors"].as_array().cloned().unwrap_or_default();
+            let hits: Vec<String> = entry["matchingSelectors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|i| all.get(i.as_u64()? as usize)?["text"].as_str().map(str::to_owned))
+                .collect();
+            if hits.is_empty() { rule["selectorList"]["text"].as_str().unwrap_or("?").to_owned() } else { hits.join(", ") }
+        };
+        for entry in matched["matchedCSSRules"].as_array().into_iter().flatten() {
+            for (value, important) in declarations(&entry["rule"]["style"]) {
+                found.push((selector_of(entry), value, important, place(&entry["rule"])));
+            }
+        }
+        for (value, important) in declarations(&matched["inlineStyle"]) {
+            found.push(("style=\"…\" on the element".to_owned(), value, important, "inline".to_owned()));
+        }
+        if found.is_empty() {
+            // Nothing on the element: say where it would inherit from, if anywhere.
+            for (depth, ancestor) in matched["inherited"].as_array().into_iter().flatten().enumerate() {
+                let rules = ancestor["matchedCSSRules"].as_array().cloned().unwrap_or_default();
+                if let Some((entry, value)) = rules.iter().rev().find_map(|e| Some((e, declarations(&e["rule"]["style"]).pop()?.0))) {
+                    return format!(
+                        "no rule sets it on the element itself; it inherits {value} from {} up \
+                         (the ancestor matched by {}, {})",
+                        plural(depth + 1, "level"),
+                        selector_of(entry),
+                        place(&entry["rule"])
+                    );
+                }
+            }
+            return "no rule sets it on the element or its ancestors: it is the browser's initial value".to_owned();
+        }
+        // !important beats normal; otherwise the later declaration wins.
+        let winner = found.iter().rposition(|d| d.2).unwrap_or(found.len() - 1);
+        let mut lines = Vec::new();
+        let line = |d: &(String, String, bool, String)| {
+            format!("{} {{ {property}: {}{} }}  {}", d.0, d.1, if d.2 { " !important" } else { "" }, d.3)
+        };
+        lines.push(format!("wins:  {}", line(&found[winner])));
+        for (i, d) in found.iter().enumerate().rev() {
+            if i != winner {
+                lines.push(format!("beaten: {}", line(d)));
+            }
+        }
+        lines.join("\n")
+    }
+
     fn baseline(&self) -> Baseline {
         Baseline {
             seq: self.next_seq,
@@ -843,8 +1041,18 @@ impl Devtools {
         out
     }
 
-    fn capture(&mut self, chrome: &mut Chrome, mut params: Value, reply: Reply) {
-        params["format"] = json!("png");
+    /// Capture a region of the page, in CSS pixels from the top of the
+    /// document, at the size asked for.
+    fn capture(&mut self, chrome: &mut Chrome, region: (f64, f64, f64, f64), size: ShotSize, reply: Reply) {
+        let (x, y, width, height) = region;
+        let mut factor = size.factor(width, self.dpr);
+        // Very tall images are refused or shrunk to illegibility by models: keep within bounds.
+        if height * factor > MAX_SHOT_HEIGHT {
+            factor = MAX_SHOT_HEIGHT / height;
+        }
+        // Chrome's clip scale multiplies the device pixel ratio.
+        let clip = json!({"x": x, "y": y, "width": width, "height": height, "scale": factor / self.dpr});
+        let params = json!({"format": "png", "clip": clip, "captureBeyondViewport": true});
         let id = chrome.request("Page.captureScreenshot", params);
         self.park(id, Pending::Image(reply));
     }
@@ -884,12 +1092,22 @@ impl Devtools {
                 "status" => {
                     let (width, height) = page.viewport;
                     let url = if page.url.is_empty() { "about:blank" } else { page.url };
+                    let zoom = match page.zoom {
+                        zoom if (zoom - 1.0).abs() < 0.001 => String::new(),
+                        zoom => format!(", zoomed to {:.0}%", zoom * 100.0),
+                    };
                     let mut rest = format!(
-                        "loading: {}\nviewport: {width}x{height} CSS pixels, scale {}\n{}",
+                        "loading: {}\nviewport: {width}x{height} CSS pixels, scale {}{zoom}\n{}",
                         if page.loading { "yes" } else { "no" },
-                        page.scale,
+                        (page.scale * 1000.0).round() / 1000.0,
                         self.health(),
                     );
+                    if !self.throttle.is_empty() {
+                        let _ = write!(rest, "\nnetwork throttled: {}", self.throttle);
+                    }
+                    if let Ok(pane) = std::env::var("REX_BLOCK") {
+                        let _ = write!(rest, "\npane: {pane}");
+                    }
                     if width < 600 {
                         rest.push_str(
                             "\nnote: the viewport is narrow, so many sites show their phone layout, with menus \
@@ -915,19 +1133,20 @@ impl Devtools {
                     let id = chrome.request("Page.getNavigationHistory", json!({}));
                     self.park(id, Pending::History(reply.clone(), step));
                 }
-                "screenshot" => match arg("selector") {
-                    Some(selector) => {
-                        {
-                        let find = format!("{}({})", script(SHOT_RECT), quote(selector));
-                        self.evaluate(chrome, &find, Pending::Rect(reply.clone(), Then::Screenshot))
+                "screenshot" => {
+                    let size = ShotSize::parse(arg("size"))?;
+                    self.dpr = page.scale;
+                    match arg("selector") {
+                        Some(selector) => {
+                            let find = format!("{}({})", script(SHOT_RECT), quote(selector));
+                            self.evaluate(chrome, &find, Pending::Rect(reply.clone(), Then::Screenshot(size)))
+                        }
+                        None => {
+                            let id = chrome.request("Page.getLayoutMetrics", json!({}));
+                            self.park(id, Pending::PageSize(reply.clone(), size, flag("full")));
+                        }
                     }
-                    }
-                    None if flag("full") => {
-                        let id = chrome.request("Page.getLayoutMetrics", json!({}));
-                        self.park(id, Pending::PageSize(reply.clone()));
-                    }
-                    None => self.capture(chrome, json!({}), reply.clone()),
-                },
+                }
                 "console" => {
                     let mut out = String::new();
                     let (all, errors) = (flag("all"), flag("errors"));
@@ -971,6 +1190,21 @@ impl Devtools {
                     );
                     self.park(id, Pending::Eval(reply.clone()));
                 }
+                "style" if flag("why") => {
+                    let property = arg("property").ok_or("style --why needs a property, such as: kb ctl style h1 color --why")?;
+                    if !self.css_on {
+                        self.css_on = true;
+                        chrome.request("DOM.enable", json!({}));
+                        chrome.request("CSS.enable", json!({}));
+                    }
+                    chrome.request("DOM.getDocument", json!({"depth": 0}));
+                    let selector = need("selector")?;
+                    let id = chrome.request(
+                        "Runtime.evaluate",
+                        json!({"expression": format!("{LIB}\n__kb.get({})", quote(selector))}),
+                    );
+                    self.park(id, Pending::StyleOf(reply.clone(), selector.to_owned(), property.to_owned()));
+                }
                 "style" => {
                     let names = match arg("property") {
                         Some(property) => format!("[{}]", quote(property)),
@@ -985,7 +1219,11 @@ impl Devtools {
                     self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
                 }
                 "text" | "html" => {
-                    let value = if command == "text" { TEXT_OF } else { "el.outerHTML" };
+                    let value = if command == "text" {
+                        "((__kb.visible(el) ? '' : '(hidden: this element is not shown on the page) ') + __kb.text(el))"
+                    } else {
+                        "el.outerHTML"
+                    };
                     let body = match arg("selector") {
                         _ if command == "text" && arg("section").is_some() => format!(
                             "{}({}, {})",
@@ -1069,12 +1307,80 @@ impl Devtools {
                     // Reported through the same wait as a page load: once quiet.
                     let stopped = (!self.busy).then(Instant::now);
                     let deadline = Instant::now() + LOAD_TIMEOUT;
-                    self.loading.push(LoadWait { reply: reply.clone(), said: String::new(), deadline, stopped, check: true });
+                    let ignore = arg("ignore").map_or(Vec::new(), |hosts| {
+                        hosts.split(',').map(|host| host.trim().to_owned()).filter(|host| !host.is_empty()).collect()
+                    });
+                    self.loading.push(LoadWait {
+                        reply: reply.clone(),
+                        said: String::new(),
+                        deadline,
+                        stopped,
+                        check: true,
+                        ignore,
+                    });
+                }
+                "storage" => {
+                    if flag("clear") {
+                        let origin = match self.url.split_once("://") {
+                            Some((scheme, rest)) if scheme.starts_with("http") => {
+                                format!("{scheme}://{}", rest.split(['/', '?', '#']).next().unwrap_or(""))
+                            }
+                            _ => return Err("storage --clear works on http and https pages".to_owned()),
+                        };
+                        let id = chrome.request(
+                            "Storage.clearDataForOrigin",
+                            json!({
+                                "origin": origin,
+                                "storageTypes": "cookies,local_storage,session_storage,indexeddb,cache_storage,service_workers",
+                            }),
+                        );
+                        let message = format!("cleared cookies and storage for {origin}; reload to start the page fresh");
+                        self.park(id, Pending::Done(reply.clone(), message, self.baseline(), None));
+                    } else {
+                        self.evaluate(chrome, STORAGE, Pending::Eval(reply.clone()));
+                    }
+                }
+                "listeners" => {
+                    let selector = need("selector")?;
+                    let id = chrome.request(
+                        "Runtime.evaluate",
+                        json!({"expression": format!("{LIB}\n__kb.get({})", quote(selector))}),
+                    );
+                    self.park(id, Pending::ListenersOf(reply.clone(), selector.to_owned()));
+                }
+                "throttle" => {
+                    // (offline, latency ms, download and upload in kilobits a second)
+                    let (offline, latency, down, up, name) = match need("speed")? {
+                        "off" | "none" => (false, 0.0, -1.0, -1.0, "off"),
+                        "slow" | "slow-3g" => (false, 400.0, 400.0, 400.0, "slow: 400 ms round trips, 400 kbit/s"),
+                        "fast" | "fast-3g" | "4g" => (false, 150.0, 1600.0, 750.0, "fast: 150 ms round trips, 1.6 Mbit/s down"),
+                        "offline" => (true, 0.0, -1.0, -1.0, "offline"),
+                        other => return Err(format!("throttle takes off, slow, fast or offline, not {other:?}")),
+                    };
+                    let bytes = |kbit: f64| if kbit < 0.0 { -1.0 } else { kbit * 1000.0 / 8.0 };
+                    chrome.request(
+                        "Network.emulateNetworkConditions",
+                        json!({
+                            "offline": offline, "latency": latency,
+                            "downloadThroughput": bytes(down), "uploadThroughput": bytes(up),
+                        }),
+                    );
+                    self.throttle = if name == "off" { String::new() } else { name.to_owned() };
+                    text(&reply, format!("network: {name}{}", if name == "off" { "" } else { "; until kb ctl throttle off" }));
                 }
                 "click" => {
                     let selector = need("selector")?;
-                    let then = Then::Click(selector.to_owned());
-                    self.evaluate(chrome, &locate(selector, &names(CLICKABLE)), Pending::Rect(reply.clone(), then));
+                    let at = match arg("at") {
+                        Some(at) => Some(
+                            at.split_once(',')
+                                .and_then(|(x, y)| Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?)))
+                                .ok_or("--at takes X,Y: CSS pixels from the element's top left corner, such as 10,20")?,
+                        ),
+                        None => None,
+                    };
+                    let then = Then::Click(selector.to_owned(), if flag("double") { 2 } else { 1 }, at);
+                    let prepare = format!("{} {HEAR}", clickable(at));
+                    self.evaluate(chrome, &locate(selector, &prepare), Pending::Rect(reply.clone(), then));
                 }
                 "type" => {
                     let selector = need("selector")?;
@@ -1091,7 +1397,7 @@ impl Devtools {
                     let since = self.baseline();
                     chrome.key(&key);
                     let message = format!("pressed {name}");
-                    self.settling.push(Settling { reply: reply.clone(), message, since, at: Instant::now() });
+                    self.settling.push(Settling { reply: reply.clone(), message, since, at: Instant::now(), verify: None });
                 }
                 "wait" => {
                     let timeout = match arg("timeout") {
@@ -1112,8 +1418,9 @@ impl Devtools {
                         }
                         Some(wanted) => (
                             format!("{selector} containing {wanted:?}"),
-                            format!("all.some(el => {TEXT_OF}.includes({}))", quote(wanted)),
+                            format!("all.some(el => __kb.visible(el) && {TEXT_OF}.includes({}))", quote(wanted)),
                         ),
+                        None if flag("visible") => (format!("{selector} to be shown"), "all.some(el => __kb.visible(el))".to_owned()),
                         None => (selector.to_owned(), "all.length > 0".to_owned()),
                     };
                     self.next_wait += 1;
@@ -1170,16 +1477,15 @@ impl Devtools {
                     "debug" => "debug",
                     _ => "log",
                 };
-                let from = source(frame["url"].as_str().unwrap_or(""), frame["lineNumber"].as_u64());
-                self.log(level, parts.join(" "), from);
+                self.log_at(level, parts.join(" "), frame["url"].as_str().unwrap_or(""), frame["lineNumber"].as_u64());
             }
             "Runtime.exceptionThrown" => {
                 let details = &params["exceptionDetails"];
                 let thrown = details["exception"]["description"].as_str().or(details["text"].as_str());
                 let message = thrown.unwrap_or("uncaught exception").lines().next().unwrap_or("").to_owned();
-                let from = source(details["url"].as_str().unwrap_or(""), details["lineNumber"].as_u64());
-                let message = message.strip_prefix("Uncaught ").unwrap_or(&message);
-                self.log("error", format!("Uncaught {message}"), from);
+                let message = message.strip_prefix("Uncaught ").unwrap_or(&message).to_owned();
+                let url = details["url"].as_str().unwrap_or("");
+                self.log_at("error", format!("Uncaught {message}"), url, details["lineNumber"].as_u64());
             }
             "Log.entryAdded" => {
                 let entry = &params["entry"];
@@ -1191,7 +1497,15 @@ impl Devtools {
                 };
                 let url = entry["url"].as_str().unwrap_or("");
                 if !is_favicon(url) {
-                    self.log(level, entry["text"].as_str().unwrap_or("").to_owned(), source(url, entry["lineNumber"].as_u64()));
+                    self.log_at(level, entry["text"].as_str().unwrap_or("").to_owned(), url, entry["lineNumber"].as_u64());
+                }
+            }
+            "CSS.styleSheetAdded" => {
+                let header = &params["header"];
+                if let Some(id) = header["styleSheetId"].as_str() {
+                    let url = header["sourceURL"].as_str().unwrap_or("").to_owned();
+                    let start = header["startLine"].as_f64().unwrap_or(0.0) as u64;
+                    self.sheets.insert(id.to_owned(), (url, start, header["isInline"] == true));
                 }
             }
             "Page.javascriptDialogOpening" => {
@@ -1300,8 +1614,16 @@ impl Devtools {
         if self.console.len() == MAX_CONSOLE {
             self.console.pop_front();
         }
-        self.console.push_back(Message { seq: self.next_seq, level: level.to_owned(), text, source });
+        self.console.push_back(Message { seq: self.next_seq, level: level.to_owned(), text, source, url: String::new() });
         self.next_seq += 1;
+    }
+
+    /// Log a message that came from `url`, at a zero-based `line`.
+    fn log_at(&mut self, level: &str, text: String, url: &str, line: Option<u64>) {
+        self.log(level, text, source(url, line));
+        if let Some(message) = self.console.back_mut() {
+            message.url = url.to_owned();
+        }
     }
 
     fn request(&mut self, id: &Value) -> Option<&mut NetRequest> {
@@ -1326,7 +1648,7 @@ impl Devtools {
 
     fn await_load(&mut self, reply: Reply, said: String) {
         let deadline = Instant::now() + LOAD_TIMEOUT;
-        self.loading.push(LoadWait { reply, said, deadline, stopped: None, check: false });
+        self.loading.push(LoadWait { reply, said, deadline, stopped: None, check: false, ignore: Vec::new() });
     }
 
     /// Tell a command that waited for the page how the load went.
@@ -1345,10 +1667,21 @@ impl Devtools {
             let pending = Pending::Status(wait.reply, before, self.health());
             return self.evaluate(chrome, "document.title", pending);
         }
-        let mut problems: Vec<String> = self.page_console().filter(|m| m.level == "error").map(Message::line).collect();
-        problems.extend(self.requests.iter().filter(|r| r.failed()).map(NetRequest::line));
+        let ignored = |url: &str| wait.ignore.iter().any(|host| url.contains(host.as_str()));
+        let mut problems: Vec<String> = self
+            .page_console()
+            .filter(|m| m.level == "error" && !ignored(&m.url) && !wait.ignore.iter().any(|host| m.text.contains(host.as_str())))
+            .filter(|m| {
+                // "Failed to load resource" names no host; it goes with an ignored request.
+                !(m.text.starts_with("Failed to load resource")
+                    && self.requests.iter().any(|r| r.failed() && ignored(&r.url) && !m.source.is_empty() && r.url.contains(m.source.split(':').next().unwrap_or("\u{0}"))))
+            })
+            .map(Message::line)
+            .collect();
+        problems.extend(self.requests.iter().filter(|r| r.failed() && !ignored(&r.url)).map(NetRequest::line));
         if problems.is_empty() && refused.is_empty() {
-            text(&wait.reply, format!("ok: {}, no console errors, no failed requests", self.url));
+            let except = if wait.ignore.is_empty() { String::new() } else { format!(" (ignoring {})", wait.ignore.join(", ")) };
+            text(&wait.reply, format!("ok: {}, no console errors, no failed requests{except}", self.url));
         } else {
             if let Some(status) = document.and_then(|document| document.status).filter(|status| *status >= 400) {
                 problems.insert(0, format!("the server answered {status} for the page itself"));
@@ -1420,44 +1753,158 @@ impl Devtools {
                             "Input.dispatchMouseEvent",
                             json!({"type": "mouseMoved", "x": x + width / 2.0, "y": y + height / 2.0}),
                         );
-                        self.park(id, Pending::Done(reply, format!("the mouse is over {selector}"), since));
+                        self.park(id, Pending::Done(reply, format!("the mouse is over {selector}"), since, None));
                     }
-                    Then::Click(selector) => {
+                    Then::Click(selector, count, at) => {
                         let since = self.baseline();
-                        let (x, y) = (x + width / 2.0, y + height / 2.0);
+                        let (x, y) = match at {
+                            Some((dx, dy)) => (x + dx, y + dy),
+                            None => (x + width / 2.0, y + height / 2.0),
+                        };
                         // Clicking a container hits whatever is in its middle.
                         let selector = match rect["landed"].as_str() {
                             Some(inner) if !inner.is_empty() => format!("{selector}; the click landed on {inner} inside it"),
                             _ => selector,
                         };
                         chrome.mouse("mouseMoved", x, y, "none", 0, 0, 0);
-                        chrome.mouse("mousePressed", x, y, "left", 1, 1, 0);
+                        // A double click is two clicks, the second counted as such.
+                        for click in 1..count {
+                            chrome.mouse("mousePressed", x, y, "left", 1, click, 0);
+                            chrome.mouse("mouseReleased", x, y, "left", 0, click, 0);
+                        }
+                        chrome.mouse("mousePressed", x, y, "left", 1, count, 0);
                         let id = chrome.request(
                             "Input.dispatchMouseEvent",
                             json!({
                                 "type": "mouseReleased", "x": x, "y": y, "button": "left",
-                                "buttons": 0, "clickCount": 1,
+                                "buttons": 0, "clickCount": count,
                             }),
                         );
-                        self.park(id, Pending::Done(reply, format!("clicked {selector}"), since));
+                        let verb = if count == 2 { "double-clicked" } else { "clicked" };
+                        let target = rect["target"].as_str().map(str::to_owned);
+                        self.park(id, Pending::Done(reply, format!("{verb} {selector}"), since, target));
                     }
                     Then::Type(selector, typed) => {
                         let since = self.baseline();
                         let id = chrome.request("Input.insertText", json!({"text": typed}));
-                        self.park(id, Pending::Done(reply, format!("typed into {selector}"), since));
+                        self.park(id, Pending::Done(reply, format!("typed into {selector}"), since, None));
                     }
-                    Then::Screenshot => {
-                        let clip = json!({"x": x, "y": y, "width": width, "height": height, "scale": 1});
-                        self.capture(chrome, json!({"clip": clip, "captureBeyondViewport": true}), reply);
-                    }
+                    Then::Screenshot(size) => self.capture(chrome, (x, y, width, height), size, reply),
                 }
             }
-            Pending::PageSize(reply) => match result {
+            Pending::Heard(action) => match evaluated(result).map(|object| object["value"] == false) {
+                Ok(true) => {
+                    // Chrome sometimes stops passing mouse input to a page after a form
+                    // submission. Click it the way a script would, and say so.
+                    let target = action.verify.clone().unwrap_or_default();
+                    let script = format!(
+                        "{LIB}\n(() => {{ const el = __kb.get({}); \
+                         for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) \
+                           el.dispatchEvent(new (type.startsWith('pointer') ? PointerEvent : MouseEvent)(type, \
+                             {{bubbles: true, cancelable: true, composed: true, view: window, button: 0}})); \
+                         el.click(); return 'done'; }})()",
+                        quote(&target)
+                    );
+                    let message = format!(
+                        "{} (the mouse click didn't reach the page, which Chrome sometimes does after a form \
+                         submission, so kb clicked it with JavaScript instead)",
+                        action.message
+                    );
+                    let since = action.since.clone();
+                    let id = chrome.request(
+                        "Runtime.evaluate",
+                        json!({"expression": script, "returnByValue": true, "userGesture": true}),
+                    );
+                    self.park(id, Pending::Clicked(action.reply, message, since));
+                }
+                _ => text(&action.reply, format!("{}{}", action.message, self.fallout(&action.since))),
+            },
+            Pending::StyleOf(reply, selector, property) => match evaluated(result) {
+                Ok(object) => {
+                    let id = chrome.request("DOM.requestNode", json!({"objectId": object["objectId"]}));
+                    self.park(id, Pending::StyleNode(reply, selector, property));
+                }
+                Err(error) => fail(&reply, error),
+            },
+            Pending::StyleNode(reply, selector, property) => match result.map(|r| r["nodeId"].as_u64()) {
+                Ok(Some(node)) => {
+                    let id = chrome.request("CSS.getMatchedStylesForNode", json!({"nodeId": node}));
+                    self.park(id, Pending::StyleRules(reply, selector, property, node));
+                }
+                Ok(None) => fail(&reply, "Chrome couldn't find that element's node"),
+                Err(error) => fail(&reply, error),
+            },
+            Pending::StyleRules(reply, selector, property, node) => match result {
+                Ok(matched) => {
+                    let explained = self.cascade(matched, &property);
+                    let id = chrome.request("CSS.getComputedStyleForNode", json!({"nodeId": node}));
+                    self.park(id, Pending::StyleValue(reply, selector, property, explained));
+                }
+                Err(error) => fail(&reply, error),
+            },
+            Pending::StyleValue(reply, selector, property, explained) => {
+                let value = result
+                    .ok()
+                    .and_then(|r| r["computedStyle"].as_array().cloned())
+                    .and_then(|all| all.into_iter().find(|p| p["name"] == property.as_str()))
+                    .and_then(|p| p["value"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "(not a property Chrome knows)".to_owned());
+                text(&reply, format!("{property} on {selector}: {value}\n{explained}"));
+            }
+            Pending::Clicked(reply, message, since) => match evaluated(result) {
+                Ok(_) => self.settling.push(Settling { reply, message, since, at: Instant::now(), verify: None }),
+                Err(error) => fail(&reply, error),
+            },
+            Pending::ListenersOf(reply, selector) => match evaluated(result) {
+                Ok(object) => {
+                    let id = chrome.request("DOMDebugger.getEventListeners", json!({"objectId": object["objectId"]}));
+                    self.park(id, Pending::Listeners(reply, selector));
+                }
+                Err(error) => fail(&reply, error),
+            },
+            Pending::Listeners(reply, selector) => match result {
+                Err(error) => fail(&reply, error),
+                Ok(result) => {
+                    let listeners = result["listeners"].as_array().cloned().unwrap_or_default();
+                    if listeners.is_empty() {
+                        return text(
+                            &reply,
+                            format!(
+                                "no event listeners on {selector} itself; one on an ancestor may handle its events \
+                                 (try kb ctl listeners body, or a parent)"
+                            ),
+                        );
+                    }
+                    let mut out = format!("{} on {selector}:", plural(listeners.len(), "event listener"));
+                    for listener in &listeners {
+                        let handler = listener["handler"]["description"].as_str().unwrap_or("");
+                        let handler: String = handler.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(90).collect();
+                        let mut flags = Vec::new();
+                        if listener["useCapture"] == true {
+                            flags.push("capture");
+                        }
+                        if listener["once"] == true {
+                            flags.push("once");
+                        }
+                        let flags = if flags.is_empty() { String::new() } else { format!(" ({})", flags.join(", ")) };
+                        let _ = write!(out, "\n{}{flags}: {handler}", listener["type"].as_str().unwrap_or("?"));
+                    }
+                    text(&reply, out);
+                }
+            },
+            Pending::PageSize(reply, size, full) => match result {
                 Err(error) => fail(&reply, error),
                 Ok(metrics) => {
-                    let size = &metrics["cssContentSize"];
-                    let clip = json!({"x": 0, "y": 0, "width": size["width"], "height": size["height"], "scale": 1});
-                    self.capture(chrome, json!({"clip": clip, "captureBeyondViewport": true}), reply);
+                    let number = |value: &Value| value.as_f64().unwrap_or(0.0);
+                    let region = if full {
+                        let page = &metrics["cssContentSize"];
+                        (0.0, 0.0, number(&page["width"]), number(&page["height"]))
+                    } else {
+                        let view = &metrics["cssVisualViewport"];
+                        let (x, y) = (number(&view["pageX"]), number(&view["pageY"]));
+                        (x, y, number(&view["clientWidth"]), number(&view["clientHeight"]))
+                    };
+                    self.capture(chrome, region, size, reply);
                 }
             },
             Pending::Image(reply) => {
@@ -1482,8 +1929,8 @@ impl Devtools {
                     None => fail(&reply, format!("there is no {} page to go to", if step < 0 { "earlier" } else { "later" })),
                 }
             }
-            Pending::Done(reply, message, since) => match result {
-                Ok(_) => self.settling.push(Settling { reply, message, since, at: Instant::now() }),
+            Pending::Done(reply, message, since, verify) => match result {
+                Ok(_) => self.settling.push(Settling { reply, message, since, at: Instant::now(), verify }),
                 Err(error) => fail(&reply, error),
             },
             Pending::Status(reply, before, after) => {
@@ -1495,7 +1942,9 @@ impl Devtools {
                 text(&reply, out);
             }
             Pending::Acted(reply, since) => match evaluated(result) {
-                Ok(object) => self.settling.push(Settling { reply, message: show(object), since, at: Instant::now() }),
+                Ok(object) => {
+                    self.settling.push(Settling { reply, message: show(object), since, at: Instant::now(), verify: None })
+                }
                 Err(error) => fail(&reply, error),
             },
             Pending::WaitCheck(id) => {
@@ -1561,6 +2010,9 @@ impl Devtools {
                 if let Some(wait) = self.loading.last_mut() {
                     wait.stopped = stopped;
                 }
+            } else if action.verify.is_some() && self.url == action.since.url {
+                // The same page: make sure the click reached it.
+                self.evaluate(chrome, "globalThis.__kbHeard", Pending::Heard(action));
             } else {
                 text(&action.reply, format!("{}{}", action.message, self.fallout(&action.since)));
             }
@@ -1587,6 +2039,17 @@ impl Devtools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shot_sizes() {
+        assert_eq!(ShotSize::parse(None).unwrap().factor(1280.0, 2.0), 1.0);
+        assert_eq!(ShotSize::parse(Some("small")).unwrap().factor(1280.0, 2.0), 0.5);
+        assert_eq!(ShotSize::parse(Some("sharp")).unwrap().factor(1280.0, 2.0), 2.0);
+        assert_eq!(ShotSize::parse(Some("640")).unwrap().factor(1280.0, 2.0), 0.5);
+        // Asking for more pixels than the screen has gives the screen's.
+        assert_eq!(ShotSize::parse(Some("5000px")).unwrap().factor(1280.0, 2.0), 2.0);
+        assert!(ShotSize::parse(Some("huge")).is_err());
+    }
 
     #[test]
     fn bot_checks() {

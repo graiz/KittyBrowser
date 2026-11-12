@@ -38,6 +38,12 @@ const TICK: Duration = Duration::from_millis(100);
 const WHEEL_STEP: f64 = 60.0;
 /// Presses this close in time and place count as a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How long after the last key, click or command the page counts as in use.
+const ACTIVE: Duration = Duration::from_millis(500);
+/// The least time between frames when the page isn't in use, and when the
+/// pane doesn't have focus either.
+const IDLE_GAP: Duration = Duration::from_millis(100);
+const UNFOCUSED_GAP: Duration = Duration::from_millis(500);
 /// Cell size to assume, in device pixels, until the terminal tells us.
 const FALLBACK_CELL: (u32, u32) = (16, 34);
 
@@ -63,6 +69,10 @@ struct App {
     reported_cell: Option<(u32, u32)>,
     pixel_mouse: bool,
     bar: AddressBar,
+    /// The find field, while it is open in the address bar's place.
+    find: Option<AddressBar>,
+    /// What was last searched for, offered again next time.
+    find_text: String,
     history: History,
     devtools: Devtools,
     /// The page's viewport in CSS pixels.
@@ -76,13 +86,50 @@ struct App {
     loading: bool,
     /// The newest frame, kept to redraw at a new size.
     frame: Option<String>,
+    /// Whether the terminal reads frames from temporary files.
+    by_file: bool,
+    /// The last frame written whole to a file.
+    last_file: Option<std::path::PathBuf>,
+    /// The page as tiles, when it is drawn that way.
+    tiles: graphics::Tiles,
+    /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
+    /// so the page reflows as in a desktop browser and stays sharp.
+    zoom: f64,
+    /// The id of the request for the page's width, after Ctrl+0.
+    fit_request: Option<u64>,
+    /// Whether the help is shown, and where it was last drawn.
+    help: bool,
+    help_rect: Option<ui::Rect>,
+    /// This kb's number among those running, for `kb ctl -i`.
+    instance: u32,
+    /// The logo, until the first page is ready to draw.
+    splash: Option<crate::splash::Splash>,
+    /// Whether a page other than the blank one has been committed, so that
+    /// its frames replace the logo.
+    committed: bool,
+    /// When kb started, to turn the loading spinner by.
+    started: Instant,
+    /// Whether the pane has keyboard focus, as far as the terminal says.
+    focused: bool,
+    /// When the user or an agent last did something.
+    last_input: Instant,
+    /// When Chrome was last told it may send another frame.
+    last_ack: Instant,
     /// Mouse buttons held, as a DevTools mask.
     buttons: u32,
     last_press: Option<(Instant, f64, f64, u32)>,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
-    let profile = crate::data_dir()?.join("profile");
+    // Before anything is written to the terminal: a failure after that
+    // leaves the terminal's replies to our queries for the shell to read.
+    let claim = control::claim()?;
+    // Chrome won't share a profile between processes, so each kb running
+    // beside the first has its own.
+    let profile = crate::data_dir()?.join(match claim.instance {
+        1 => "profile".to_owned(),
+        n => format!("profile-{n}"),
+    });
     std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
     let window = size::window().ok_or("can't read the terminal size")?;
 
@@ -92,16 +139,18 @@ pub fn run(options: Options) -> Result<(), String> {
         term::leave();
         hook(info);
     }));
-    let result = browse(options, &profile, window);
+    let socket = claim.socket.clone();
+    let result = browse(options, &profile, window, claim);
+    let _ = std::fs::remove_file(socket);
     term::leave();
     result
 }
 
-fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result<(), String> {
+fn browse(options: Options, profile: &std::path::Path, window: Window, claim: control::Claim) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
-    let socket = control::socket_path()?;
+    let instance = claim.instance;
     let commands = tx.clone();
-    control::listen(&socket, move |request| commands.send(Msg::Control(request)).is_ok())?;
+    claim.listen(move |request| commands.send(Msg::Control(request)).is_ok());
     let input = tx.clone();
     std::thread::spawn(move || {
         let mut parser = Parser::default();
@@ -141,7 +190,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
         reported_cell: size::rex_cell(),
         pixel_mouse: false,
         bar: AddressBar::default(),
-        history: History::load(profile.with_file_name("history")),
+        find: None,
+        find_text: String::new(),
+        history: History::load(crate::data_dir()?.join("history")),
         devtools: Devtools::default(),
         viewport: (0, 0),
         fixed: None,
@@ -149,10 +200,29 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
         url: String::new(),
         loading: false,
         frame: None,
+        by_file: false,
+        last_file: None,
+        tiles: graphics::Tiles::default(),
+        zoom: 1.0,
+        fit_request: None,
+        help: false,
+        help_rect: None,
+        instance,
+        splash: crate::splash::Splash::new(),
+        committed: false,
+        started: Instant::now(),
+        focused: true,
+        last_input: Instant::now(),
+        last_ack: Instant::now(),
         buttons: 0,
         last_press: None,
     };
     app.layout();
+    // KB_TRANSFER=pty keeps frames on the pty, should files misbehave.
+    if std::env::var("KB_TRANSFER").as_deref() != Ok("pty") {
+        graphics::ask_about_files();
+    }
+    app.chrome.hold_acks();
     app.chrome.start_screencast();
     match options.url.as_deref().and_then(ui::normalize_url) {
         Some(url) => app.navigate(&url),
@@ -163,7 +233,15 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
     let mut checked = Instant::now();
     let result = loop {
         let mut messages = Vec::new();
-        match rx.recv_timeout(TICK) {
+        // Wake in time to let Chrome send its next frame.
+        let mut wait = match app.chrome.ack_pending() {
+            true => app.frame_gap().saturating_sub(app.last_ack.elapsed()).min(TICK),
+            false => TICK,
+        };
+        if let Some(splash_wait) = app.splash.as_ref().filter(|_| app.by_file).and_then(|splash| splash.wait()) {
+            wait = wait.min(splash_wait);
+        }
+        match rx.recv_timeout(wait) {
             Ok(message) => messages.push(message),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Ok(()),
@@ -173,6 +251,11 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
         let (mut new_frame, mut redraw) = (false, false);
         let mut quit = None;
         let count = messages.len();
+        if messages.iter().any(|message| {
+            matches!(message, Msg::Control(_) | Msg::Term(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))
+        }) {
+            app.last_input = Instant::now();
+        }
         let mut messages = messages.into_iter().enumerate().peekable();
         while let Some((index, message)) = messages.next() {
             match message {
@@ -191,11 +274,19 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
                         quit = Some(Ok(()));
                         break;
                     }
+                    // Any key closes the help, and does nothing else.
+                    if app.help {
+                        app.close_help();
+                        continue;
+                    }
                     app.on_key(key);
                     redraw = true;
                 }
                 Msg::Term(Event::Paste(text)) => {
-                    if app.bar.focused() {
+                    if app.find.is_some() {
+                        app.find_edit(|field| field.insert(&text));
+                        redraw = true;
+                    } else if app.bar.focused() {
                         app.bar.insert(&text);
                         redraw = true;
                     } else {
@@ -210,6 +301,18 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
                         new_frame = true;
                     }
                 }
+                Msg::Term(Event::Graphics { id, ok }) => {
+                    log(format_args!("graphics reply for image {id}: {ok}"));
+                    if id == graphics::FILE_QUERY_ID {
+                        app.by_file = ok;
+                        // If it said no, it didn't delete the file either.
+                        let _ = std::fs::remove_file(graphics::temp_path(0));
+                    }
+                }
+                Msg::Term(Event::Focus(focused)) => {
+                    log(format_args!("focused: {focused}"));
+                    app.focused = focused;
+                }
                 Msg::Term(Event::PixelMouse(on)) => {
                     log(format_args!("pixel mouse: {on}"));
                     app.pixel_mouse = on;
@@ -219,15 +322,26 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
                     if request.command == "viewport" {
                         // The one command about the pane rather than the page.
                         let _ = request.reply.send(app.set_viewport(request.args["size"].as_str().unwrap_or("")));
-                        term::write(b"\x1b[2J");
-                        term::write(graphics::DELETE);
+                        app.clear();
                         new_frame = true;
                         continue;
                     }
-                    let page = Page { url: &app.url, loading: app.loading, viewport: app.viewport, scale: app.scale };
+                    let page = Page {
+                        url: &app.url,
+                        loading: app.loading,
+                        viewport: app.viewport,
+                        scale: app.scale,
+                        zoom: app.zoom,
+                    };
                     app.devtools.command(request, &mut app.chrome, page);
                 }
                 Msg::Chrome(message) => {
+                    if app.fit_request.is_some() && message["id"].as_u64() == app.fit_request {
+                        app.fit_request = None;
+                        app.fit(message["result"]["result"]["value"].as_f64());
+                        new_frame = true;
+                        continue;
+                    }
                     app.devtools.observe(&message, &mut app.chrome);
                     match app.chrome.handle(message) {
                     Some(PageEvent::Frame(png)) => {
@@ -236,13 +350,17 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
                         // A frame rendered for another size (the pane's
                         // first guess, or the size before a resize) would be
                         // stretched to fill the pane: wait for the right one.
-                        if fits {
+                        // Some pages repaint without changing: the same
+                        // frame again is nothing to draw.
+                        if fits && app.frame.as_deref() != Some(png.as_str()) {
                             app.frame = Some(png);
-                            new_frame = true;
+                            // The blank page that comes first stays under the logo.
+                            new_frame = app.splash.is_none() || app.committed;
                         }
                     }
                     Some(PageEvent::Url(url)) => {
                         log(format_args!("url {url}"));
+                        app.committed |= url != "about:blank";
                         app.history.record(&url);
                         app.url = if url == "about:blank" { String::new() } else { url };
                         if !app.bar.focused() {
@@ -273,6 +391,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
 
         if checked.elapsed() >= TICK {
             checked = Instant::now();
+            // The spinner in the bar turns while a page loads.
+            redraw |= app.loading;
             app.history.save_if_due();
             app.devtools.tick(&mut app.chrome);
             if let Some(window) = size::window().filter(|w| *w != app.window) {
@@ -282,20 +402,32 @@ fn browse(options: Options, profile: &std::path::Path, window: Window) -> Result
                 }
                 app.layout();
                 // Whatever was on screen is at the old size: start clean.
-                term::write(b"\x1b[2J");
-                term::write(graphics::DELETE);
+                app.clear();
                 new_frame = true;
             }
         }
         if new_frame || redraw {
             app.draw(new_frame);
         }
+        if app.by_file && app.splash.as_ref().is_some_and(|splash| splash.due()) {
+            app.draw_splash();
+        }
+        // One frame per gap, or all of them while the page is in use.
+        while app.chrome.ack_pending() && app.last_ack.elapsed() >= app.frame_gap() {
+            app.chrome.ack();
+            if !app.frame_gap().is_zero() {
+                app.last_ack = Instant::now();
+            }
+        }
     };
     app.history.save();
+    if let Some(path) = app.last_file.take() {
+        let _ = std::fs::remove_file(path);
+    }
     app.chrome.close();
-    let _ = std::fs::remove_file(&socket);
     result
 }
+
 
 impl App {
     /// One cell in device pixels.
@@ -306,6 +438,29 @@ impl App {
         } else {
             self.reported_cell.unwrap_or(FALLBACK_CELL)
         }
+    }
+
+    /// The least time between frames from Chrome. None while someone is
+    /// using the page; otherwise a page that moves by itself gets ten frames
+    /// a second, or two if the pane isn't the one in use, and Chrome is
+    /// spared drawing and encoding the rest.
+    fn frame_gap(&self) -> Duration {
+        if self.last_input.elapsed() < ACTIVE {
+            Duration::ZERO
+        } else if self.focused {
+            IDLE_GAP
+        } else {
+            UNFOCUSED_GAP
+        }
+    }
+
+    /// Wipe the screen, images included. The help, if shown, is drawn
+    /// again with the next frame.
+    fn clear(&mut self) {
+        term::write(b"\x1b[2J");
+        term::write(graphics::DELETE);
+        self.tiles.forget();
+        self.help_rect = None;
     }
 
     fn page_rows(&self) -> u16 {
@@ -322,7 +477,7 @@ impl App {
             Some((width, height)) => {
                 // Shown at its own size if it fits, else shrunk to fit,
                 // keeping its shape as nearly as whole cells allow.
-                let (frame_w, frame_h) = (width as f64 * self.scale, height as f64 * self.scale);
+                let (frame_w, frame_h) = (width as f64 * self.page_scale(), height as f64 * self.page_scale());
                 let fit = (space_w / frame_w).min(space_h / frame_h).min(1.0);
                 let cells = |pixels: f64, cell: u32, most: u16| ((pixels * fit / cell as f64).round() as u16).clamp(1, most);
                 self.shown = (cells(frame_w, cell_w, cols), cells(frame_h, cell_h, rows));
@@ -330,7 +485,9 @@ impl App {
             }
             None => {
                 self.shown = (cols, rows);
-                (space_w / self.scale, space_h / self.scale)
+                // Rounded up, so a frame always covers the cells and can be
+                // cut into tiles.
+                ((space_w / self.page_scale()).ceil(), (space_h / self.page_scale()).ceil())
             }
         };
         log(format_args!(
@@ -341,7 +498,140 @@ impl App {
         if self.frame.as_deref().is_some_and(|png| !self.fits(png)) {
             self.frame = None;
         }
-        self.chrome.resize(self.viewport.0, self.viewport.1);
+        self.chrome.resize(self.viewport.0, self.viewport.1, self.scale);
+    }
+
+    /// Pane pixels per CSS pixel, zoom included.
+    fn page_scale(&self) -> f64 {
+        self.scale * self.zoom
+    }
+
+    /// Step the zoom up or down through the levels desktop browsers use.
+    fn step_zoom(&mut self, up: bool) {
+        const LEVELS: [f64; 15] = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+        let next = match up {
+            true => LEVELS.iter().find(|level| **level > self.zoom + 0.001),
+            false => LEVELS.iter().rev().find(|level| **level < self.zoom - 0.001),
+        };
+        if let Some(level) = next {
+            self.set_zoom(*level);
+        }
+    }
+
+    fn set_zoom(&mut self, zoom: f64) {
+        self.zoom = zoom;
+        self.layout();
+        self.clear();
+    }
+
+    /// Ctrl+0: back to 100%, then ask how wide the page is there, so that
+    /// `fit` can zoom out a page too wide for the pane.
+    fn zoom_to_fit(&mut self) {
+        self.set_zoom(1.0);
+        self.fit_request = Some(self.chrome.evaluate_value("document.documentElement.scrollWidth"));
+    }
+
+    /// Zoom out so a page `width` CSS pixels wide fits the pane, if it is
+    /// wider than the pane at 100%.
+    fn fit(&mut self, width: Option<f64>) {
+        let Some(width) = width.filter(|width| *width > self.viewport.0 as f64 + 1.0) else { return };
+        let zoom = (self.viewport.0 as f64 / width).max(0.25);
+        log(format_args!("zoom to fit a page {width} wide: {zoom}"));
+        self.set_zoom(zoom);
+    }
+
+    /// The help: keys, and what kb knows about the pane and page.
+    fn help_lines(&self) -> Vec<String> {
+        let mut banner = Vec::new();
+        if ui::ART.iter().all(|line| line.chars().count() + 4 <= self.window.cols as usize) {
+            banner.extend(ui::ART.iter().map(|line| format!("{}{line}", ui::ART_LINE)));
+            banner.push(String::new());
+        }
+        let mut lines = Vec::new();
+        lines.push(format!("{}kb {}: a browser in your terminal", ui::TITLE_LINE, env!("CARGO_PKG_VERSION")));
+        lines.push(String::new());
+        for (keys, does) in [
+            ("Ctrl+L, Cmd+L", "edit the address"),
+            ("Ctrl+F", "find on the page; Enter, Shift+Enter: next, previous"),
+            ("Ctrl+G", "find the next match again"),
+            ("Ctrl+[  Ctrl+]", "back, forward (also Alt+Left, Alt+Right)"),
+            ("Ctrl+R", "reload"),
+            ("Ctrl+=  Ctrl+-", "zoom in, out"),
+            ("Ctrl+0", "zoom to 100%, or out until the page fits"),
+            ("Ctrl+/", "this help"),
+            ("Ctrl+Q", "quit"),
+        ] {
+            lines.push(format!("{keys:<17}{does}"));
+        }
+        let mut info = vec![String::new()];
+        let (cell_w, cell_h) = self.cell();
+        for (name, value) in [
+            ("page", if self.url.is_empty() { "(none)".to_owned() } else { self.url.clone() }),
+            ("zoom", format!("{:.0}%", self.zoom * 100.0)),
+            ("viewport", format!("{}x{} CSS pixels", self.viewport.0, self.viewport.1)),
+            ("pane", format!("{}x{} cells of {cell_w}x{cell_h} pixels", self.window.cols, self.window.rows)),
+            ("frames", if self.by_file { "by file, changed blocks only".to_owned() } else { "through the pty".to_owned() }),
+            ("agents", format!("kb ctl -i {} ...   (kb ctl --help)", self.instance)),
+        ] {
+            info.push(format!("\t{name:<10}{value}"));
+        }
+        let footer = [String::new(), "\tAny key closes this.                                 by @graiz".to_owned()];
+
+        // In a short pane the banner goes first, then the details, so the
+        // keys and the footer always show.
+        let room = self.page_rows().saturating_sub(2) as usize;
+        let mut all = Vec::new();
+        for (with_banner, with_info) in [(true, true), (false, true), (false, false)] {
+            all.clear();
+            if with_banner {
+                all.extend(banner.iter().cloned());
+            }
+            all.extend(lines.iter().cloned());
+            if with_info {
+                all.extend(info.iter().cloned());
+            }
+            all.extend(footer.iter().cloned());
+            if all.len() <= room {
+                break;
+            }
+        }
+        all
+    }
+
+    fn draw_splash(&mut self) {
+        let cell = self.cell();
+        let (cols, rows) = (self.window.cols, self.page_rows());
+        let Some(splash) = &mut self.splash else { return };
+        let mut out = b"\x1b[?2026h".to_vec();
+        splash.draw(&mut out, cols, rows, cell, 2);
+        // The splash paints the pane black, help and all.
+        self.help_rect = None;
+        self.render_help(&mut out);
+        out.extend_from_slice(b"\x1b[?2026l");
+        term::write(&out);
+    }
+
+    /// Draw the help box, if it is open, over whatever is below the bar.
+    fn render_help(&mut self, out: &mut Vec<u8>) {
+        if !self.help {
+            return;
+        }
+        let lines = self.help_lines();
+        if let Some(old) = self.help_rect.take() {
+            ui::blank(out, old);
+        }
+        self.help_rect = Some(ui::render_box(out, &lines, self.window.cols, self.window.rows));
+        // The box, not the address field, has the user's attention.
+        out.extend_from_slice(b"\x1b[?25l");
+    }
+
+    fn close_help(&mut self) {
+        self.help = false;
+        if let Some(rect) = self.help_rect.take() {
+            let mut out = Vec::new();
+            ui::blank(&mut out, rect);
+            term::write(&out);
+        }
     }
 
     /// Carry out `kb ctl viewport`: lay the page out at a given size, or go
@@ -367,7 +657,7 @@ impl App {
         self.layout();
         let (width, height) = self.viewport;
         let (cell_w, _) = self.cell();
-        let percent = (self.shown.0 as f64 * cell_w as f64 / (width as f64 * self.scale) * 100.0).round();
+        let percent = (self.shown.0 as f64 * cell_w as f64 / (width as f64 * self.page_scale()) * 100.0).round();
         Ok(Output::Text(match self.fixed {
             Some(_) if percent < 99.0 => {
                 format!("the viewport is {width}x{height} CSS pixels, shown at {percent}% to fit the pane")
@@ -382,6 +672,9 @@ impl App {
     fn fits(&self, png: &str) -> bool {
         let Some((width, height)) = graphics::png_size(png) else { return false };
         let close = |actual: u32, css: u32| {
+            // Chrome renders at its launch scale whatever the zoom: zoomed
+            // in, the frame has fewer pixels than the cells and is stretched
+            // to fill them; zoomed out, more, and is shrunk.
             let expected = css as f64 * self.scale;
             (actual as f64 - expected).abs() <= (expected / 100.0).max(2.0)
         };
@@ -398,22 +691,149 @@ impl App {
     fn draw(&mut self, frame: bool) {
         // Synchronized update, so the terminal shows the result in one go.
         let mut out = b"\x1b[?2026h".to_vec();
-        if let Some(png) = self.frame.as_deref().filter(|_| frame) {
-            out.extend_from_slice(b"\x1b[2;1H");
-            graphics::put_png(&mut out, png, self.shown.0, self.shown.1);
+        let cell = self.cell();
+        let frame = frame && (self.splash.is_none() || self.committed);
+        if frame && self.splash.take().is_some() {
+            crate::splash::Splash::remove(&mut out, 2);
         }
-        ui::render_bar(&mut out, &mut self.bar, self.window.cols as usize, self.loading);
+        if let Some(png) = self.frame.as_deref().filter(|_| frame) {
+            let (cols, rows) = self.shown;
+            let pixels = match self.by_file {
+                true => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes)),
+                false => None,
+            };
+            // Only what changed, when the frame lines up with the cells;
+            // otherwise (a fixed viewport, or a terminal that won't read
+            // files) one image scaled to fit.
+            let mut drawn = false;
+            let pixels = match pixels {
+                Some(pixels) if self.fixed.is_none() && graphics::Tiles::fits(&pixels, cols, rows, cell) => {
+                    if !self.tiles.active() {
+                        out.extend_from_slice(graphics::DELETE);
+                    }
+                    match self.tiles.draw(&mut out, pixels, cols, rows, cell, 2) {
+                        Some(sent) => {
+                            log(format_args!("drew {sent:?}"));
+                            drawn = true;
+                        }
+                        None => out.extend_from_slice(graphics::DELETE),
+                    }
+                    None
+                }
+                other => other,
+            };
+            if !drawn {
+                if self.tiles.active() {
+                    out.extend_from_slice(graphics::DELETE);
+                    self.tiles.forget();
+                }
+                out.extend_from_slice(b"\x1b[2;1H");
+                let path = graphics::next_path();
+                match pixels.filter(|pixels| std::fs::write(&path, &pixels.data).is_ok()) {
+                    Some(pixels) => {
+                        graphics::put_file(&mut out, &path, &pixels, cols, rows);
+                        // The terminal deletes each file once read; this
+                        // covers one it didn't get to.
+                        if let Some(old) = self.last_file.replace(path) {
+                            let _ = std::fs::remove_file(old);
+                        }
+                    }
+                    None => graphics::put_png(&mut out, png, cols, rows),
+                }
+            }
+        }
+        let cols = self.window.cols as usize;
+        let mut badge = String::new();
+        if self.loading {
+            const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
+            badge.push(SPINNER[step % SPINNER.len()]);
+        }
+        if (self.zoom - 1.0).abs() > 0.001 {
+            if !badge.is_empty() {
+                badge.push(' ');
+            }
+            badge.push_str(&format!("{:.0}%", self.zoom * 100.0));
+        }
+        let badge = (!badge.is_empty()).then_some(badge.as_str());
+        match &mut self.find {
+            Some(field) => ui::render_bar(&mut out, field, cols, self.loading, Some("Find"), badge),
+            None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge),
+        }
+        self.render_help(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
     }
 
+    /// Open the find field in the address bar's place.
+    fn open_find(&mut self) {
+        let mut field = AddressBar::default();
+        field.set_text(&self.find_text);
+        field.focus();
+        self.find = Some(field);
+    }
+
+    /// Change the find field's text and search for the result as it is
+    /// typed, staying on the current match while it still matches.
+    fn find_edit(&mut self, change: impl FnOnce(&mut AddressBar)) {
+        let Some(field) = &mut self.find else { return };
+        change(field);
+        let text = field.text();
+        if text != self.find_text {
+            self.find_text = text;
+            self.find_in_page(false, true);
+        }
+    }
+
+    /// Select the next (or previous) place the page shows the find text and
+    /// scroll to it. `restart` searches from the start of the current match
+    /// rather than past it.
+    fn find_in_page(&mut self, backwards: bool, restart: bool) {
+        let text = serde_json::to_string(&self.find_text).unwrap_or_default();
+        self.chrome.evaluate(&format!(
+            "(() => {{ const s = getSelection(); if ({text} === '') return s.removeAllRanges(); \
+             if ({restart} && s.rangeCount) s.collapseToStart(); \
+             return window.find({text}, false, {backwards}, true); }})()"
+        ));
+    }
+
+    fn find_key(&mut self, key: &Key) {
+        let Some(field) = &mut self.find else { return };
+        match (key.code, field.key(key)) {
+            (KeyCode::Enter, _) => self.find_in_page(key.shift, false),
+            (_, Edit::Cancel) => self.find = None,
+            (_, Edit::Typed | Edit::Changed) => self.find_edit(|_| {}),
+            (_, Edit::Submit) => {}
+        }
+    }
+
     fn on_key(&mut self, key: Key) {
         let focused = self.bar.focused();
+        // Command where the terminal reports it, Ctrl where it doesn't.
+        let chord = key.ctrl || key.cmd;
         match key.code {
-            KeyCode::Char('l') if key.ctrl => self.bar.focus(),
-            KeyCode::Char('r') if key.ctrl => self.chrome.reload(),
-            KeyCode::Left if key.alt && !focused => self.chrome.back(),
-            KeyCode::Right if key.alt && !focused => self.chrome.forward(),
+            KeyCode::Char('l') if chord => {
+                self.find = None;
+                self.bar.focus();
+            }
+            KeyCode::Char('f') if chord => self.open_find(),
+            KeyCode::Char('=' | '+') if key.ctrl => self.step_zoom(true),
+            KeyCode::Char('-' | '_') if key.ctrl => self.step_zoom(false),
+            KeyCode::Char('0') if key.ctrl => self.zoom_to_fit(),
+            KeyCode::Char('/' | '?') if key.ctrl => self.help = true,
+            KeyCode::Char('g') if chord && !self.find_text.is_empty() => self.find_in_page(key.shift, false),
+            KeyCode::Char('r') if chord => self.chrome.reload(),
+            // Only with the kitty keyboard protocol; in the legacy
+            // encoding Ctrl+[ is Esc.
+            KeyCode::Char('[') if key.ctrl => self.chrome.back(),
+            KeyCode::Char(']') if key.ctrl => self.chrome.forward(),
+            _ if self.find.is_some() => self.find_key(&key),
+            KeyCode::Left if (key.alt || key.cmd) && !focused => self.chrome.back(),
+            KeyCode::Right if (key.alt || key.cmd) && !focused => self.chrome.forward(),
+            // The page hears Command+A as select all; other Command keys
+            // have no meaning there.
+            KeyCode::Char('a') if key.cmd && !focused => self.chrome.key(&Key { ctrl: true, cmd: false, ..key }),
+            _ if key.cmd => {}
             _ if focused => match self.bar.key(&key) {
                 Edit::Changed => {}
                 Edit::Typed => {
@@ -432,6 +852,13 @@ impl App {
 
     /// Returns whether the top bar needs redrawing.
     fn on_mouse(&mut self, mouse: Mouse) -> bool {
+        // A click closes the help, and does nothing else.
+        if self.help {
+            if mouse.kind == MouseKind::Press {
+                self.close_help();
+            }
+            return false;
+        }
         let (cell_w, cell_h) = self.cell();
         let (cell_w, cell_h) = (cell_w as f64, cell_h as f64);
         // Position in device pixels from the pane's top left. Cell reports
@@ -447,6 +874,12 @@ impl App {
                 return false;
             }
             let col = (px / cell_w) as usize + 1;
+            if let Some(field) = &mut self.find {
+                if let Hit::Address(offset) = ui::hit(col, self.window.cols as usize) {
+                    field.click(offset);
+                }
+                return true;
+            }
             match ui::hit(col, self.window.cols as usize) {
                 Hit::Back => self.chrome.back(),
                 Hit::Forward => self.chrome.forward(),

@@ -55,21 +55,77 @@ page, which avoids tracking command replies after startup.
 
 ### Graphics (`graphics.rs`)
 
-The frame's base64 PNG is passed through as Chrome sent it, never decoded,
-cut into 4096-byte chunks (`ESC _G a=T,f=100,i=1,p=1,…;<data> ESC \`). Every
-frame reuses image id 1, so it replaces the last, and the draw is wrapped in a
-synchronized update. A frame whose size doesn't match the current layout (one
-rendered before a resize, or for a new pane's first guess at its size) is
-dropped rather than stretched to fit.
+Every frame reuses image id 1, so it replaces the last, and the draw is
+wrapped in a synchronized update. A frame whose size doesn't match the
+current layout (one rendered before a resize, or for a new pane's first guess
+at its size) is dropped rather than stretched to fit, and a frame identical
+to the one on screen is not drawn again: some pages repaint without changing,
+30 times a second.
 
-This is the slowest transmission and the main cost today: a photographic
-page at 1008x1540 is about 3 MB of base64 per frame. Faster ones to try, in
-order:
+There are two ways to send a frame:
 
-1. Shared memory (`t=s`): no copy through the pty. Local terminals only.
-2. Temp file (`t=t`): the terminal reads the file itself. Local only.
-3. Only the changed rectangle, or a scrolled copy of the previous frame.
-4. JPEG frames from Chrome, decoded and sent as raw RGB with zlib (`o=z`).
+- **By file.** The PNG is decoded here, the raw pixels are written to a
+  temporary file, and the terminal is given its name (`t=t,f=24`). The
+  terminal reads the file and deletes it. At startup kb asks whether the
+  terminal will do this (`a=q` with a one-pixel file); a terminal on another
+  machine can't see the file and says no.
+- **Through the pty.** The base64 PNG is passed on as Chrome sent it, never
+  decoded, in 4096-byte chunks (`f=100`). This works everywhere and is what
+  kb uses until the terminal has said yes to files.
+
+What Rex accepts, found by querying it: raw pixels directly, raw pixels with
+zlib, and raw pixels from a file in a temporary directory. It refuses PNG
+from a file, files outside temporary directories, and shared memory.
+
+Measured with `kb bench` in Rex on a 1372x1624 pixel pane, scrolling a
+Wikipedia article, median milliseconds per step:
+
+| Frames sent as | Chrome | Decode and write | Terminal | Total |
+| --- | --- | --- | --- | --- |
+| PNG through the pty | 54 | 0 | 28 | 84 |
+| PNG, pixels by file | 51 | 11 | 7 | 68 |
+| JPEG 90, pixels by file | 46 | 10 | 7 | 64 |
+
+So the file path is used, and JPEG isn't: it saves little and smears text.
+
+**Only what changed** (`Tiles`). When frames go by file and line up with the
+cells, the page is one image (id 1) and the screen is treated as a grid of
+tiles, 12 cells by 6. Each new frame is compared with the one on screen,
+tile by tile (under a millisecond). If a third of the tiles or fewer differ,
+each is sent as a small image (ids from 10, `z=1`) laid over the page at its
+cells. If more differ, the whole page is sent again and the tiles are
+deleted, since ninety small files cost more than one large one: sending a
+whole page as tiles took 89 ms a step against 72. A viewport is rounded up
+to cover the cells, and the extra pixel is cropped, so tiles and page line
+up exactly. A fixed viewport (`kb ctl viewport`) is scaled to fit and so is
+always sent whole.
+
+**Pacing** (`App::frame_gap`). Chrome sends a frame, then waits for it to be
+acknowledged; kb decides when. While the page is in use (a key, the mouse,
+or a command in the last half second) every frame is acknowledged at once.
+After that one is acknowledged every 100 ms, or every 500 ms when the
+terminal reports the pane has lost focus (mode 1004). Chrome keeps count of
+unacknowledged frames and stops for good if one is never acknowledged, so
+they are queued and each is answered.
+
+Measured on a Wikipedia article at rest, where a 36-pixel dot pulses for
+ever in the toolbar: before, 49 frames a second, each redrawn whole, and
+Chrome at a full core. After, 8 frames a second of 2 tiles each and Chrome
+at about a third of a core; 2 frames a second and a quarter of a core when
+the pane isn't focused. What is left is Chrome drawing the animation, which
+it does whether or not anyone takes the frames.
+
+Chrome's 50 ms is now most of a frame, and it is frame pacing, not encoding.
+`--disable-frame-rate-limit` cuts it to about 20 ms (try it with
+`KB_CHROME_ARGS`), but Chrome then draws as fast as it can: a page that
+repaints continuously took over three cores at rest, so it is not on by
+default. Things to try next:
+
+1. Find a way to cut Chrome's latency without the unlimited frame rate.
+2. A scrolled copy of the previous frame, so a scroll sends only the strip
+   that came into view.
+3. Stop Chrome drawing at all when the pane is hidden.
+4. Photographs: a 3 MB PNG takes 60 ms to decode, where JPEG takes 25.
 
 ### Size (`size.rs`)
 
@@ -91,9 +147,12 @@ pastes (bracketed paste) and replies to queries. Mouse reporting is SGR
 requested and then confirmed with a mode query; without confirmation, reports
 are taken as cells and mapped to the cell's centre. Rex confirms pixel mode.
 
-Keys use the legacy encoding, so some combinations are indistinguishable
-(Ctrl+I is Tab, Ctrl+M is Enter) and Cmd never arrives. The kitty keyboard
-protocol would fix the first.
+The kitty keyboard protocol's first level is switched on, so in terminals
+that have it Esc, and keys held with Ctrl, Alt or Command, arrive as
+`CSI code ; modifiers u` and can't be mistaken for anything else. That is
+how Command+L and Command+F reach kb. Elsewhere keys come in the legacy
+encoding, where some combinations are indistinguishable (Ctrl+I is Tab) and
+Command never arrives.
 
 ## UI (`src/ui.rs`)
 
@@ -101,6 +160,26 @@ Row 1 is ordinary terminal text: three buttons and the address field. The
 field is a line editor (cursor, word moves, select-all on focus, horizontal
 scroll) with no terminal dependencies, so it is unit tested directly. Hit
 testing maps a column to a button or a position in the field.
+Zoom (Ctrl+= and Ctrl+-) divides the CSS viewport by the zoom, so Chrome
+lays the page out narrower or wider, as a desktop browser does. Chrome's
+screencast renders at the launch scale whatever scale is asked for (both a
+different `deviceScaleFactor` and the override's `scale` were tried), so a
+zoomed frame has fewer or more pixels than the pane and is stretched or
+shrunk to fill it: zoomed in, the page is a little soft. Such frames are
+drawn whole rather than as changed blocks. Ctrl+0 goes back to 100% and then asks the page
+for `scrollWidth`; if that is wider than the viewport it zooms out to fit.
+
+The page and its tiles are placed with a z-index below -1,073,741,824, which
+the protocol defines as under text and under cells with a background colour
+of their own. So the help box (Ctrl+/) is ordinary coloured text drawn over
+the page, and blanking its cells shows the page again. The startup logo
+(`splash.rs`) is a separate image above the page, animated by sending a new
+frame every 60 ms for 12 seconds; the light's path is the ring's ellipse,
+measured from the logo, dimmed where it passes behind the sphere.
+
+Find (Command+F) puts a second such field in the address bar's place; each
+change runs `window.find` in the page, which selects the match and scrolls
+to it.
 `normalize_url` decides whether typed text is a URL, a bare host, a local
 file, or a search.
 
@@ -118,9 +197,14 @@ front ends can't drift apart. `kb mcp serve` is a thin JSON-RPC wrapper that
 forwards each tool call over the same socket; it lists no tools unless
 `~/.kittybrowser/mcp-enabled` exists (`kb mcp on`).
 
-`control.rs` listens on `~/.kittybrowser/kb.sock` (mode 0600). Each client
-gets a thread that turns a request line into a `Request` carrying a reply
-channel, hands it to the app loop, and writes back whatever arrives.
+`control.rs` gives each running kb a number, the lowest not in use, and a
+socket to match: `~/.kittybrowser/kb.sock` for the first, `kb-2.sock` and so
+on after it (mode 0600). The number is taken before anything is written to
+the terminal, under a file lock so two kbs starting together can't take the
+same one. Clients go to the lowest-numbered kb unless `kb ctl -i N` or
+`KB_INSTANCE` names another. Each client gets a thread that turns a request
+line into a `Request` carrying a reply channel, hands it to the app loop, and
+writes back whatever arrives.
 
 `devtools.rs` carries commands out on the app thread, which never blocks on
 Chrome. A command that needs an answer parks its reply channel in `pending`
@@ -144,15 +228,51 @@ also watches every event to keep what the commands report on:
 size, and the image is then placed in fewer cells, shrunk to fit if need be,
 with mouse positions scaled to match.
 
-All of this was shaped by three rounds of an agent building a page with only
-`kb ctl --help` to go on. Still open from those: which CSS rule won
-(`CSS.getMatchedStylesForNode`), event listeners on an element, frames,
-clicking at an offset, JSON output, and network throttling.
+Page scripts share a helper object, `__kb` (`LIB` in `devtools.rs`), defined
+afresh with each script: it resolves selectors (CSS across shadow roots,
+`text=`, `@N` from `links`, `:focus`), hit-tests through shadow roots, finds
+the main content, and reads text including shadow content. `outline`,
+`links`, `find`, `text --section`, `tables` and `images` are scripts built
+on it.
+
+**Clicks that don't arrive.** For about half an hour during testing, after a
+successful login form submission on one site, Chrome stopped delivering
+synthetic mouse events to that site's pages; keys and scripts still worked,
+and a cross-site navigation (a new renderer process) cleared it. It
+reproduced in a bare headless Chrome driven over DevTools, so it is
+Chrome's, not kb's. What was ruled out: PaintHolding, BackForwardCache,
+RenderDocument and site-isolation flags; the password manager and autofill
+(prefs and flags); re-attaching the session; a held third-party script; a
+Chrome update. A failed login (the same POST, back to a page with a password
+form) and a login by `fetch` followed by a navigation did not trigger it.
+Then it stopped reproducing entirely, in kb and in the bare script, with
+nothing changed on our side, which points at something outside Chrome's
+flags (a system prompt, network or the site). So every `click` listens for
+its own mousedown, and if none arrived on a page that didn't change, it
+clicks the element by script and says so. If it comes back, the bare
+reproduction is the place to start: log in on the-internet.herokuapp.com by
+clicking the submit button, then click Logout.
+
+**Decisions on the remaining requests.** Iframes are not entered: selectors
+and reading stop at the top document, and a selector that matches nothing
+on a page with iframes says so (open the frame's address instead). There is
+no JSON output: answers are written for agents to read, and scripts use exit
+status, `check`, `wait` and exact `text`. `style --why` uses the CSS domain
+(enabled on first use) to explain the cascade; `throttle` uses
+`Network.emulateNetworkConditions`; `click --at` clicks a point inside an
+element. Screenshots default to one image pixel per CSS pixel, a quarter of
+a retina capture, with `--size` for smaller, sharper or a set width.
+
+All of this was shaped by rounds of agents using kb with only `kb ctl --help`
+and the skill to go on: three building pages, three browsing real sites, and
+three judging the skill for development, research and QA. Still open: the
+cause of the clicks that don't arrive.
 
 ## Open questions
 
-- Which faster graphics transmissions does Rex accept? Only base64 PNG is
-  confirmed.
+- Which faster graphics transmissions do kitty, Ghostty and WezTerm accept?
+  Only Rex has been measured.
+- Should instances share one Chrome, so they share logins?
 - Does replacing the image by id flicker in any terminal?
 - Is a persistent background Chrome acceptable, to hide its startup cost?
 - Over SSH or a remote Rex host only the pty path works. Is it usable?

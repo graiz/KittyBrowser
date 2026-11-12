@@ -66,7 +66,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "check",
         help: "Test that the page is healthy, for scripts: waits for the page to go quiet, then succeeds if there are no console errors, no failed requests and the page itself wasn't an error response. Otherwise lists what is wrong and fails (exit status 1).",
-        params: &[],
+        params: &[option("ignore", "HOSTS", "comma-separated hosts (or parts of addresses) whose errors and failed requests don't count, such as third-party trackers")],
     },
     Command {
         name: "viewport",
@@ -77,10 +77,11 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "forward", help: "Go forward one page in history.", params: &[] },
     Command {
         name: "screenshot",
-        help: "Take a PNG screenshot of what the pane shows, of one element, or of the whole page. The image is in device pixels: the viewport size times the scale that status reports.",
+        help: "Take a PNG screenshot of what the window shows, of one element, or of the whole page. By default one image pixel is one CSS pixel (a 1280x800 viewport gives 1280x800): sharp enough to read, and a quarter of the size of a retina capture. A whole page taller than 8000 pixels is scaled down to fit.",
         params: &[
             option("selector", "CSS", "capture only this element"),
             flag("full", "capture the whole page, not just the visible part"),
+            option("size", "SIZE", "small (half size, for a quick look), normal (the default), sharp (device pixels, to check fine detail), or a width in pixels such as 800"),
             option(OUT, "FILE", "where to save the PNG (default: a new file in the temp directory); its path is printed"),
         ],
     },
@@ -104,7 +105,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "text",
-        help: "Print the text of the page's main content (its <main> or <article>, if it has one), or of one element, as rendered, including text in shadow DOM. Elements hidden with CSS are left out, but text that is off screen or the colour of its background is not. For a text field or select, prints its value. On a long page, find or outline are usually better first steps.",
+        help: "Print the text of the page's main content (its <main> or <article>, if it has one), or of one element, as rendered, including text in shadow DOM. Inside an element, parts hidden with CSS are left out; an element that is itself hidden prints its text after a (hidden: …) note. Text that is off screen or the colour of its background is not detected. For a text field, prints its value; for a select, the chosen option's label. On a long page, find or outline are usually better first steps.",
         params: &[
             optional("selector", SELECTOR),
             option("section", "HEADING", "print only what is under the heading with this text (in the element, if one is given)"),
@@ -146,9 +147,28 @@ pub const COMMANDS: &[Command] = &[
         params: &[required("text", "the words to look for"), option("limit", "N", "show at most this many places (default 10)")],
     },
     Command {
+        name: "throttle",
+        help: "Slow the network to test loading states, spinners and timeouts: slow (400 ms round trips, 400 kbit/s), fast (150 ms, 1.6 Mbit/s), offline, or off. Stays until turned off; status shows it.",
+        params: &[required("speed", "off, slow, fast or offline")],
+    },
+    Command {
+        name: "listeners",
+        help: "List the event listeners attached to an element (click, input, submit…), with their first line of code, to see why an action does nothing. Listeners on ancestors, which handle events by delegation, are not included: ask about the ancestor.",
+        params: &[required("selector", SELECTOR)],
+    },
+    Command {
+        name: "storage",
+        help: "Show the page's localStorage and sessionStorage and the names of its cookies; with --clear, clear cookies and all storage for the site, to test a first visit.",
+        params: &[flag("clear", "clear cookies, localStorage, sessionStorage, IndexedDB and caches for this site")],
+    },
+    Command {
         name: "style",
         help: "Print an element's computed CSS: the property named, or the common ones (layout, box, colors, font). For where the element actually ended up, see box.",
-        params: &[required("selector", SELECTOR), optional("property", "CSS property name, such as color or margin-top")],
+        params: &[
+            required("selector", SELECTOR),
+            optional("property", "CSS property name, such as color or margin-top"),
+            flag("why", "with a property: list the rules that set it, the winning one first, with their file and line"),
+        ],
     },
     Command {
         name: "box",
@@ -162,8 +182,12 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "click",
-        help: "Click the middle of an element with the mouse, scrolling it into view first. Fails if the element is off screen or something else covers it. Answers once the page has settled: reports any console errors and dialogs the click caused and a change of address, and if it led to another page, waits for that page to load. The mouse stays there, so :hover styles apply until it moves.",
-        params: &[required("selector", SELECTOR)],
+        help: "Click (or with --double, double-click) the middle of an element with the mouse, scrolling it into view first. Fails if the element is off screen or something else covers it. Answers once the page has settled: reports any console errors and dialogs the click caused and a change of address, and if it led to another page, waits for that page to load. Fails if the page never received the click. The mouse stays there, so :hover styles apply until it moves.",
+        params: &[
+            required("selector", SELECTOR),
+            flag("double", "double-click, as for editing a todo item"),
+            option("at", "X,Y", "click this point in CSS pixels from the element's top left, rather than its middle (a canvas, a map, a backdrop)"),
+        ],
     },
     Command {
         name: "hover",
@@ -205,6 +229,7 @@ pub const COMMANDS: &[Command] = &[
             option("text", "TEXT", "wait until a matching element's text (or a field's value) contains this"),
             flag("gone", "wait until nothing matches the selector"),
             option("count", "N", "wait until at least N elements match"),
+            flag("visible", "wait until a matching element is shown, not merely present"),
             option("timeout", "SECONDS", "how long to wait before failing (default 10, at most 60)"),
         ],
     },
@@ -362,7 +387,7 @@ mod tests {
     #[test]
     fn synopsis_and_tool() {
         let wait = find("wait").unwrap();
-        assert_eq!(wait.synopsis(), "wait <selector> [--text TEXT] [--gone] [--count N] [--timeout SECONDS]");
+        assert_eq!(wait.synopsis(), "wait <selector> [--text TEXT] [--gone] [--count N] [--visible] [--timeout SECONDS]");
         assert!(wait.describe().contains("--timeout SECONDS    how long to wait"));
         // Saving to a file is the command line's business only.
         let shot = find("screenshot").unwrap();

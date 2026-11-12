@@ -5,6 +5,7 @@
 
 mod app;
 mod base64;
+mod bench;
 mod cli;
 mod commands;
 mod control;
@@ -12,23 +13,29 @@ mod devtools;
 mod engine;
 mod history;
 mod mcp;
+mod skill;
+mod splash;
 mod term;
 mod ui;
 
 const USAGE: &str = "\
 usage: kb [--scale N] [URL]
-       kb ctl <command>    control the running kb; see kb ctl --help
+       kb list             the kbs running now, numbered
+       kb ctl <command>    control a running kb; see kb ctl --help
        kb mcp <command>    the MCP server for agents; see kb mcp --help
+       kb skill install    teach coding agents to preview their work in kb
+       kb bench [URL]      time each way of getting frames to this terminal
 
   --scale N   device pixels per CSS pixel (default 2 on macOS, 1 elsewhere)
 
 keys:
-  Ctrl+L          edit the address
-  Enter / Esc     go to the address / cancel the edit
-  Right / End     accept the suggested completion (Backspace rejects it)
-  Alt+Left/Right  back / forward
-  Ctrl+R          reload
-  Ctrl+Q          quit
+  Cmd+L or Ctrl+L   edit the address
+  Enter / Esc       go to the address / cancel the edit
+  Right / End       accept the suggested completion (Backspace rejects it)
+  Cmd+F or Ctrl+F   find on the page; Enter and Shift+Enter move between matches
+  Ctrl+[ / Ctrl+]   back / forward (also Alt+Left / Alt+Right)
+  Cmd+R or Ctrl+R   reload
+  Ctrl+Q            quit
 Everything else, and the mouse, goes to the page.";
 
 fn usage_error(message: &str) -> ! {
@@ -49,6 +56,9 @@ fn main() {
     match words.first().map(String::as_str) {
         Some("ctl") => std::process::exit(cli::run(&words[1..])),
         Some("mcp") => std::process::exit(mcp::run(&words[1..])),
+        Some("list") => std::process::exit(cli::list()),
+        Some("bench") => std::process::exit(bench::run(&words[1..])),
+        Some("skill") => std::process::exit(skill::run(&words[1..])),
         _ => {}
     }
 

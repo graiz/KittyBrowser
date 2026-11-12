@@ -10,14 +10,16 @@ use std::sync::OnceLock;
 static ORIGINAL: OnceLock<libc::termios> = OnceLock::new();
 
 /// Alternate screen, hidden cursor, mouse reporting (any motion, SGR
-/// encoding, pixel coordinates if offered) and bracketed paste. The two
+/// encoding, pixel coordinates if offered), focus reports and bracketed
+/// paste, and the kitty keyboard protocol's first level, which is what lets
+/// Command and Esc through unambiguously. The two
 /// trailing queries ask whether pixel coordinates took, and for the cell size.
 const ENTER: &[u8] = b"\x1b[?1049h\x1b[2J\x1b[?25l\
-\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1016h\x1b[?2004h\
+\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1016h\x1b[?1004h\x1b[?2004h\x1b[>1u\
 \x1b[?1016$p\x1b[16t";
 
 const LEAVE: &[u8] = b"\x1b_Ga=d,d=A,q=2\x1b\\\
-\x1b[?2004l\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\
+\x1b[<u\x1b[?2004l\x1b[?1004l\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\
 \x1b[0 q\x1b[?25h\x1b[?1049l";
 
 pub fn write(bytes: &[u8]) {
@@ -56,6 +58,13 @@ pub fn enter() -> io::Result<()> {
 pub fn leave() {
     if let Some(termios) = ORIGINAL.get() {
         write(LEAVE);
-        unsafe { libc::tcsetattr(0, libc::TCSANOW, termios) };
+        // Replies to our queries may still be on their way, when kb exits
+        // soon after starting. Discard them, or the shell reads them as
+        // typed text.
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        unsafe {
+            libc::tcflush(0, libc::TCIFLUSH);
+            libc::tcsetattr(0, libc::TCSANOW, termios);
+        }
     }
 }

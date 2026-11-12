@@ -1,4 +1,4 @@
-//! Base64 decoding, for the PNGs Chrome sends.
+//! Base64, for the frames Chrome sends and the file names the terminal is given.
 
 /// Decode standard base64. Padding is optional; anything else that isn't in
 /// the alphabet is an error.
@@ -31,9 +31,38 @@ pub fn decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Encode as standard base64, padded.
+pub fn encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for triple in bytes.chunks(3) {
+        let mut bits = 0u32;
+        for (i, byte) in triple.iter().enumerate() {
+            bits |= (*byte as u32) << (16 - 8 * i);
+        }
+        for i in 0..4 {
+            if i <= triple.len() {
+                out.push(ALPHABET[(bits >> (18 - 6 * i)) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes() {
+        assert_eq!(encode(b""), "");
+        assert_eq!(encode(b"hello"), "aGVsbG8=");
+        assert_eq!(encode(b"hello!"), "aGVsbG8h");
+        assert_eq!(encode(b"hi"), "aGk=");
+        assert_eq!(encode(&[0xff, 0xef]), "/+8=");
+    }
 
     #[test]
     fn decodes() {

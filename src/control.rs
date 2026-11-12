@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -34,32 +34,101 @@ pub struct Request {
     pub reply: Reply,
 }
 
-pub fn socket_path() -> Result<PathBuf, String> {
-    match std::env::var_os("KB_SOCKET") {
-        Some(path) => Ok(path.into()),
-        None => Ok(crate::data_dir()?.join("kb.sock")),
+/// The most kbs that can run at once.
+const MAX_INSTANCES: u32 = 16;
+
+/// The socket of instance `n`: kb.sock for the first, kb-N.sock after it.
+fn instance_socket(n: u32) -> Result<PathBuf, String> {
+    let name = if n == 1 { "kb.sock".to_owned() } else { format!("kb-{n}.sock") };
+    Ok(crate::data_dir()?.join(name))
+}
+
+/// The instance asked for with `kb ctl -i N` or KB_INSTANCE, if any.
+fn chosen_instance() -> Result<Option<u32>, String> {
+    match std::env::var("KB_INSTANCE") {
+        Ok(text) => match text.parse::<u32>() {
+            Ok(n) if (1..=MAX_INSTANCES).contains(&n) => Ok(Some(n)),
+            _ => Err(format!("{text:?} isn't an instance number; kb list shows the ones running")),
+        },
+        Err(_) => Ok(None),
     }
 }
 
-/// Start accepting clients on `path`. Each request is handed to `deliver`,
-/// which returns false once the app has gone.
-pub fn listen(path: &Path, deliver: impl Fn(Request) -> bool + Send + Clone + 'static) -> Result<(), String> {
-    if UnixStream::connect(path).is_ok() {
-        return Err("kb is already running; only one can run at a time".into());
-    }
-    // Left behind by a kb that didn't exit cleanly.
-    let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path).map_err(|e| format!("listening on {}: {e}", path.display()))?;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let deliver = deliver.clone();
-            std::thread::spawn(move || {
-                let _ = serve(stream, deliver);
-            });
+/// A running kb's place among the others: its number, and the socket it
+/// answers on.
+pub struct Claim {
+    /// 1 for the first kb running, 2 for one started beside it, and so on.
+    pub instance: u32,
+    pub socket: PathBuf,
+    listener: UnixListener,
+}
+
+/// Take the lowest instance number no running kb holds, and its socket.
+pub fn claim() -> Result<Claim, String> {
+    // Held until this returns, so two kbs starting together can't both
+    // take the same number.
+    let lock = std::fs::File::create(crate::data_dir()?.join("kb.lock")).map_err(|e| format!("locking: {e}"))?;
+    unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
+
+    let fixed = std::env::var_os("KB_SOCKET").map(PathBuf::from);
+    let candidates: Vec<(u32, PathBuf)> = match fixed {
+        Some(path) => vec![(1, path)],
+        None => (1..=MAX_INSTANCES).map(|n| Ok((n, instance_socket(n)?))).collect::<Result<_, String>>()?,
+    };
+    for (instance, socket) in candidates {
+        if UnixStream::connect(&socket).is_ok() {
+            continue;
         }
-    });
-    Ok(())
+        // Left behind by a kb that didn't exit cleanly.
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).map_err(|e| format!("listening on {}: {e}", socket.display()))?;
+        let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
+        return Ok(Claim { instance, socket, listener });
+    }
+    Err(match std::env::var_os("KB_SOCKET") {
+        Some(_) => "another kb is already using the socket named by KB_SOCKET".to_owned(),
+        None => format!("{MAX_INSTANCES} kbs are already running; quit one first"),
+    })
+}
+
+impl Claim {
+    /// Start accepting clients. Each request is handed to `deliver`, which
+    /// returns false once the app has gone.
+    pub fn listen(self, deliver: impl Fn(Request) -> bool + Send + Clone + 'static) {
+        std::thread::spawn(move || {
+            for stream in self.listener.incoming().flatten() {
+                let deliver = deliver.clone();
+                std::thread::spawn(move || {
+                    let _ = serve(stream, deliver);
+                });
+            }
+        });
+    }
+}
+
+/// Connect to the kb that commands are meant for: the one named by
+/// KB_SOCKET or KB_INSTANCE, else the lowest-numbered one running.
+fn connect() -> Result<UnixStream, String> {
+    if let Some(path) = std::env::var_os("KB_SOCKET") {
+        return UnixStream::connect(path).map_err(|_| NOT_RUNNING.to_owned());
+    }
+    if let Some(n) = chosen_instance()? {
+        return UnixStream::connect(instance_socket(n)?)
+            .map_err(|_| format!("kb {n} isn't running; kb list shows the ones that are"));
+    }
+    for n in 1..=MAX_INSTANCES {
+        if let Ok(stream) = UnixStream::connect(instance_socket(n)?) {
+            return Ok(stream);
+        }
+    }
+    Err(NOT_RUNNING.to_owned())
+}
+
+/// The instance numbers of the kbs running now.
+pub fn running() -> Vec<u32> {
+    (1..=MAX_INSTANCES)
+        .filter(|n| instance_socket(*n).is_ok_and(|socket| UnixStream::connect(socket).is_ok()))
+        .collect()
 }
 
 fn serve(mut stream: UnixStream, deliver: impl Fn(Request) -> bool) -> io::Result<()> {
@@ -88,7 +157,7 @@ fn serve(mut stream: UnixStream, deliver: impl Fn(Request) -> bool) -> io::Resul
 
 /// Send one command to the running kb and wait for its answer.
 pub fn request(command: &str, args: Value) -> Result<Output, String> {
-    let mut stream = UnixStream::connect(socket_path()?).map_err(|_| NOT_RUNNING)?;
+    let mut stream = connect()?;
     let lost = |e: io::Error| format!("lost the connection to kb: {e}");
     writeln!(stream, "{}", json!({"command": command, "args": args})).map_err(lost)?;
     let mut line = String::new();

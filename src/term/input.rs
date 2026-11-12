@@ -26,11 +26,14 @@ pub struct Key {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    /// Command on a Mac. Only terminals with the kitty keyboard protocol
+    /// report it.
+    pub cmd: bool,
 }
 
 impl Key {
     fn plain(code: KeyCode) -> Key {
-        Key { code, ctrl: false, alt: false, shift: false }
+        Key { code, ctrl: false, alt: false, shift: false, cmd: false }
     }
 }
 
@@ -72,6 +75,11 @@ pub enum Event {
     CellSize { width: u32, height: u32 },
     /// Reply to the mode 1016 query: whether mouse reports are in pixels.
     PixelMouse(bool),
+    /// The pane gained or lost keyboard focus.
+    Focus(bool),
+    /// Reply to a graphics command: the image id it named, and whether the
+    /// terminal accepted it.
+    Graphics { id: u32, ok: bool },
 }
 
 const PASTE_END: &[u8] = b"\x1b[201~";
@@ -143,6 +151,16 @@ impl Parser {
                 events.extend(code.map(|code| Event::Key(Key::plain(code))));
                 Some(3)
             }
+            // A graphics reply: ESC _ G i=<id>;<OK or an error> ESC \
+            Some(b'_') => {
+                let end = 2 + rest[2..].windows(2).position(|w| w == b"\x1b\\")?;
+                let body = std::str::from_utf8(&rest[2..end]).unwrap_or("");
+                if let Some((keys, message)) = body.strip_prefix('G').and_then(|body| body.split_once(';')) {
+                    let id = keys.split(',').find_map(|key| key.strip_prefix("i=")).and_then(|id| id.parse().ok());
+                    events.extend(id.map(|id| Event::Graphics { id, ok: message == "OK" }));
+                }
+                Some(end + 2)
+            }
             // Esc then a key is how terminals send Alt. Option+arrows often
             // arrive as Esc b / Esc f, the readline word moves.
             Some(_) => {
@@ -172,6 +190,8 @@ fn plain_key(bytes: &[u8]) -> Option<(Option<Key>, usize)> {
         0x01..=0x1a => {
             Some(Key { ctrl: true, ..Key::plain(KeyCode::Char((first - 1 + b'a') as char)) })
         }
+        // Ctrl+/ and Ctrl+? in the legacy encoding.
+        0x1f => Some(Key { ctrl: true, ..Key::plain(KeyCode::Char('/')) }),
         0x00..=0x1f => None,
         _ => {
             let len = match first {
@@ -199,10 +219,30 @@ fn csi(body: &str, last: u8) -> Option<Event> {
         // 1 and 3 mean set; 0, 2 and 4 mean unknown or reset.
         return (last == b'y').then_some(Event::PixelMouse(matches!(mode, "1$" | "3$")));
     }
+    if body.is_empty() && matches!(last, b'I' | b'O') {
+        return Some(Event::Focus(last == b'I'));
+    }
+    if body.starts_with('?') {
+        // A reply to some other query, such as the keyboard protocol's.
+        return None;
+    }
     let mut numbers = body.split(';').map(|n| n.parse::<u32>().unwrap_or(0));
     let first = numbers.next().unwrap_or(0);
     let second = numbers.next().unwrap_or(0);
+    // Modifiers are sent as 1 + a bit mask.
+    let mods = second.saturating_sub(1);
+    let (shift, alt, ctrl, cmd) = (mods & 1 != 0, mods & 2 != 0, mods & 4 != 0, mods & 8 != 0);
     let code = match last {
+        // The kitty keyboard protocol: a key by its character code. It is
+        // how Esc, and keys held with Ctrl, Alt or Command, arrive.
+        b'u' => match first {
+            27 => KeyCode::Esc,
+            13 => KeyCode::Enter,
+            9 if shift => KeyCode::BackTab,
+            9 => KeyCode::Tab,
+            8 | 127 => KeyCode::Backspace,
+            code => KeyCode::Char(char::from_u32(code).filter(|c| !c.is_control())?),
+        },
         b't' if first == 6 => {
             let width = numbers.next().filter(|w| *w > 0)?;
             return (second > 0).then_some(Event::CellSize { width, height: second });
@@ -224,9 +264,7 @@ fn csi(body: &str, last: u8) -> Option<Event> {
         },
         _ => return None,
     };
-    // Modifiers are sent as 1 + a bit mask.
-    let mods = second.saturating_sub(1);
-    Some(Event::Key(Key { code, shift: mods & 1 != 0, alt: mods & 2 != 0, ctrl: mods & 4 != 0 }))
+    Some(Event::Key(Key { code, shift, alt, ctrl, cmd }))
 }
 
 /// Decode an SGR mouse report, `button;x;y`.
@@ -348,6 +386,17 @@ mod tests {
         assert_eq!(parse(b"\x1b[6;34;16t"), [Event::CellSize { width: 16, height: 34 }]);
         assert_eq!(parse(b"\x1b[?1016;1$y"), [Event::PixelMouse(true)]);
         assert_eq!(parse(b"\x1b[?1016;0$y"), [Event::PixelMouse(false)]);
+        assert_eq!(parse(b"\x1b[I\x1b[O"), [Event::Focus(true), Event::Focus(false)]);
+        assert_eq!(parse(b"\x1b[?1u"), []);
+        let cmd_l = Key { cmd: true, ..Key::plain(KeyCode::Char('l')) };
+        let ctrl_l = Key { ctrl: true, ..Key::plain(KeyCode::Char('l')) };
+        let shift_enter = Key { shift: true, ..Key::plain(KeyCode::Enter) };
+        assert_eq!(
+            parse(b"\x1b[108;9u\x1b[108;5u\x1b[27u\x1b[13;2u"),
+            [Event::Key(cmd_l), Event::Key(ctrl_l), key(KeyCode::Esc), Event::Key(shift_enter)]
+        );
+        assert_eq!(parse(b"\x1b_Gi=2;OK\x1b\\a"), [Event::Graphics { id: 2, ok: true }, key(KeyCode::Char('a'))]);
+        assert_eq!(parse(b"\x1b_Gi=2;EINVAL: invalid data\x1b\\"), [Event::Graphics { id: 2, ok: false }]);
         assert_eq!(parse(b"\x1b[4;600;800t"), []);
     }
 }

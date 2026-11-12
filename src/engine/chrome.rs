@@ -39,9 +39,14 @@ pub struct Chrome {
     /// Pages opened by the page (target=_blank, window.open) whose URL isn't
     /// known yet. There are no tabs, so they get loaded here instead.
     popups: HashSet<String>,
-    scale: f64,
     /// Whether the HTTP cache is switched off, as it is on local pages.
     cache_off: bool,
+    /// Whether frames wait for `ack` rather than being acknowledged as they
+    /// arrive, and the acknowledgements waiting, oldest first. Chrome sends
+    /// a second frame before the first is acknowledged, and counts: one
+    /// never acknowledged would stop the frames for good.
+    hold_acks: bool,
+    unacked: std::collections::VecDeque<Value>,
 }
 
 /// Whether `url` is a file or a server on this machine or network: a page
@@ -82,6 +87,35 @@ fn find_binary() -> Option<PathBuf> {
         dirs.into_iter().flat_map(|dir| NAMES.iter().map(move |name| dir.join(name)))
     });
     APPS.iter().map(PathBuf::from).chain(on_path).find(|path| path.is_file())
+}
+
+/// Turn off the password manager and autofill in the profile before Chrome
+/// starts. After a login form is submitted, Chrome offers to save the
+/// password; headless, the offer has nowhere to show, and while it is
+/// pending the page can stop receiving mouse and key events.
+fn quiet_profile(profile: &Path) {
+    let path = profile.join("Default").join("Preferences");
+    let mut prefs: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    prefs["credentials_enable_service"] = json!(false);
+    if !prefs["profile"].is_object() {
+        prefs["profile"] = json!({});
+    }
+    prefs["profile"]["password_manager_enabled"] = json!(false);
+    if !prefs["autofill"].is_object() {
+        prefs["autofill"] = json!({});
+    }
+    prefs["autofill"]["profile_enabled"] = json!(false);
+    prefs["autofill"]["credit_card_enabled"] = json!(false);
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::create_dir_all(folder);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&prefs) {
+        let _ = std::fs::write(&path, bytes);
+    }
 }
 
 /// Move `fd` clear of 3 and 4, which Chrome's pipe will occupy in the child,
@@ -138,13 +172,18 @@ impl Chrome {
         let (from_chrome, child_out) = pipe().map_err(pipe_error)?;
         let (in_fd, out_fd) = (child_in.as_raw_fd(), child_out.as_raw_fd());
 
+        quiet_profile(profile);
         let mut command = Command::new(&binary);
         command
             .arg("--headless=new")
             .arg("--remote-debugging-pipe")
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg(format!("--force-device-scale-factor={scale}"))
-            .args(["--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "about:blank"])
+            .args(["--hide-scrollbars", "--no-first-run", "--no-default-browser-check"])
+            .arg("--disable-features=PasswordManagerOnboarding,AutofillServerCommunication")
+            // Extra flags to try, separated by spaces.
+            .args(std::env::var("KB_CHROME_ARGS").unwrap_or_default().split_whitespace())
+            .arg("about:blank")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -202,7 +241,7 @@ impl Chrome {
         call(&mut tx, &mut rx, "Emulation.setFocusEmulationEnabled", json!({"enabled": true}), s)?;
         call(&mut tx, &mut rx, "Target.setDiscoverTargets", json!({"discover": true}), None)?;
 
-        let chrome = Chrome { child, tx, session, target, main_frame, popups: HashSet::new(), scale, cache_off: false };
+        let chrome = Chrome { child, tx, session, target, main_frame, popups: HashSet::new(), cache_off: false, hold_acks: false, unacked: Default::default() };
         Ok((chrome, rx))
     }
 
@@ -245,7 +284,11 @@ impl Chrome {
                 // Chrome stops sending frames until each one is acknowledged.
                 let ack = json!({"sessionId": params["sessionId"]});
                 let data = params["data"].take();
-                self.send("Page.screencastFrameAck", ack);
+                if self.hold_acks {
+                    self.unacked.push_back(ack);
+                } else {
+                    self.send("Page.screencastFrameAck", ack);
+                }
                 match data {
                     Value::String(png) => Some(PageEvent::Frame(png)),
                     _ => None,
@@ -323,16 +366,58 @@ impl Chrome {
         self.send("Runtime.evaluate", json!({"expression": "history.forward()"}));
     }
 
-    /// Set the viewport, in CSS pixels.
-    pub fn resize(&mut self, width: u32, height: u32) {
+    /// Set the viewport, in CSS pixels. Frames come at this size times the
+    /// launch scale, whatever scale is asked for here, so `scale` should be
+    /// the launch scale.
+    pub fn resize(&mut self, width: u32, height: u32, scale: f64) {
         self.send(
             "Emulation.setDeviceMetricsOverride",
-            json!({"width": width, "height": height, "deviceScaleFactor": self.scale, "mobile": false}),
+            json!({"width": width, "height": height, "deviceScaleFactor": scale, "mobile": false}),
         );
+    }
+
+    /// Evaluate JavaScript in the page and have its value in the reply to
+    /// the id returned.
+    pub fn evaluate_value(&mut self, expression: &str) -> u64 {
+        self.request("Runtime.evaluate", json!({"expression": expression, "returnByValue": true}))
     }
 
     pub fn start_screencast(&mut self) {
         self.send("Page.startScreencast", json!({"format": "png", "everyNthFrame": 1}));
+    }
+
+    /// Start (or restart) the screencast as JPEG at `quality`, 0 to 100.
+    pub fn start_screencast_jpeg(&mut self, quality: u32) {
+        self.send("Page.startScreencast", json!({"format": "jpeg", "quality": quality, "everyNthFrame": 1}));
+    }
+
+    /// Leave each frame unacknowledged until `ack` is called. Chrome sends
+    /// no more than a frame or two while any are waiting, so this sets the
+    /// pace.
+    pub fn hold_acks(&mut self) {
+        self.hold_acks = true;
+    }
+
+    /// Whether a frame is waiting to be acknowledged.
+    pub fn ack_pending(&self) -> bool {
+        !self.unacked.is_empty()
+    }
+
+    /// Acknowledge the frame that has waited longest, letting Chrome send
+    /// another.
+    pub fn ack(&mut self) {
+        if let Some(ack) = self.unacked.pop_front() {
+            self.send("Page.screencastFrameAck", ack);
+        }
+    }
+
+    pub fn stop_screencast(&mut self) {
+        self.send("Page.stopScreencast", json!({}));
+    }
+
+    /// Run JavaScript in the page, ignoring the result.
+    pub fn evaluate(&mut self, expression: &str) {
+        self.send("Runtime.evaluate", json!({"expression": expression}));
     }
 
     /// `kind` is mousePressed, mouseReleased or mouseMoved; `button` is the

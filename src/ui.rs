@@ -230,7 +230,89 @@ const FOCUSED_STYLE: &str = "\x1b[0;48;5;240;38;5;231m";
 
 /// Append the escapes that draw the top bar on row 1 and leave the cursor
 /// in the address field (or hidden, if the field isn't focused).
-pub fn render_bar(out: &mut Vec<u8>, bar: &mut AddressBar, cols: usize, loading: bool) {
+/// The banner at the top of the help.
+pub const ART: [&str; 5] = [
+    r" /\_/\    _  ___ _   _        ___",
+    r"( o.o )  | |/ (_) |_| |_ _  _| _ )_ _ _____ __ _____ ___ _ _",
+    r" > ^ <   | ' <| |  _|  _| || | _ \ '_/ _ \ V  V (_-</ -_) '_|",
+    r"         |_|\_\_|\__|\__|\_, |___/_| \___/\_/\_//__/\___|_|",
+    r"                         |__/",
+];
+
+const BOX_ART: &str = "\x1b[0;48;5;236;38;5;141m";
+const BOX_STYLE: &str = "\x1b[0;48;5;236;38;5;252m";
+const BOX_TITLE: &str = "\x1b[0;48;5;236;38;5;231;1m";
+const BOX_DIM: &str = "\x1b[0;48;5;236;38;5;245m";
+
+/// A box of text in the middle of the cells from `top` down: its column,
+/// row, width and height, all in cells and 1-based.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Rect {
+    pub col: u16,
+    pub row: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// Draw `lines` in a framed box centred in a `cols` x `rows` screen, below
+/// the top bar. A line starting with `ART_LINE` is drawn in the logo's
+/// colour, one starting with `TITLE_LINE` in bold, one starting with a tab
+/// dimmed. Returns where the box is, to blank it later with `blank`. Lines
+/// too long for the screen are cut, and lines that don't fit are dropped.
+pub fn render_box(out: &mut Vec<u8>, lines: &[String], cols: u16, rows: u16) -> Rect {
+    let inner = lines.iter().map(|line| unmark(line).chars().count()).max().unwrap_or(0);
+    let width = (inner as u16 + 4).min(cols);
+    let height = (lines.len() as u16 + 2).min(rows.saturating_sub(1));
+    let col = (cols - width) / 2 + 1;
+    let row = 2 + (rows.saturating_sub(1) - height) / 2;
+    let text_width = width.saturating_sub(4) as usize;
+    let mut s = String::new();
+    let rule = "─".repeat(width.saturating_sub(2) as usize);
+    let _ = write!(s, "\x1b[{row};{col}H{BOX_STYLE}╭{rule}╮");
+    for (n, line) in lines.iter().take(height.saturating_sub(2) as usize).enumerate() {
+        let style = match line.chars().next() {
+            Some(ART_LINE) => BOX_ART,
+            Some(TITLE_LINE) => BOX_TITLE,
+            Some('\t') => BOX_DIM,
+            _ => BOX_STYLE,
+        };
+        let text: String = unmark(line).chars().take(text_width).collect();
+        let pad = text_width - text.chars().count();
+        let _ = write!(s, "\x1b[{};{col}H{BOX_STYLE}│ {style}{text}{:pad$}{BOX_STYLE} │", row + 1 + n as u16, "");
+    }
+    let _ = write!(s, "\x1b[{};{col}H{BOX_STYLE}╰{rule}╯\x1b[0m", row + height - 1);
+    out.extend_from_slice(s.as_bytes());
+    Rect { col, row, width, height }
+}
+
+/// Marks the start of a line of `render_box` to style it.
+pub const ART_LINE: char = '\u{1}';
+pub const TITLE_LINE: char = '\u{2}';
+
+fn unmark(line: &str) -> &str {
+    line.strip_prefix([ART_LINE, TITLE_LINE, '\t']).unwrap_or(line)
+}
+
+/// Blank the cells a box covered, so the page under them shows again.
+pub fn blank(out: &mut Vec<u8>, rect: Rect) {
+    let mut s = String::from("\x1b[0m");
+    for row in rect.row..rect.row + rect.height {
+        let _ = write!(s, "\x1b[{row};{}H{:width$}", rect.col, "", width = rect.width as usize);
+    }
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// Draw the top row: the buttons and `bar`, or `label` in the buttons'
+/// place when the field is for something other than the address.
+/// `badge`, if given, is shown at the right end, after the field.
+pub fn render_bar(
+    out: &mut Vec<u8>,
+    bar: &mut AddressBar,
+    cols: usize,
+    loading: bool,
+    label: Option<&str>,
+    badge: Option<&str>,
+) {
     let mut s = String::from("\x1b[1;1H");
     s.push_str(BAR_STYLE);
     if cols < MIN_COLS {
@@ -239,9 +321,18 @@ pub fn render_bar(out: &mut Vec<u8>, bar: &mut AddressBar, cols: usize, loading:
         return;
     }
     // While loading, reload becomes stop.
-    let _ = write!(s, " ←  →  {}  ", if loading { '×' } else { '↻' });
+    match label {
+        Some(label) => {
+            let _ = write!(s, " {label:<width$}", width = FIELD - 2);
+        }
+        None => {
+            let _ = write!(s, " ←  →  {}  ", if loading { '×' } else { '↻' });
+        }
+    }
 
-    let width = cols - FIELD - 2;
+    let badge = badge.filter(|badge| cols >= MIN_COLS + badge.chars().count() + 1);
+    let badge_width = badge.map_or(0, |badge| badge.chars().count() + 1);
+    let width = cols - FIELD - 2 - badge_width;
     let window = bar.window(width);
     let shown: Vec<char> = bar.text.iter().chain(&bar.completion).copied().collect();
     let typed_end = bar.text.len().clamp(window.start, window.end);
@@ -259,7 +350,11 @@ pub fn render_bar(out: &mut Vec<u8>, bar: &mut AddressBar, cols: usize, loading:
     }
     let _ = write!(s, "{:pad$}", "", pad = width - window.len() + 1);
     s.push_str(BAR_STYLE);
-    s.push_str(" \x1b[0m");
+    s.push(' ');
+    if let Some(badge) = badge {
+        let _ = write!(s, "{badge} ");
+    }
+    s.push_str("\x1b[0m");
     if bar.focused {
         // A bar-shaped cursor at the insertion point.
         let _ = write!(s, "\x1b[1;{}H\x1b[6 q\x1b[?25h", FIELD + 1 + bar.cursor - window.start);
@@ -314,10 +409,25 @@ pub fn normalize_url(input: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn box_is_centred_below_the_bar() {
+        let mut out = Vec::new();
+        let lines = vec!["\u{2}Title".to_owned(), "\tdim".to_owned(), "a longer line".to_owned()];
+        let rect = super::render_box(&mut out, &lines, 41, 21);
+        // 13 characters plus a border and a space each side; 3 lines plus borders.
+        assert_eq!(rect, super::Rect { col: 13, row: 9, width: 17, height: 5 });
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[9;13H"), "{text:?}");
+        assert!(text.contains("dim          "), "{text:?}");
+        let mut out = Vec::new();
+        super::blank(&mut out, rect);
+        assert_eq!(String::from_utf8(out).unwrap().matches("                 ").count(), 5);
+    }
+
     use super::*;
 
     fn press(bar: &mut AddressBar, code: KeyCode) -> Edit {
-        bar.key(&Key { code, ctrl: false, alt: false, shift: false })
+        bar.key(&Key { code, ctrl: false, alt: false, shift: false, cmd: false })
     }
 
     fn bar(text: &str) -> AddressBar {
@@ -372,9 +482,9 @@ mod tests {
     #[test]
     fn word_keys() {
         let mut bar = bar("one.two/three");
-        bar.key(&Key { code: KeyCode::Char('w'), ctrl: true, alt: false, shift: false });
+        bar.key(&Key { code: KeyCode::Char('w'), ctrl: true, alt: false, shift: false, cmd: false });
         assert_eq!(bar.text(), "one.two/");
-        bar.key(&Key { code: KeyCode::Left, ctrl: false, alt: true, shift: false });
+        bar.key(&Key { code: KeyCode::Left, ctrl: false, alt: true, shift: false, cmd: false });
         press(&mut bar, KeyCode::Char('_'));
         assert_eq!(bar.text(), "one._two/");
     }
@@ -420,7 +530,7 @@ mod tests {
         press(&mut bar, KeyCode::Char('g'));
         bar.set_completion(Some("o.com".into()));
         let mut out = Vec::new();
-        render_bar(&mut out, &mut bar, 40, false);
+        render_bar(&mut out, &mut bar, 40, false, None, None);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(" g\x1b[7mo.com\x1b[27m"), "{text:?}");
         // The cursor sits after the typed text, before the completion.
@@ -458,7 +568,7 @@ mod tests {
                 bar.focus();
             }
             let mut out = Vec::new();
-            render_bar(&mut out, &mut bar, 40, false);
+            render_bar(&mut out, &mut bar, 40, false, None, None);
             // Count printed cells: drop escape sequences, which end in a letter.
             let text = String::from_utf8(out).unwrap();
             let mut cells = 0;
