@@ -39,17 +39,14 @@ pub fn run(words: &[String]) -> i32 {
             println!("kb skill {did}: {}\nAgents started from now on can use it.", path.display());
             Ok(())
         }),
-        Some("remove") => path().and_then(|path| {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {
-                    if let Some(folder) = path.parent() {
-                        let _ = std::fs::remove_dir(folder);
-                    }
-                    println!("kb skill removed.");
+        Some("remove") => path().map(|path| match std::fs::remove_file(&path) {
+            Ok(()) => {
+                if let Some(folder) = path.parent() {
+                    let _ = std::fs::remove_dir(folder);
                 }
-                Err(_) => println!("kb skill isn't installed."),
+                println!("kb skill removed.");
             }
-            Ok(())
+            Err(_) => println!("kb skill isn't installed."),
         }),
         Some("status") => path().map(|path| match std::fs::read_to_string(&path) {
             Ok(text) if text == SKILL => println!("kb skill is installed: {}", path.display()),

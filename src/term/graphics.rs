@@ -77,7 +77,12 @@ pub fn decode_jpeg(bytes: &[u8]) -> Option<Pixels> {
     let mut decoder = zune_jpeg::JpegDecoder::new(bytes);
     let data = decoder.decode().ok()?;
     let (width, height) = decoder.dimensions()?;
-    (data.len() == width * height * 3).then_some(Pixels { width: width as u32, height: height as u32, alpha: false, data })
+    (data.len() == width * height * 3).then_some(Pixels {
+        width: width as u32,
+        height: height as u32,
+        alpha: false,
+        data,
+    })
 }
 
 /// Where to put frame number `seq` for the terminal to read. The protocol
@@ -106,13 +111,25 @@ pub fn put_image_file(out: &mut Vec<u8>, path: &std::path::Path, pixels: &Pixels
     put_raw_file(out, path, (pixels.width, pixels.height), pixels.alpha, id, 0, cols, rows);
 }
 
-fn put_raw_file(out: &mut Vec<u8>, path: &std::path::Path, size: (u32, u32), alpha: bool, id: u32, z: i64, cols: u16, rows: u16) {
+#[allow(clippy::too_many_arguments)]
+fn put_raw_file(
+    out: &mut Vec<u8>,
+    path: &std::path::Path,
+    size: (u32, u32),
+    alpha: bool,
+    id: u32,
+    z: i64,
+    cols: u16,
+    rows: u16,
+) {
     let format = if alpha { 32 } else { 24 };
     let name = crate::base64::encode(path.as_os_str().as_encoded_bytes());
     let (width, height) = size;
     out.extend_from_slice(
-        format!("\x1b_Ga=T,f={format},s={width},v={height},t=t,i={id},p=1,z={z},q=2,C=1,c={cols},r={rows};{name}\x1b\\")
-            .as_bytes(),
+        format!(
+            "\x1b_Ga=T,f={format},s={width},v={height},t=t,i={id},p=1,z={z},q=2,C=1,c={cols},r={rows};{name}\x1b\\"
+        )
+        .as_bytes(),
     );
 }
 
@@ -164,14 +181,23 @@ impl Tiles {
     /// (see `fits`). `top` is the screen row of the page's first row.
     /// Returns what was sent, or `None` if a file couldn't be written, when
     /// the screen is in no known state.
-    pub fn draw(&mut self, out: &mut Vec<u8>, new: Pixels, cols: u16, rows: u16, cell: (u32, u32), top: u16) -> Option<Drawn> {
+    pub fn draw(
+        &mut self,
+        out: &mut Vec<u8>,
+        new: Pixels,
+        cols: u16,
+        rows: u16,
+        cell: (u32, u32),
+        top: u16,
+    ) -> Option<Drawn> {
         for path in self.last.drain(..) {
             let _ = std::fs::remove_file(path);
         }
         let bytes = if new.alpha { 4 } else { 3 };
         let (cell_w, cell_h) = (cell.0 as usize, cell.1 as usize);
         let new = crop(new, cols as u32 * cell.0, rows as u32 * cell.1, bytes)?;
-        let old = self.shown.take().filter(|old| (old.width, old.height, old.alpha) == (new.width, new.height, new.alpha));
+        let old =
+            self.shown.take().filter(|old| (old.width, old.height, old.alpha) == (new.width, new.height, new.alpha));
         let stride = new.width as usize * bytes;
 
         // (id, column, row, columns, rows) of each tile that differs.
@@ -234,7 +260,10 @@ impl Tiles {
 /// Cut a frame down to `width` x `height`, dropping the right and bottom
 /// edges. `None` if it is smaller than that.
 fn crop(mut pixels: Pixels, width: u32, height: u32, bytes: usize) -> Option<Pixels> {
-    if pixels.width < width || pixels.height < height || pixels.data.len() != pixels.width as usize * pixels.height as usize * bytes {
+    if pixels.width < width
+        || pixels.height < height
+        || pixels.data.len() != pixels.width as usize * pixels.height as usize * bytes
+    {
         return None;
     }
     if pixels.width > width {

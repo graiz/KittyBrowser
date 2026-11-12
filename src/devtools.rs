@@ -576,7 +576,9 @@ impl ShotSize {
             "sharp" => Ok(ShotSize::Sharp),
             width => match width.trim_end_matches("px").parse::<f64>() {
                 Ok(width) if (16.0..=10_000.0).contains(&width) => Ok(ShotSize::Width(width)),
-                _ => Err(format!("{width:?} isn't a size; give small, normal, sharp, or a width in pixels such as 800")),
+                _ => {
+                    Err(format!("{width:?} isn't a size; give small, normal, sharp, or a width in pixels such as 800"))
+                }
             },
         }
     }
@@ -878,7 +880,8 @@ fn locate(selector: &str, prepare: &str) -> String {
 }
 
 /// For `locate`: focus a text field, refusing anything that isn't one.
-const FOCUS: &str = "if (el.localName === 'select') throw new Error('that element is a <select>; use: kb ctl select'); \
+const FOCUS: &str =
+    "if (el.localName === 'select') throw new Error('that element is a <select>; use: kb ctl select'); \
      if (el.matches('input:is([type=checkbox], [type=radio])')) \
        throw new Error('that element is a ' + el.type + '; use: kb ctl click'); \
      if (!el.isContentEditable && !el.matches('textarea, input:not([type=button], [type=submit], [type=reset], \
@@ -895,9 +898,17 @@ const TEXT_OF: &str = "__kb.text(el)";
 /// Whether a page title is a bot check's rather than the site's.
 fn is_bot_check(title: &str) -> bool {
     let title = title.to_lowercase();
-    ["just a moment", "client challenge", "attention required", "captcha", "verify you are human", "are you a robot", "security check"]
-        .iter()
-        .any(|sign| title.contains(sign))
+    [
+        "just a moment",
+        "client challenge",
+        "attention required",
+        "captcha",
+        "verify you are human",
+        "are you a robot",
+        "security check",
+    ]
+    .iter()
+    .any(|sign| title.contains(sign))
 }
 
 /// Whether a request is the browser's own look for a site icon, which a
@@ -964,7 +975,11 @@ impl Devtools {
                 .flatten()
                 .filter_map(|i| all.get(i.as_u64()? as usize)?["text"].as_str().map(str::to_owned))
                 .collect();
-            if hits.is_empty() { rule["selectorList"]["text"].as_str().unwrap_or("?").to_owned() } else { hits.join(", ") }
+            if hits.is_empty() {
+                rule["selectorList"]["text"].as_str().unwrap_or("?").to_owned()
+            } else {
+                hits.join(", ")
+            }
         };
         for entry in matched["matchedCSSRules"].as_array().into_iter().flatten() {
             for (value, important) in declarations(&entry["rule"]["style"]) {
@@ -978,7 +993,9 @@ impl Devtools {
             // Nothing on the element: say where it would inherit from, if anywhere.
             for (depth, ancestor) in matched["inherited"].as_array().into_iter().flatten().enumerate() {
                 let rules = ancestor["matchedCSSRules"].as_array().cloned().unwrap_or_default();
-                if let Some((entry, value)) = rules.iter().rev().find_map(|e| Some((e, declarations(&e["rule"]["style"]).pop()?.0))) {
+                if let Some((entry, value)) =
+                    rules.iter().rev().find_map(|e| Some((e, declarations(&e["rule"]["style"]).pop()?.0)))
+                {
                     return format!(
                         "no rule sets it on the element itself; it inherits {value} from {} up \
                          (the ancestor matched by {}, {})",
@@ -1191,7 +1208,8 @@ impl Devtools {
                     self.park(id, Pending::Eval(reply.clone()));
                 }
                 "style" if flag("why") => {
-                    let property = arg("property").ok_or("style --why needs a property, such as: kb ctl style h1 color --why")?;
+                    let property =
+                        arg("property").ok_or("style --why needs a property, such as: kb ctl style h1 color --why")?;
                     if !self.css_on {
                         self.css_on = true;
                         chrome.request("DOM.enable", json!({}));
@@ -1259,7 +1277,12 @@ impl Devtools {
                 "outline" => self.evaluate(chrome, &script(OUTLINE), Pending::Eval(reply.clone())),
                 "tables" => {
                     let index = match arg("number") {
-                        Some(n) => n.parse::<u32>().ok().filter(|n| *n > 0).ok_or("tables takes a table number, such as 2")?.to_string(),
+                        Some(n) => n
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|n| *n > 0)
+                            .ok_or("tables takes a table number, such as 2")?
+                            .to_string(),
                         None => "null".to_owned(),
                     };
                     let limit = arg("limit").and_then(|n| n.parse::<u32>().ok()).unwrap_or(200);
@@ -1285,7 +1308,8 @@ impl Devtools {
                     self.evaluate(chrome, &script, Pending::Eval(reply.clone()));
                 }
                 "select" => {
-                    let script = format!("{}({}, {})", script(SELECT), quote(need("selector")?), quote(need("option")?));
+                    let script =
+                        format!("{}({}, {})", script(SELECT), quote(need("selector")?), quote(need("option")?));
                     self.evaluate(chrome, &script, Pending::Acted(reply.clone(), self.baseline()));
                 }
                 "hover" => {
@@ -1334,7 +1358,8 @@ impl Devtools {
                                 "storageTypes": "cookies,local_storage,session_storage,indexeddb,cache_storage,service_workers",
                             }),
                         );
-                        let message = format!("cleared cookies and storage for {origin}; reload to start the page fresh");
+                        let message =
+                            format!("cleared cookies and storage for {origin}; reload to start the page fresh");
                         self.park(id, Pending::Done(reply.clone(), message, self.baseline(), None));
                     } else {
                         self.evaluate(chrome, STORAGE, Pending::Eval(reply.clone()));
@@ -1353,7 +1378,9 @@ impl Devtools {
                     let (offline, latency, down, up, name) = match need("speed")? {
                         "off" | "none" => (false, 0.0, -1.0, -1.0, "off"),
                         "slow" | "slow-3g" => (false, 400.0, 400.0, 400.0, "slow: 400 ms round trips, 400 kbit/s"),
-                        "fast" | "fast-3g" | "4g" => (false, 150.0, 1600.0, 750.0, "fast: 150 ms round trips, 1.6 Mbit/s down"),
+                        "fast" | "fast-3g" | "4g" => {
+                            (false, 150.0, 1600.0, 750.0, "fast: 150 ms round trips, 1.6 Mbit/s down")
+                        }
                         "offline" => (true, 0.0, -1.0, -1.0, "offline"),
                         other => return Err(format!("throttle takes off, slow, fast or offline, not {other:?}")),
                     };
@@ -1366,7 +1393,10 @@ impl Devtools {
                         }),
                     );
                     self.throttle = if name == "off" { String::new() } else { name.to_owned() };
-                    text(&reply, format!("network: {name}{}", if name == "off" { "" } else { "; until kb ctl throttle off" }));
+                    text(
+                        &reply,
+                        format!("network: {name}{}", if name == "off" { "" } else { "; until kb ctl throttle off" }),
+                    );
                 }
                 "click" => {
                     let selector = need("selector")?;
@@ -1374,7 +1404,9 @@ impl Devtools {
                         Some(at) => Some(
                             at.split_once(',')
                                 .and_then(|(x, y)| Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?)))
-                                .ok_or("--at takes X,Y: CSS pixels from the element's top left corner, such as 10,20")?,
+                                .ok_or(
+                                    "--at takes X,Y: CSS pixels from the element's top left corner, such as 10,20",
+                                )?,
                         ),
                         None => None,
                     };
@@ -1397,7 +1429,13 @@ impl Devtools {
                     let since = self.baseline();
                     chrome.key(&key);
                     let message = format!("pressed {name}");
-                    self.settling.push(Settling { reply: reply.clone(), message, since, at: Instant::now(), verify: None });
+                    self.settling.push(Settling {
+                        reply: reply.clone(),
+                        message,
+                        since,
+                        at: Instant::now(),
+                        verify: None,
+                    });
                 }
                 "wait" => {
                     let timeout = match arg("timeout") {
@@ -1413,14 +1451,17 @@ impl Devtools {
                     let (what, condition) = match arg("text") {
                         _ if flag("gone") => (format!("{selector} to be gone"), "all.length === 0".to_owned()),
                         _ if arg("count").is_some() => {
-                            let count = arg("count").and_then(|n| n.parse::<u32>().ok()).ok_or("--count needs a number")?;
+                            let count =
+                                arg("count").and_then(|n| n.parse::<u32>().ok()).ok_or("--count needs a number")?;
                             (format!("{count} or more of {selector}"), format!("all.length >= {count}"))
                         }
                         Some(wanted) => (
                             format!("{selector} containing {wanted:?}"),
                             format!("all.some(el => __kb.visible(el) && {TEXT_OF}.includes({}))", quote(wanted)),
                         ),
-                        None if flag("visible") => (format!("{selector} to be shown"), "all.some(el => __kb.visible(el))".to_owned()),
+                        None if flag("visible") => {
+                            (format!("{selector} to be shown"), "all.some(el => __kb.visible(el))".to_owned())
+                        }
                         None => (selector.to_owned(), "all.length > 0".to_owned()),
                     };
                     self.next_wait += 1;
@@ -1497,7 +1538,12 @@ impl Devtools {
                 };
                 let url = entry["url"].as_str().unwrap_or("");
                 if !is_favicon(url) {
-                    self.log_at(level, entry["text"].as_str().unwrap_or("").to_owned(), url, entry["lineNumber"].as_u64());
+                    self.log_at(
+                        level,
+                        entry["text"].as_str().unwrap_or("").to_owned(),
+                        url,
+                        entry["lineNumber"].as_u64(),
+                    );
                 }
             }
             "CSS.styleSheetAdded" => {
@@ -1516,7 +1562,11 @@ impl Devtools {
                 let accept = !self.dismiss || kind == "beforeunload";
                 let typed = self.prompt_text.as_deref().or(params["defaultPrompt"].as_str()).unwrap_or("");
                 chrome.request("Page.handleJavaScriptDialog", json!({"accept": accept, "promptText": typed}));
-                let mut line = format!("{kind} {:?} was {}", params["message"].as_str().unwrap_or(""), if accept { "accepted" } else { "dismissed" });
+                let mut line = format!(
+                    "{kind} {:?} was {}",
+                    params["message"].as_str().unwrap_or(""),
+                    if accept { "accepted" } else { "dismissed" }
+                );
                 if kind == "prompt" && accept {
                     let _ = write!(line, " with {typed:?}");
                 }
@@ -1584,11 +1634,8 @@ impl Devtools {
                     self.new_page(loader, params["frame"]["url"].as_str().unwrap_or(""));
                 }
                 let frame = &params["frame"];
-                self.url = format!(
-                    "{}{}",
-                    frame["url"].as_str().unwrap_or(""),
-                    frame["urlFragment"].as_str().unwrap_or("")
-                );
+                self.url =
+                    format!("{}{}", frame["url"].as_str().unwrap_or(""), frame["urlFragment"].as_str().unwrap_or(""));
                 self.moved();
             }
             "Page.navigatedWithinDocument" if main_frame => {
@@ -1614,7 +1661,13 @@ impl Devtools {
         if self.console.len() == MAX_CONSOLE {
             self.console.pop_front();
         }
-        self.console.push_back(Message { seq: self.next_seq, level: level.to_owned(), text, source, url: String::new() });
+        self.console.push_back(Message {
+            seq: self.next_seq,
+            level: level.to_owned(),
+            text,
+            source,
+            url: String::new(),
+        });
         self.next_seq += 1;
     }
 
@@ -1670,17 +1723,25 @@ impl Devtools {
         let ignored = |url: &str| wait.ignore.iter().any(|host| url.contains(host.as_str()));
         let mut problems: Vec<String> = self
             .page_console()
-            .filter(|m| m.level == "error" && !ignored(&m.url) && !wait.ignore.iter().any(|host| m.text.contains(host.as_str())))
+            .filter(|m| {
+                m.level == "error" && !ignored(&m.url) && !wait.ignore.iter().any(|host| m.text.contains(host.as_str()))
+            })
             .filter(|m| {
                 // "Failed to load resource" names no host; it goes with an ignored request.
                 !(m.text.starts_with("Failed to load resource")
-                    && self.requests.iter().any(|r| r.failed() && ignored(&r.url) && !m.source.is_empty() && r.url.contains(m.source.split(':').next().unwrap_or("\u{0}"))))
+                    && self.requests.iter().any(|r| {
+                        r.failed()
+                            && ignored(&r.url)
+                            && !m.source.is_empty()
+                            && r.url.contains(m.source.split(':').next().unwrap_or("\u{0}"))
+                    }))
             })
             .map(Message::line)
             .collect();
         problems.extend(self.requests.iter().filter(|r| r.failed() && !ignored(&r.url)).map(NetRequest::line));
         if problems.is_empty() && refused.is_empty() {
-            let except = if wait.ignore.is_empty() { String::new() } else { format!(" (ignoring {})", wait.ignore.join(", ")) };
+            let except =
+                if wait.ignore.is_empty() { String::new() } else { format!(" (ignoring {})", wait.ignore.join(", ")) };
             text(&wait.reply, format!("ok: {}, no console errors, no failed requests{except}", self.url));
         } else {
             if let Some(status) = document.and_then(|document| document.status).filter(|status| *status >= 400) {
@@ -1763,7 +1824,9 @@ impl Devtools {
                         };
                         // Clicking a container hits whatever is in its middle.
                         let selector = match rect["landed"].as_str() {
-                            Some(inner) if !inner.is_empty() => format!("{selector}; the click landed on {inner} inside it"),
+                            Some(inner) if !inner.is_empty() => {
+                                format!("{selector}; the click landed on {inner} inside it")
+                            }
                             _ => selector,
                         };
                         chrome.mouse("mouseMoved", x, y, "none", 0, 0, 0);
@@ -1878,7 +1941,8 @@ impl Devtools {
                     let mut out = format!("{} on {selector}:", plural(listeners.len(), "event listener"));
                     for listener in &listeners {
                         let handler = listener["handler"]["description"].as_str().unwrap_or("");
-                        let handler: String = handler.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(90).collect();
+                        let handler: String =
+                            handler.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(90).collect();
                         let mut flags = Vec::new();
                         if listener["useCapture"] == true {
                             flags.push("capture");
@@ -1926,7 +1990,10 @@ impl Devtools {
                         chrome.request("Page.navigateToHistoryEntry", json!({"entryId": entry["id"]}));
                         self.moving.push((reply, Instant::now() + MOVE_TIMEOUT));
                     }
-                    None => fail(&reply, format!("there is no {} page to go to", if step < 0 { "earlier" } else { "later" })),
+                    None => fail(
+                        &reply,
+                        format!("there is no {} page to go to", if step < 0 { "earlier" } else { "later" }),
+                    ),
                 }
             }
             Pending::Done(reply, message, since, verify) => match result {
@@ -1937,14 +2004,20 @@ impl Devtools {
                 let title = evaluated(result).map(show).unwrap_or_default();
                 let mut out = format!("{before}\ntitle: {title}\n{after}");
                 if is_bot_check(&title) {
-                    out.push_str("\nnote: this looks like a bot check or CAPTCHA, not the page itself; kb can't get past it");
+                    out.push_str(
+                        "\nnote: this looks like a bot check or CAPTCHA, not the page itself; kb can't get past it",
+                    );
                 }
                 text(&reply, out);
             }
             Pending::Acted(reply, since) => match evaluated(result) {
-                Ok(object) => {
-                    self.settling.push(Settling { reply, message: show(object), since, at: Instant::now(), verify: None })
-                }
+                Ok(object) => self.settling.push(Settling {
+                    reply,
+                    message: show(object),
+                    since,
+                    at: Instant::now(),
+                    verify: None,
+                }),
                 Err(error) => fail(&reply, error),
             },
             Pending::WaitCheck(id) => {

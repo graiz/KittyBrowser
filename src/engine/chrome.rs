@@ -81,7 +81,8 @@ fn find_binary() -> Option<PathBuf> {
         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
         "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
     ];
-    const NAMES: &[&str] = &["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
+    const NAMES: &[&str] =
+        &["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"];
     let on_path = std::env::var_os("PATH").into_iter().flat_map(|path| {
         let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
         dirs.into_iter().flat_map(|dir| NAMES.iter().map(move |name| dir.join(name)))
@@ -165,8 +166,8 @@ impl Chrome {
     /// Start Chrome on `profile` and attach to its page. The receiver is
     /// returned separately so a thread can block on it.
     pub fn launch(profile: &Path, scale: f64) -> Result<(Chrome, Receiver), String> {
-        let binary = find_binary()
-            .ok_or("can't find Chrome; install it or set KB_CHROME to a Chromium-based browser")?;
+        let binary =
+            find_binary().ok_or("can't find Chrome; install it or set KB_CHROME to a Chromium-based browser")?;
         let pipe_error = |e| format!("creating a pipe: {e}");
         let (child_in, to_chrome) = pipe().map_err(pipe_error)?;
         let (from_chrome, child_out) = pipe().map_err(pipe_error)?;
@@ -209,18 +210,12 @@ impl Chrome {
         let target = match page {
             Some(target) => target,
             None => {
-                let created =
-                    call(&mut tx, &mut rx, "Target.createTarget", json!({"url": "about:blank"}), None)?;
+                let created = call(&mut tx, &mut rx, "Target.createTarget", json!({"url": "about:blank"}), None)?;
                 created["targetId"].as_str().ok_or("Chrome gave no page")?.to_owned()
             }
         };
-        let attached = call(
-            &mut tx,
-            &mut rx,
-            "Target.attachToTarget",
-            json!({"targetId": target, "flatten": true}),
-            None,
-        )?;
+        let attached =
+            call(&mut tx, &mut rx, "Target.attachToTarget", json!({"targetId": target, "flatten": true}), None)?;
         let session = attached["sessionId"].as_str().ok_or("Chrome gave no session")?.to_owned();
         let s = Some(session.as_str());
 
@@ -241,7 +236,17 @@ impl Chrome {
         call(&mut tx, &mut rx, "Emulation.setFocusEmulationEnabled", json!({"enabled": true}), s)?;
         call(&mut tx, &mut rx, "Target.setDiscoverTargets", json!({"discover": true}), None)?;
 
-        let chrome = Chrome { child, tx, session, target, main_frame, popups: HashSet::new(), cache_off: false, hold_acks: false, unacked: Default::default() };
+        let chrome = Chrome {
+            child,
+            tx,
+            session,
+            target,
+            main_frame,
+            popups: HashSet::new(),
+            cache_off: false,
+            hold_acks: false,
+            unacked: Default::default(),
+        };
         Ok((chrome, rx))
     }
 
@@ -466,9 +471,7 @@ impl Chrome {
                     modifiers |= SHIFT;
                 }
                 let (code, vk) = match c {
-                    'a'..='z' | 'A'..='Z' => {
-                        (format!("Key{}", c.to_ascii_uppercase()), c.to_ascii_uppercase() as u32)
-                    }
+                    'a'..='z' | 'A'..='Z' => (format!("Key{}", c.to_ascii_uppercase()), c.to_ascii_uppercase() as u32),
                     '0'..='9' => (format!("Digit{c}"), c as u32),
                     ' ' => ("Space".to_owned(), 32),
                     _ => (String::new(), 0),

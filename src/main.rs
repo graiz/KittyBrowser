@@ -62,10 +62,7 @@ fn main() {
         _ => {}
     }
 
-    let mut options = app::Options {
-        url: None,
-        scale: if cfg!(target_os = "macos") { 2.0 } else { 1.0 },
-    };
+    let mut options = app::Options { url: None, scale: if cfg!(target_os = "macos") { 2.0 } else { 1.0 } };
     let mut address = Vec::new();
     let mut args = words.into_iter();
     while let Some(arg) = args.next() {

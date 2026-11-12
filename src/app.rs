@@ -344,35 +344,39 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     }
                     app.devtools.observe(&message, &mut app.chrome);
                     match app.chrome.handle(message) {
-                    Some(PageEvent::Frame(png)) => {
-                        let fits = app.fits(&png);
-                        log(format_args!("frame {:?}, {} bytes, fits: {fits}", graphics::png_size(&png), png.len()));
-                        // A frame rendered for another size (the pane's
-                        // first guess, or the size before a resize) would be
-                        // stretched to fill the pane: wait for the right one.
-                        // Some pages repaint without changing: the same
-                        // frame again is nothing to draw.
-                        if fits && app.frame.as_deref() != Some(png.as_str()) {
-                            app.frame = Some(png);
-                            // The blank page that comes first stays under the logo.
-                            new_frame = app.splash.is_none() || app.committed;
+                        Some(PageEvent::Frame(png)) => {
+                            let fits = app.fits(&png);
+                            log(format_args!(
+                                "frame {:?}, {} bytes, fits: {fits}",
+                                graphics::png_size(&png),
+                                png.len()
+                            ));
+                            // A frame rendered for another size (the pane's
+                            // first guess, or the size before a resize) would be
+                            // stretched to fill the pane: wait for the right one.
+                            // Some pages repaint without changing: the same
+                            // frame again is nothing to draw.
+                            if fits && app.frame.as_deref() != Some(png.as_str()) {
+                                app.frame = Some(png);
+                                // The blank page that comes first stays under the logo.
+                                new_frame = app.splash.is_none() || app.committed;
+                            }
                         }
-                    }
-                    Some(PageEvent::Url(url)) => {
-                        log(format_args!("url {url}"));
-                        app.committed |= url != "about:blank";
-                        app.history.record(&url);
-                        app.url = if url == "about:blank" { String::new() } else { url };
-                        if !app.bar.focused() {
-                            app.bar.set_text(&app.url);
+                        Some(PageEvent::Url(url)) => {
+                            log(format_args!("url {url}"));
+                            app.committed |= url != "about:blank";
+                            app.history.record(&url);
+                            app.url = if url == "about:blank" { String::new() } else { url };
+                            if !app.bar.focused() {
+                                app.bar.set_text(&app.url);
+                            }
+                            redraw = true;
                         }
-                        redraw = true;
-                    }
-                    Some(PageEvent::Loading(loading)) => {
-                        app.loading = loading;
-                        redraw = true;
-                    }
-                    None => {}
+                        Some(PageEvent::Loading(loading)) => {
+                            app.loading = loading;
+                            redraw = true;
+                        }
+                        None => {}
                     }
                 }
                 Msg::TermClosed => {
@@ -428,7 +432,6 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     result
 }
 
-
 impl App {
     /// One cell in device pixels.
     fn cell(&self) -> (u32, u32) {
@@ -479,7 +482,8 @@ impl App {
                 // keeping its shape as nearly as whole cells allow.
                 let (frame_w, frame_h) = (width as f64 * self.page_scale(), height as f64 * self.page_scale());
                 let fit = (space_w / frame_w).min(space_h / frame_h).min(1.0);
-                let cells = |pixels: f64, cell: u32, most: u16| ((pixels * fit / cell as f64).round() as u16).clamp(1, most);
+                let cells =
+                    |pixels: f64, cell: u32, most: u16| ((pixels * fit / cell as f64).round() as u16).clamp(1, most);
                 self.shown = (cells(frame_w, cell_w, cols), cells(frame_h, cell_h, rows));
                 (width as f64, height as f64)
             }
@@ -570,7 +574,10 @@ impl App {
             ("zoom", format!("{:.0}%", self.zoom * 100.0)),
             ("viewport", format!("{}x{} CSS pixels", self.viewport.0, self.viewport.1)),
             ("pane", format!("{}x{} cells of {cell_w}x{cell_h} pixels", self.window.cols, self.window.rows)),
-            ("frames", if self.by_file { "by file, changed blocks only".to_owned() } else { "through the pty".to_owned() }),
+            (
+                "frames",
+                if self.by_file { "by file, changed blocks only".to_owned() } else { "through the pty".to_owned() },
+            ),
             ("agents", format!("kb ctl -i {} ...   (kb ctl --help)", self.instance)),
         ] {
             info.push(format!("\t{name:<10}{value}"));

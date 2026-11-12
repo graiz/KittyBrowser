@@ -72,14 +72,20 @@ pub enum Event {
     Mouse(Mouse),
     Paste(String),
     /// Reply to `CSI 16 t`: one cell, in pixels.
-    CellSize { width: u32, height: u32 },
+    CellSize {
+        width: u32,
+        height: u32,
+    },
     /// Reply to the mode 1016 query: whether mouse reports are in pixels.
     PixelMouse(bool),
     /// The pane gained or lost keyboard focus.
     Focus(bool),
     /// Reply to a graphics command: the image id it named, and whether the
     /// terminal accepted it.
-    Graphics { id: u32, ok: bool },
+    Graphics {
+        id: u32,
+        ok: bool,
+    },
 }
 
 const PASTE_END: &[u8] = b"\x1b[201~";
@@ -187,9 +193,7 @@ fn plain_key(bytes: &[u8]) -> Option<(Option<Key>, usize)> {
         b'\r' | b'\n' => Some(Key::plain(KeyCode::Enter)),
         b'\t' => Some(Key::plain(KeyCode::Tab)),
         0x7f | 0x08 => Some(Key::plain(KeyCode::Backspace)),
-        0x01..=0x1a => {
-            Some(Key { ctrl: true, ..Key::plain(KeyCode::Char((first - 1 + b'a') as char)) })
-        }
+        0x01..=0x1a => Some(Key { ctrl: true, ..Key::plain(KeyCode::Char((first - 1 + b'a') as char)) }),
         // Ctrl+/ and Ctrl+? in the legacy encoding.
         0x1f => Some(Key { ctrl: true, ..Key::plain(KeyCode::Char('/')) }),
         0x00..=0x1f => None,
@@ -294,15 +298,7 @@ fn mouse(report: &str, pressed: bool) -> Option<Event> {
     } else {
         (MouseKind::Release, button)
     };
-    Some(Event::Mouse(Mouse {
-        kind,
-        button,
-        x,
-        y,
-        shift: bits & 4 != 0,
-        alt: bits & 8 != 0,
-        ctrl: bits & 16 != 0,
-    }))
+    Some(Event::Mouse(Mouse { kind, button, x, y, shift: bits & 4 != 0, alt: bits & 8 != 0, ctrl: bits & 16 != 0 }))
 }
 
 #[cfg(test)]
@@ -337,7 +333,7 @@ mod tests {
     fn arrows_and_modifiers() {
         assert_eq!(parse(b"\x1b[A\x1bOD\x1b[3~"), [key(KeyCode::Up), key(KeyCode::Left), key(KeyCode::Delete)]);
         let alt_left = Event::Key(Key { alt: true, ..Key::plain(KeyCode::Left) });
-        assert_eq!(parse(b"\x1b[1;3D"), [alt_left.clone()]);
+        assert_eq!(parse(b"\x1b[1;3D"), std::slice::from_ref(&alt_left));
         assert_eq!(parse(b"\x1bb"), [alt_left]);
         let alt_x = Key { alt: true, ..Key::plain(KeyCode::Char('x')) };
         assert_eq!(parse(b"\x1bx"), [Event::Key(alt_x)]);
@@ -350,7 +346,15 @@ mod tests {
 
     #[test]
     fn mouse_reports() {
-        let base = Mouse { kind: MouseKind::Press, button: Some(Button::Left), x: 12, y: 3, ctrl: false, alt: false, shift: false };
+        let base = Mouse {
+            kind: MouseKind::Press,
+            button: Some(Button::Left),
+            x: 12,
+            y: 3,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        };
         assert_eq!(parse(b"\x1b[<0;12;3M"), [Event::Mouse(base)]);
         assert_eq!(parse(b"\x1b[<0;12;3m"), [Event::Mouse(Mouse { kind: MouseKind::Release, ..base })]);
         assert_eq!(parse(b"\x1b[<35;12;3M"), [Event::Mouse(Mouse { kind: MouseKind::Move, button: None, ..base })]);
@@ -359,10 +363,7 @@ mod tests {
             parse(b"\x1b[<65;12;3M"),
             [Event::Mouse(Mouse { kind: MouseKind::Wheel(0, 1), button: None, ..base })]
         );
-        assert_eq!(
-            parse(b"\x1b[<18;12;3M"),
-            [Event::Mouse(Mouse { button: Some(Button::Right), ctrl: true, ..base })]
-        );
+        assert_eq!(parse(b"\x1b[<18;12;3M"), [Event::Mouse(Mouse { button: Some(Button::Right), ctrl: true, ..base })]);
     }
 
     #[test]

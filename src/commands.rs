@@ -358,10 +358,7 @@ mod tests {
         assert_eq!(parse("status").unwrap(), json!({}));
         assert_eq!(parse("open example.com").unwrap(), json!({"url": "example.com"}));
         assert_eq!(parse("console --errors").unwrap(), json!({"errors": true}));
-        assert_eq!(
-            parse("wait #done --timeout 3").unwrap(),
-            json!({"selector": "#done", "timeout": "3"})
-        );
+        assert_eq!(parse("wait #done --timeout 3").unwrap(), json!({"selector": "#done", "timeout": "3"}));
         assert_eq!(parse("wait --timeout=3 #done").unwrap(), json!({"selector": "#done", "timeout": "3"}));
         assert_eq!(parse("screenshot --selector h1 --full").unwrap(), json!({"selector": "h1", "full": true}));
     }
@@ -387,7 +384,10 @@ mod tests {
     #[test]
     fn synopsis_and_tool() {
         let wait = find("wait").unwrap();
-        assert_eq!(wait.synopsis(), "wait <selector> [--text TEXT] [--gone] [--count N] [--visible] [--timeout SECONDS]");
+        assert_eq!(
+            wait.synopsis(),
+            "wait <selector> [--text TEXT] [--gone] [--count N] [--visible] [--timeout SECONDS]"
+        );
         assert!(wait.describe().contains("--timeout SECONDS    how long to wait"));
         // Saving to a file is the command line's business only.
         let shot = find("screenshot").unwrap();

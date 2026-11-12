@@ -330,7 +330,7 @@ pub fn render_bar(
         }
     }
 
-    let badge = badge.filter(|badge| cols >= MIN_COLS + badge.chars().count() + 1);
+    let badge = badge.filter(|badge| cols > MIN_COLS + badge.chars().count());
     let badge_width = badge.map_or(0, |badge| badge.chars().count() + 1);
     let width = cols - FIELD - 2 - badge_width;
     let window = bar.window(width);

@@ -75,7 +75,8 @@ impl Splash {
         let space = (cols as f64 * cell.0 as f64).min(rows as f64 * cell.1 as f64);
         let size = (space * 0.4).min(pixels.width as f64 * 2.0);
         let width = ((size / cell.0 as f64).round() as u16).clamp(1, cols);
-        let height = ((size * pixels.height as f64 / pixels.width as f64 / cell.1 as f64).round() as u16).clamp(1, rows);
+        let height =
+            ((size * pixels.height as f64 / pixels.width as f64 / cell.1 as f64).round() as u16).clamp(1, rows);
         let (col, row) = ((cols - width) / 2 + 1, top + (rows - height) / 2);
 
         // Paint the pane black around the logo.
