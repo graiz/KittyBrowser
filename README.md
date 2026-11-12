@@ -1,4 +1,4 @@
-# kittybrowser
+# KittyBrowser (`kb`)
 
 A fast web browser that runs inside a terminal pane. Pages are rendered to
 pixels and drawn with the kitty graphics protocol, so you get the real layout,
@@ -8,7 +8,87 @@ fonts, and images, not a text approximation. Written in Rust. The binary is `kb`
 kb https://example.com
 ```
 
-**Status:** outline only. The code compiles and does nothing yet.
+**Status:** a working MVP. It opens pages, and you can scroll, click, type,
+and go back and forward. It needs Chrome (or another Chromium-based browser)
+installed, and has been run in Rex only.
+
+## Use
+
+```sh
+kb                     # start with the address field focused
+kb gregraiz.com        # open a page
+kb rust traits         # anything that isn't an address is a web search
+kb ./page.html         # a local file
+```
+
+The top row holds back, forward and reload buttons and the address field; the
+page fills the rest of the pane. The mouse works on both: click the buttons,
+click the address to edit it, and click, drag and scroll the page.
+
+| Key | Does |
+| --- | --- |
+| Ctrl+L | Edit the address (it starts selected, so typing replaces it) |
+| Enter / Esc | Go to the address / cancel the edit |
+| Right, End | Accept the suggested completion (Backspace rejects it) |
+| Alt+Left, Alt+Right | Back, forward |
+| Ctrl+R | Reload |
+| Ctrl+Q | Quit |
+
+Every other key goes to the page. While a page loads, the reload button turns
+into a stop button.
+
+As you type an address, the field completes it from pages you have visited,
+most visited first, with the suggested part highlighted. Visits are kept in
+`~/.kittybrowser/history`; nothing you type is sent to a suggestion service.
+
+Cookies and logins are kept in `~/.kittybrowser/profile`, separate from your
+everyday Chrome. Only one `kb` can use the profile at a time.
+
+## For agents: `kb ctl` and MCP
+
+A running kb can be driven from another terminal, which is how a coding agent
+looks at and tests the page it is working on while you watch the same page.
+
+```sh
+kb ctl open http://localhost:3000    # waits for the load, reports errors
+kb ctl screenshot --out page.png
+kb ctl click '#save'                 # reports errors and dialogs it causes
+kb ctl console --errors
+kb ctl viewport 375x800              # test a narrow layout; reset to undo
+kb ctl check                         # exit 1 if the page has errors
+```
+
+`kb ctl --help` lists all the commands, and `kb ctl <command> --help`
+describes one. They cover: status, open, reload, check, viewport, back,
+forward, screenshot, console, network, eval, text, html, style, box, scroll,
+click, hover, dialog, type, select, press and wait.
+
+The same commands are available as MCP tools. The MCP server is off until you
+turn it on, and offers no tools while off:
+
+```sh
+kb mcp on        # also prints the line that registers it with Claude Code
+kb mcp off
+kb mcp status
+```
+
+Things to know:
+
+- Commands act on the one page in the pane; there are no tabs.
+- `reload` (and Ctrl+R) always bypass the cache, and pages on local addresses
+  (files, localhost, private IPs, `.local`, `.test`, `.vibe`) are never
+  cached, so an edit always shows.
+- `alert`, `confirm` and `prompt` are answered at once (accepted by default;
+  `kb ctl dialog dismiss` changes that) and recorded in the console.
+- The control socket is `~/.kittybrowser/kb.sock`, readable only by you.
+  Anything that can reach it can run JavaScript in your logged-in pages.
+
+Options and environment:
+
+- `--scale N`: device pixels per CSS pixel. Defaults to 2 on macOS and 1
+  elsewhere; pass `--scale 1` on a non-retina display.
+- `KB_CHROME`: path to the browser binary, if it isn't found automatically.
+- `KB_LOG`: a file to append diagnostics to (detected sizes, frames, clicks).
 
 ## Why
 
@@ -37,44 +117,54 @@ makes that live, interactive, and fast.
 - Terminals without the kitty graphics protocol.
 - Being a daily-driver replacement for a desktop browser.
 
-## The main decision: the page engine
+## The page engine
 
-Everything else is small next to this. The options, to be settled by a spike:
-
-| Engine | Speed | Web compatibility | Effort |
-| --- | --- | --- | --- |
-| Drive headless Chrome over the DevTools protocol | Slow start, fine after | Complete, with JavaScript | Low |
-| Embed a Rust engine (Servo, or Blitz) | Fast start, one process | Partial; JavaScript varies | Medium to high |
-| Write our own HTML and CSS subset | Fastest | Poor | Very high |
-
-Proposed route: define an `Engine` trait first (see `src/engine/mod.rs`), ship
-the Chrome backend to get a working browser, then add a native Rust backend and
-measure. The claims in the table are expectations, not measurements.
+The MVP drives headless Chrome over the DevTools protocol: complete web
+compatibility for little code, at the cost of a second or so to start and a
+Chrome dependency. A native Rust engine (Servo or Blitz) would start faster
+and run in one process but render fewer sites correctly; it remains a later
+experiment.
 
 ## Milestones
 
-1. **Still image.** `kb URL` draws one frame at the pane's size and exits.
-   Matches the shell prototype, in Rust.
-2. **Live view.** Stay open, redraw on resize, scroll with keys and the mouse
-   wheel.
-3. **Interaction.** Mouse clicks, text input, keyboard link hints, back and
-   forward, an address bar.
-4. **Speed.** Faster image transfer, redraw only changed regions, cache frames
-   while scrolling. Add a benchmark so "fast" is a number.
-5. **Native engine.** A second backend that doesn't need Chrome.
+1. **Done: a working browser.** Live view, resize, scrolling, mouse and
+   keyboard input, back and forward, an address bar.
+2. **Speed.** Faster image transfer, redraw only changed regions, keep Chrome
+   warm between runs. Add a benchmark so "fast" is a number.
+3. **Done: agent tools.** `kb ctl` and an MCP server; see above.
+4. **Hooks.** Reload on file change, and errors fed back to the agent after
+   each edit.
+5. **Keyboard link hints and a one-shot mode** (`kb --print URL`) that draws
+   one frame inline and exits, for agents.
+6. **Native engine.** A second backend that doesn't need Chrome.
 
 ## Layout
 
 ```
 src/main.rs            argument parsing, starts the app
 src/app.rs             event loop
-src/engine/            the Engine trait and its backends
+src/engine/cdp.rs      DevTools protocol over Chrome's debugging pipe
+src/engine/chrome.rs   starts Chrome; commands to the page, events from it
+src/control.rs         the socket `kb ctl` and the MCP server talk to
+src/commands.rs        the agent commands: one table for CLI and MCP
+src/devtools.rs        carries the commands out; console and network logs
+src/cli.rs             `kb ctl`
+src/mcp.rs             `kb mcp`
+src/history.rs         visited pages, for address completion
 src/term/graphics.rs   kitty graphics protocol
-src/term/input.rs      keyboard and mouse
-src/term/size.rs       pane size and resizes
-src/ui.rs              address bar, status line, link hints
+src/term/input.rs      decodes keys, mouse reports and pastes
+src/term/size.rs       pane size in cells and pixels
+src/ui.rs              top bar: buttons and the address field
 docs/ARCHITECTURE.md   design notes and open questions
 prototype/webshot.sh   the shell proof of concept
+```
+
+## Install
+
+Needs Rust and Google Chrome (or another Chromium-based browser).
+
+```sh
+cargo install --path .     # puts kb in ~/.cargo/bin
 ```
 
 ## Build
@@ -82,4 +172,9 @@ prototype/webshot.sh   the shell proof of concept
 ```sh
 cargo build --release
 ./target/release/kb https://example.com
+cargo test
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

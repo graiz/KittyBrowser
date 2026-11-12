@@ -1,7 +1,10 @@
 [package]
 name = "kittybrowser"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/graiz/kittybrowser"
+readme = "README.md"
 description = "A fast web browser that runs in a terminal pane, drawn with the kitty graphics protocol"
 
 [[bin]]
@@ -9,7 +12,8 @@ name = "kb"
 path = "src/main.rs"
 
 [dependencies]
-# None yet. Candidates are listed in docs/ARCHITECTURE.md.
+libc = "0.2"
+serde_json = "1"
 
 [profile.release]
 lto = true
