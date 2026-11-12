@@ -1,0 +1,17 @@
+[package]
+name = "kittybrowser"
+version = "0.0.1"
+edition = "2021"
+description = "A fast web browser that runs in a terminal pane, drawn with the kitty graphics protocol"
+
+[[bin]]
+name = "kb"
+path = "src/main.rs"
+
+[dependencies]
+# None yet. Candidates are listed in docs/ARCHITECTURE.md.
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
