@@ -1,22 +1,82 @@
 # KittyBrowser (`kb`)
 
-A fast web browser that runs inside a terminal pane. Pages are rendered to
-pixels and drawn with the kitty graphics protocol, so you get the real layout,
-fonts, and images, not a text approximation. Written in Rust. The binary is `kb`.
+A real web browser in a terminal pane. kb drives headless Chrome and draws
+each page as pixels with the
+[kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/),
+so you see the actual layout, fonts and images, not a text approximation, and
+you can click, scroll and type in it.
+
+It is built for working beside a coding agent. The agent opens kb in the pane
+next to its own, and you both look at the same page while it loads your dev
+server, checks for console errors, clicks through a flow, tries a phone
+width, or reads documentation, all through `kb ctl`.
 
 ```sh
+kb http://localhost:3000        # open a page in this pane
+kb ctl check                    # from another pane: is the page healthy?
+```
+
+**Status:** early but usable, version 0.1. Used daily on macOS in Rex; it
+should work in kitty, Ghostty and WezTerm, and it builds on Linux, but those
+haven't been tested yet. Reports are welcome.
+
+## Requirements
+
+- **A terminal with the kitty graphics protocol:** kitty, Ghostty, WezTerm
+  or Rex. Terminal.app and iTerm2 don't support it, and kb doesn't work
+  inside tmux or screen.
+- **Chrome, Chromium, Edge or Brave**, installed where kb can find it, or
+  named with `KB_CHROME`.
+- **Rust** (stable, from [rustup](https://rustup.rs)) to build it.
+
+## Install
+
+### macOS
+
+```sh
+brew install --cask google-chrome   # if you don't have Chrome
+git clone https://github.com/graiz/kittybrowser
+cd kittybrowser
+cargo install --path .              # puts kb in ~/.cargo/bin
 kb https://example.com
 ```
 
-**Status:** a working MVP. It opens pages, and you can scroll, click, type,
-and go back and forward. It needs Chrome (or another Chromium-based browser)
-installed, and has been run in Rex only.
+On a non-retina display, start it with `kb --scale 1`.
 
-## Use
+### Linux
+
+Install Chrome or Chromium from your distribution or google.com/chrome, then
+build the same way:
+
+```sh
+git clone https://github.com/graiz/kittybrowser
+cd kittybrowser
+cargo install --path .
+kb --scale 2 https://example.com    # --scale 2 on a HiDPI screen; the default is 1
+```
+
+kb looks for `google-chrome`, `google-chrome-stable`, `chromium`,
+`chromium-browser`, `microsoft-edge` and `brave-browser` on your `PATH`; set
+`KB_CHROME=/path/to/browser` for anything else. Linux builds cleanly but is
+untested, so please open an issue with what you find.
+
+### Windows
+
+kb doesn't run natively on Windows: it needs a Unix terminal and Unix
+sockets. Use it inside WSL 2 with Chrome or Chromium installed on the Linux
+side, from a terminal with the kitty graphics protocol (WezTerm runs on
+Windows). This is untested.
+
+### Updating
+
+Pull and run `cargo install --path .` again. If you use the agent skill, run
+`kb skill install` afterwards so it matches the new version.
+
+## Using kb
 
 ```sh
 kb                     # start with the address field focused
-kb gregraiz.com        # open a page
+kb example.com         # open a page
 kb rust traits         # anything that isn't an address is a web search
 kb ./page.html         # a local file
 ```
@@ -38,233 +98,104 @@ click the address to edit it, and click, drag and scroll the page.
 | Ctrl+/ | Help: the keys, and the page, zoom, viewport and pane sizes |
 | Ctrl+Q | Quit |
 
-The Command keys need a terminal with the kitty keyboard protocol, and the
-terminal mustn't keep them for itself. Rex has the protocol, but its own
-shortcuts take Cmd+F, Cmd+G and Cmd+R, so in Rex use Ctrl+F, Ctrl+G and
-Ctrl+R; Cmd+L gets through. Ctrl+[ and Ctrl+] also need the protocol. Find doesn't yet say how many matches
-there are, or that there are none.
+Every other key goes to the page.
 
-Zoom works as in a desktop browser: the page reflows to the new width.
-Zoomed in, text is a little soft, since Chrome still renders at 100% and the
-image is enlarged to fill the pane.
+- **Command keys** need a terminal with the kitty keyboard protocol that
+  doesn't keep them for itself. In Rex, Cmd+F, Cmd+G and Cmd+R are Rex's own,
+  so use Ctrl+F, Ctrl+G and Ctrl+R there. Ctrl+[ and Ctrl+] also need the
+  protocol.
+- **Address completion** comes from pages you have visited, kept in
+  `~/.kittybrowser/history`. Nothing you type is sent to a suggestion
+  service.
+- **Cookies and logins** are kept in `~/.kittybrowser/profile`, separate from
+  your everyday Chrome.
+- **Several kbs** can run at once, one per pane, and `kb list` numbers them.
+  Chrome won't share a profile, so the second and later ones have their own
+  cookies (`profile-2`, ...); history is shared.
+- **Zoom** reflows the page as in a desktop browser. Zoomed in, text is a
+  little soft, because Chrome renders at 100% and the image is enlarged.
 
-Until the first page is ready, the logo turns in the middle of the pane;
-started without an address, it stays as a home screen.
-
-Every other key goes to the page. While a page loads, the reload button turns
-into a stop button and a spinner turns at the right end of the bar.
-
-As you type an address, the field completes it from pages you have visited,
-most visited first, with the suggested part highlighted. Visits are kept in
-`~/.kittybrowser/history`; nothing you type is sent to a suggestion service.
-
-Cookies and logins are kept in `~/.kittybrowser/profile`, separate from your
-everyday Chrome.
-
-You can run several at once, one per pane. Chrome won't share a profile
-between processes, so the second and later ones keep their own cookies and
-logins (`profile-2`, `profile-3`, ...): a site you are signed in to in the
-first is signed out in the second. History is shared. `kb list` numbers the
-ones running.
-
-## For agents: the skill, `kb ctl` and MCP
+## For coding agents
 
 ```sh
-kb skill install    # puts it in ~/.claude/skills/kb; run again after upgrading kb
+kb skill install    # installs the skill to ~/.claude/skills/kb
 ```
 
-The skill teaches a coding agent to open kb in a pane beside its own (in
-Rex, with `rex split`), find that kb's number, and test its work there with
-`kb ctl` while you watch: reload, check for errors, screenshot, click
-through, try a phone width. Its text is `skill/SKILL.md`; `kb skill show`
-prints it.
+The skill teaches an agent (Claude Code, or any agent that reads skills) to
+open kb in a pane beside its own, find which kb is its own, and work in it
+while you watch. Its text is [`skill/SKILL.md`](skill/SKILL.md); `kb skill
+show` prints it.
 
-A running kb can be driven from another terminal, which is how a coding agent
-looks at and tests the page it is working on while you watch the same page.
+Any program can drive a running kb with `kb ctl`:
 
 ```sh
 kb ctl open http://localhost:3000    # waits for the load, reports errors
+kb ctl check                         # exit 1 on console errors, failed requests or an error page
+kb ctl click 'text=Save'             # reports the errors and dialogs it causes
 kb ctl screenshot --out page.png
-kb ctl click '#save'                 # reports errors and dialogs it causes
-kb ctl console --errors
-kb ctl viewport 375x800              # test a narrow layout; reset to undo
-kb ctl check                         # exit 1 if the page has errors
+kb ctl viewport 375x800              # a phone width; viewport reset to undo
+kb ctl outline                       # read a page: headings, then...
+kb ctl text --section Installation   # ...just one section
 ```
 
-With several kbs running, commands go to the lowest-numbered one unless you
-pick another: `kb ctl -i 2 status`, or `KB_INSTANCE=2` for the MCP server.
-
-`kb ctl --help` lists all the commands, and `kb ctl <command> --help`
-describes one. They cover:
+`kb ctl --help` lists every command and `kb ctl <command> --help` describes
+one:
 
 - **Navigating:** open, reload, back, forward, status, check, viewport.
-- **Reading:** outline (title and headings), text (the main content, one
-  element, or `--section HEADING`), find (where some words appear, with their
-  context and section), links (numbered links and buttons), tables, images,
-  html, screenshot.
-- **Acting:** click (`--double`, or `--at X,Y` for a point inside an
-  element), hover, type, select, press, scroll, wait, dialog, throttle (a slow
-  or offline network).
-- **Debugging:** console, network, eval, style (`--why` for the rules that
-  set a property and which one won), box, listeners (an element's
-  event listeners), storage (localStorage, sessionStorage and cookies;
-  `--clear` to test a first visit).
+- **Reading:** outline, text (the main content, an element, or
+  `--section HEADING`), find, links, tables, images, html, screenshot
+  (`--size small|normal|sharp|WIDTH`).
+- **Acting:** click (`--double`, `--at X,Y`), hover, type, select, press,
+  scroll, wait, dialog, throttle.
+- **Debugging:** console, network, eval, style (`--why` explains which CSS
+  rule won), box, listeners, storage.
 
-`screenshot` takes `--size small|normal|sharp|WIDTH`; the default is one
-image pixel per CSS pixel. `kb ctl check --ignore HOST,HOST` leaves third-party noise, such as trackers
-that fail to load, out of the verdict.
+Selectors are CSS (reaching into shadow DOM), `text=Some words`, `@N` from
+`kb ctl links`, or `:focus`. With several kbs running, pick one with
+`kb ctl -i N`.
 
-Anywhere a command takes a selector, it also takes `text=Some words` (the
-element showing that text), `@N` (a number from `kb ctl links`) or `:focus`,
-and selectors reach into shadow DOM.
+The same commands are available as an MCP server, which is off until you turn
+it on: `kb mcp on` (it prints how to register it with Claude Code), `kb mcp
+off`, `kb mcp status`.
 
-```sh
-kb ctl open en.wikipedia.org/wiki/Kitty_(terminal_emulator)
-kb ctl outline
-kb ctl text --section Features
-kb ctl find "Goyal"
-kb ctl links --match release
-kb ctl click @12
-```
+**Security:** kb listens on a socket in `~/.kittybrowser` that only your user
+can open. Anything running as you can use it to run JavaScript in pages you
+are logged in to in kb. Such a program could already read your files, but
+it's worth knowing before you turn on the MCP server. See
+[SECURITY.md](SECURITY.md).
 
-The same commands are available as MCP tools. The MCP server is off until you
-turn it on, and offers no tools while off:
+## Configuration
 
-```sh
-kb mcp on        # also prints the line that registers it with Claude Code
-kb mcp off
-kb mcp status
-```
+| Setting | Does |
+| --- | --- |
+| `--scale N` | Device pixels per CSS pixel: 2 by default on macOS, 1 elsewhere |
+| `KB_CHROME` | The browser to run, if kb doesn't find one |
+| `KB_CHROME_ARGS` | Extra flags for Chrome, separated by spaces |
+| `KB_TRANSFER=pty` | Always send frames through the terminal, never by file |
+| `KB_LOG` | A file to append diagnostics to (sizes, frames, clicks) |
 
-Things to know:
+## Troubleshooting
 
-- Commands act on the one page in the pane; there are no tabs.
-- `reload` (and Ctrl+R) always bypass the cache, and pages on local addresses
-  (files, localhost, private IPs, `.local`, `.test`, `.vibe`) are never
-  cached, so an edit always shows.
-- `alert`, `confirm` and `prompt` are answered at once (accepted by default;
-  `kb ctl dialog dismiss` changes that) and recorded in the console.
-- The control socket is `~/.kittybrowser/kb.sock` (`kb-2.sock` and so on for
-  further instances), readable only by you.
-  Anything that can reach it can run JavaScript in your logged-in pages.
+- **"can't find Chrome":** install Chrome or Chromium, or set `KB_CHROME`.
+- **Nothing is drawn, or escape codes appear:** the terminal doesn't support
+  the kitty graphics protocol, or you're inside tmux or screen.
+- **The page is blurry or tiny:** set `--scale` to your display's pixel
+  ratio.
+- **Sites show their phone layout:** the pane is narrow. Widen it, zoom out
+  with Ctrl+-, or have the agent run `kb ctl viewport 1280x800`.
+- **A kb you can't find:** `kb list` shows the ones running, with the pane
+  each is in; quit one with Ctrl+Q in its pane.
 
-Options and environment:
+## Documentation
 
-- `--scale N`: device pixels per CSS pixel. Defaults to 2 on macOS and 1
-  elsewhere; pass `--scale 1` on a non-retina display.
-- `KB_CHROME`: path to the browser binary, if it isn't found automatically.
-- `KB_LOG`: a file to append diagnostics to (detected sizes, frames, clicks).
-- `KB_TRANSFER=pty`: always send frames through the pty, never by file.
-- `KB_CHROME_ARGS`: extra flags for Chrome, separated by spaces.
-
-## Speed
-
-`kb bench [URL]` scrolls a page in the pane and times each way of sending
-frames. In Rex, on a 1372x1624 pixel pane, a scroll step takes about 84 ms
-with PNG through the pty and 68 ms with pixels handed over by file, which kb
-uses whenever the terminal accepts it. Most of what is left is Chrome
-itself; see docs/ARCHITECTURE.md.
-
-Two things keep a page that moves by itself (a spinner, a pulsing dot) from
-costing much:
-
-- **Only what changed is redrawn.** The page is cut into blocks of 12 by 6
-  cells. A frame that differs in a few of them sends just those; one that
-  differs in more than a third sends the whole page.
-- **Frames are paced.** While you scroll, click or type, or an agent sends
-  commands, frames come as fast as Chrome makes them. Half a second after
-  the last input they drop to ten a second, and to two a second when the
-  pane doesn't have keyboard focus.
-
-## Why
-
-Terminals such as kitty, Ghostty, WezTerm, and Rex can draw images in a pane.
-That is enough to show a web page next to your editor or your agent without
-leaving the terminal. The shell prototype in `prototype/webshot.sh` proves the
-idea: it screenshots a page with headless Chrome at the pane's exact pixel size
-and prints it. It is a one-shot still image and takes seconds. This project
-makes that live, interactive, and fast.
-
-## Goals
-
-- **Fast.** First paint well under a second for ordinary pages; scrolling that
-  feels immediate.
-- **Real rendering.** Pixel output at the pane's native resolution.
-- **Interactive.** Scroll, click, type, follow links by keyboard, go back and
-  forward.
-- **Fits the pane.** Lays the page out at the pane's true width and follows
-  resizes.
-- **Useful to agents.** A non-interactive mode that draws a URL or an HTML file
-  and exits, so an agent can show its work in a split.
-
-## Not goals (for now)
-
-- Tabs, bookmarks, extensions, downloads.
-- Terminals without the kitty graphics protocol.
-- Being a daily-driver replacement for a desktop browser.
-
-## The page engine
-
-The MVP drives headless Chrome over the DevTools protocol: complete web
-compatibility for little code, at the cost of a second or so to start and a
-Chrome dependency. A native Rust engine (Servo or Blitz) would start faster
-and run in one process but render fewer sites correctly; it remains a later
-experiment.
-
-## Milestones
-
-1. **Done: a working browser.** Live view, resize, scrolling, mouse and
-   keyboard input, back and forward, an address bar.
-2. **Speed, in progress.** Done: a benchmark (`kb bench`), frames handed to
-   the terminal by file, only changed blocks redrawn, frames paced when the
-   page isn't in use. Next: Chrome's 50 ms per frame, and keeping Chrome
-   warm between runs.
-3. **Done: agent tools.** `kb ctl` and an MCP server; see above.
-4. **Hooks.** Reload on file change, and errors fed back to the agent after
-   each edit.
-5. **Keyboard link hints and a one-shot mode** (`kb --print URL`) that draws
-   one frame inline and exits, for agents.
-6. **Native engine.** A second backend that doesn't need Chrome.
-
-## Layout
-
-```
-src/main.rs            argument parsing, starts the app
-src/app.rs             event loop
-src/engine/cdp.rs      DevTools protocol over Chrome's debugging pipe
-src/engine/chrome.rs   starts Chrome; commands to the page, events from it
-src/control.rs         the socket `kb ctl` and the MCP server talk to
-src/bench.rs           `kb bench`
-src/skill.rs           `kb skill`; the skill itself is skill/SKILL.md
-src/splash.rs          the logo shown until the first page (assets/logo.svg; logo.png is rendered from it)
-src/commands.rs        the agent commands: one table for CLI and MCP
-src/devtools.rs        carries the commands out; console and network logs
-src/cli.rs             `kb ctl`
-src/mcp.rs             `kb mcp`
-src/history.rs         visited pages, for address completion
-src/term/graphics.rs   kitty graphics protocol
-src/term/input.rs      decodes keys, mouse reports and pastes
-src/term/size.rs       pane size in cells and pixels
-src/ui.rs              top bar: buttons and the address field
-docs/ARCHITECTURE.md   design notes and open questions
-prototype/webshot.sh   the shell proof of concept
-```
-
-## Install
-
-Needs Rust and Google Chrome (or another Chromium-based browser).
-
-```sh
-cargo install --path .     # puts kb in ~/.cargo/bin
-```
-
-## Build
-
-```sh
-cargo build --release
-./target/release/kb https://example.com
-cargo test
-```
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how kb works, and the
+  decisions behind it.
+- [docs/ROADMAP.md](docs/ROADMAP.md): goals, non-goals and what's next.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each version.
+- [CONTRIBUTING.md](CONTRIBUTING.md): reporting bugs and sending pull
+  requests.
+- [AGENTS.md](AGENTS.md): instructions for coding agents working on this
+  repository.
 
 ## License
 

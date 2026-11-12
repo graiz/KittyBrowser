@@ -5,6 +5,10 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/graiz/kittybrowser"
 readme = "README.md"
+homepage = "https://github.com/graiz/kittybrowser"
+keywords = ["browser", "terminal", "kitty", "chrome", "agents"]
+categories = ["command-line-utilities", "web-programming"]
+authors = ["Gregory Raiz"]
 description = "A fast web browser that runs in a terminal pane, drawn with the kitty graphics protocol"
 
 [[bin]]
