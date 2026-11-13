@@ -237,7 +237,7 @@ off`, `kb mcp status`.
 can open. Anything running as you can use it to run JavaScript in pages you
 are logged in to in kb. Such a program could already read your files, but
 it's worth knowing before you turn on the MCP server. See
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](.github/SECURITY.md).
 
 ## Configuration
 
@@ -286,7 +286,7 @@ kb's data folder, and prints what to fix.
   decisions behind it.
 - [docs/ROADMAP.md](docs/ROADMAP.md): goals, non-goals and what's next.
 - [CHANGELOG.md](CHANGELOG.md): what changed in each version.
-- [CONTRIBUTING.md](CONTRIBUTING.md): reporting bugs and sending pull
+- [CONTRIBUTING.md](.github/CONTRIBUTING.md): reporting bugs and sending pull
   requests.
 - [AGENTS.md](AGENTS.md): instructions for coding agents working on this
   repository.
