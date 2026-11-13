@@ -90,6 +90,12 @@ pub struct Chrome {
     window: Option<Window>,
     /// The viewport asked for, in CSS pixels.
     viewport: Option<(u32, u32)>,
+    /// How the screencast was started, while it runs, and the id of the
+    /// reply to the last change to the window, after which it is started
+    /// again: seen on a Mac whose display was asleep, frames stop when the
+    /// window changes, until then.
+    screencast: Option<Value>,
+    window_reply: Option<u64>,
 }
 
 /// Chrome's headless window. Frames are usually the size of the viewport
@@ -150,17 +156,35 @@ impl Window {
     /// it, and the window set to an absolute size, so a wrong guess is put
     /// right by the next frame rather than added to.
     fn frame(&mut self, viewport: (i64, i64), frame: (i64, i64)) -> Option<(i64, i64)> {
-        let late = |size: &(i64, i64)| match self.margin {
-            Some(margin) => (size.0 - margin.0, size.1 - margin.1) == frame,
-            None => false,
-        };
-        if frame == viewport || self.earlier_viewports.contains(&frame) || self.earlier_windows.iter().any(late) {
+        if frame == viewport || self.late(frame) {
             return None;
         }
         // Never less than nothing: a window the system won't make as small
         // as asked (a Mac's are at least 500 wide) isn't a bigger margin.
         self.margin = Some(((self.size.0 - frame.0).max(0), (self.size.1 - frame.1).max(0)));
         self.fit(viewport)
+    }
+
+    /// Whether a frame of this size could have been made before the last
+    /// change, at an earlier viewport or in an earlier window.
+    fn late(&self, frame: (i64, i64)) -> bool {
+        let made_in = |size: &(i64, i64)| match self.margin {
+            Some(margin) => (size.0 - margin.0, size.1 - margin.1) == frame,
+            None => false,
+        };
+        self.earlier_viewports.contains(&frame) || self.earlier_windows.iter().any(made_in)
+    }
+
+    /// Whether a frame of size `frame` holds the page at `viewport` in its
+    /// top left corner, with more around it, to be cut out: frames come the
+    /// size of the window, and a Mac won't make one narrower than 500 for a
+    /// narrower viewport. A frame at an earlier viewport is no such thing.
+    /// (One from an earlier window can't be told from it when the Mac
+    /// widened both to 500, so it is cut too, and the next frame, a moment
+    /// later, puts it right.)
+    fn crop(&self, viewport: (i64, i64), frame: (i64, i64)) -> bool {
+        let bigger = frame.0 >= viewport.0 && frame.1 >= viewport.1 && frame != viewport;
+        bigger && !self.earlier_viewports.contains(&frame)
     }
 
     fn fit(&mut self, viewport: (i64, i64)) -> Option<(i64, i64)> {
@@ -172,6 +196,32 @@ impl Window {
         remember(&mut self.earlier_windows, std::mem::replace(&mut self.size, size));
         Some(size)
     }
+}
+
+/// How a base64 PNG starts.
+const PNG: &str = "iVBORw0KGgo";
+
+/// The top left part of a base64 PNG, `part` of its width and height, as a
+/// base64 PNG.
+fn crop_png(data: &str, part: (f64, f64)) -> Option<String> {
+    let pixels = crate::term::graphics::decode_png(&crate::base64::decode(data)?, Vec::new())?;
+    let width = ((pixels.width as f64 * part.0).round() as u32).clamp(1, pixels.width);
+    let height = ((pixels.height as f64 * part.1).round() as u32).clamp(1, pixels.height);
+    let depth = if pixels.alpha { 4 } else { 3 };
+    let row = (pixels.width * depth) as usize;
+    let mut cut = Vec::with_capacity((width * height * depth) as usize);
+    for line in pixels.data.chunks_exact(row).take(height as usize) {
+        cut.extend_from_slice(&line[..(width * depth) as usize]);
+    }
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, width, height);
+    encoder.set_color(if pixels.alpha { png::ColorType::Rgba } else { png::ColorType::Rgb });
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder.write_header().ok()?;
+    writer.write_image_data(&cut).ok()?;
+    writer.finish().ok()?;
+    Some(crate::base64::encode(&png))
 }
 
 /// Whether `url` is a file or a server on this machine or network: a page
@@ -468,6 +518,8 @@ impl Chrome {
             devtools,
             window,
             viewport: None,
+            screencast: None,
+            window_reply: None,
         };
         Ok((chrome, rx))
     }
@@ -504,6 +556,16 @@ impl Chrome {
     /// Digest one message from Chrome, answering what needs an answer, and
     /// return what the app should react to.
     pub fn handle(&mut self, mut message: Value) -> Option<PageEvent> {
+        if message["id"].as_u64().is_some_and(|id| self.window_reply == Some(id)) {
+            self.window_reply = None;
+            if let Some(params) = self.screencast.clone() {
+                // Frames from before need no acknowledging once it stops.
+                self.unacked.clear();
+                self.send("Page.stopScreencast", json!({}));
+                self.send("Page.startScreencast", params);
+            }
+            return None;
+        }
         let method = message["method"].as_str()?.to_owned();
         let params = &mut message["params"];
         match method.as_str() {
@@ -514,16 +576,16 @@ impl Chrome {
                 // Chrome stops sending frames until each one is acknowledged.
                 self.check_frame_size(&params["metadata"]);
                 let ack = json!({"sessionId": params["sessionId"]});
-                let data = params["data"].take();
+                let data = match params["data"].take() {
+                    Value::String(data) => self.crop_frame(data, &params["metadata"]),
+                    _ => None,
+                };
                 if self.hold_acks {
                     self.unacked.push_back(ack);
                 } else {
                     self.send("Page.screencastFrameAck", ack);
                 }
-                match data {
-                    Value::String(png) => Some(PageEvent::Frame(png)),
-                    _ => None,
-                }
+                data.map(PageEvent::Frame)
             }
             "Page.frameNavigated" => {
                 let frame = &params["frame"];
@@ -624,7 +686,22 @@ impl Chrome {
     fn set_window(&mut self, size: Option<(i64, i64)>) {
         let (Some(window), Some((width, height))) = (&self.window, size) else { return };
         let bounds = json!({"windowId": window.id, "bounds": {"width": width, "height": height}});
-        self.send_browser("Browser.setWindowBounds", bounds);
+        self.window_reply = self.tx.send("Browser.setWindowBounds", bounds, None).ok();
+    }
+
+    /// The frame, cut to the viewport if it holds more (see `Window::crop`).
+    /// Only PNG frames are cut; kb draws JPEG ones only in kb bench.
+    fn crop_frame(&self, data: String, metadata: &Value) -> Option<String> {
+        let (Some(window), Some((width, height)), Some(css_width), Some(css_height)) =
+            (&self.window, self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
+        else {
+            return Some(data);
+        };
+        let viewport = (width as i64, height as i64);
+        if !window.crop(viewport, (css_width.round() as i64, css_height.round() as i64)) || !data.starts_with(PNG) {
+            return Some(data);
+        }
+        crop_png(&data, (width as f64 / css_width, height as f64 / css_height)).or(Some(data))
     }
 
     /// Fit the window to the viewport if this frame shows it cropping them.
@@ -696,12 +773,17 @@ impl Chrome {
     }
 
     pub fn start_screencast(&mut self) {
-        self.send("Page.startScreencast", json!({"format": "png", "everyNthFrame": 1}));
+        self.screencast_with(json!({"format": "png", "everyNthFrame": 1}));
     }
 
     /// Start (or restart) the screencast as JPEG at `quality`, 0 to 100.
     pub fn start_screencast_jpeg(&mut self, quality: u32) {
-        self.send("Page.startScreencast", json!({"format": "jpeg", "quality": quality, "everyNthFrame": 1}));
+        self.screencast_with(json!({"format": "jpeg", "quality": quality, "everyNthFrame": 1}));
+    }
+
+    fn screencast_with(&mut self, params: Value) {
+        self.screencast = Some(params.clone());
+        self.send("Page.startScreencast", params);
     }
 
     /// Leave each frame unacknowledged until `ack` is called. Chrome sends
@@ -725,6 +807,7 @@ impl Chrome {
     }
 
     pub fn stop_screencast(&mut self) {
+        self.screencast = None;
         self.send("Page.stopScreencast", json!({}));
     }
 
@@ -1021,5 +1104,40 @@ mod tests {
         assert_eq!((chrome.window, chrome.sets), ((500, 243), 1));
         assert_eq!(window.frame((300, 100), chrome.frame((300, 100))), None);
         assert_eq!(window.resized(Some((300, 100)), (320, 110)), Some((320, 253)));
+    }
+
+    #[test]
+    fn frames_bigger_than_the_viewport_are_cut() {
+        let mut window = Window::new(1, (1368, 300));
+        window.resized(None, (854, 406));
+        window.resized(Some((854, 406)), (413, 406));
+        // The Mac's narrowest window around a narrower viewport.
+        assert!(window.crop((413, 406), (500, 406)));
+        // Whole, or from before the resize, or not holding all of it.
+        assert!(!window.crop((413, 406), (413, 406)));
+        assert!(!window.crop((413, 406), (854, 406)));
+        assert!(!window.crop((413, 406), (500, 300)));
+        // Where frames follow the viewport, they never are.
+        let mut window = Window::new(1, (500, 256));
+        let mut viewport = None;
+        for size in [(1280, 799), (413, 406), (300, 100), (854, 406)] {
+            window.resized(viewport, size);
+            assert!(!window.crop(size, size));
+            viewport = Some(size);
+        }
+    }
+
+    #[test]
+    fn cutting_a_png_keeps_its_top_left() {
+        use crate::term::graphics::decode_png;
+        use crate::term::layers::tests::{encode, frame};
+        let png = encode(&frame(1000, 812, |x, y| ((x / 10 + y) % 251) as u8));
+        let cut = crop_png(&png, (413.0 / 500.0, 1.0)).unwrap();
+        let cut = decode_png(&crate::base64::decode(&cut).unwrap(), Vec::new()).unwrap();
+        assert_eq!((cut.width, cut.height), (826, 812));
+        let at = |x: u32, y: u32| cut.data[((y * 826 + x) * 3) as usize];
+        for (x, y) in [(0, 0), (825, 0), (0, 811), (825, 811), (400, 300)] {
+            assert_eq!(at(x, y), ((x / 10 + y) % 251) as u8);
+        }
     }
 }

@@ -163,23 +163,20 @@ ms to show, but soft text for a third of a second), JPEG from Chrome,
 `captureScreenshot`, and `--disable-frame-rate-limit` (halves Chrome's time,
 but animated pages then take three cores).
 
-**Headless window.** Pages see the headless window as their outer window,
-so it is kept the viewport plus a browser's frame: 143 CSS pixels of
-height, as measured on a Mac. On a Mac whose display is asleep, Chrome makes
-screencast frames the size of its headless window less a margin, whatever
+**Headless window.** On a Mac, Chrome makes screencast frames the size of
+its headless window less a margin for the browser's frame, whatever
 viewport `Emulation.setDeviceMetricsOverride` sets: a 500x256 window gave
-frames of 500x113 CSS pixels, 143 short. kb compares each frame's size in
-its metadata with the viewport. A frame of another size that can't be a
-late one (the size of an earlier viewport, or of an earlier window less the
-margin) was made in the window as it is, so gives the margin, and the
-window is set to the viewport plus the margin (`Browser.setWindowBounds`).
-Every resize sets it so again. The size is absolute, so a late frame
-can't make it drift, and a wrong margin (Chrome's very first frame can be
-off by a few pixels) is put right by the next frame (`Window` in
-`engine/chrome.rs`). Where frames follow the viewport, the margin stays as
-it started. macOS keeps
-windows at least 500 wide, so there a narrower viewport comes in frames
-500 wide.
+frames of 500x113 CSS pixels, 143 short. So kb sets the window to the
+viewport plus that margin (`Browser.setWindowBounds`) on every resize, which
+also gives pages a window as big as they are. A frame of another size that
+can't be a late one (the size of an earlier viewport, or of an earlier
+window less the margin) was made in the window as it is, so corrects the
+margin. The size is absolute, so a late frame can't make it drift (`Window`
+in `engine/chrome.rs`). Two things follow on a Mac. Frames stop after the
+window changes until the screencast is started again, so kb restarts it
+when Chrome answers each change. And macOS keeps windows at least 500
+wide, so a narrower viewport comes in frames 500 wide, holding the page in
+their top left; kb cuts those to the viewport (`Window::crop`).
 
 **Pacing** (`App::frame_gap`). Chrome sends a frame, then waits for it to be
 acknowledged; kb decides when. While the page is in use (a key, the mouse,
