@@ -964,7 +964,9 @@ impl App {
             // files) one image scaled to fit.
             let mut drawn = false;
             let pixels = match pixels {
-                Some(pixels) if self.fixed.is_none() && graphics::Tiles::fits(&pixels, cols, rows, cell) => {
+                Some(pixels)
+                    if self.fixed.is_none() && graphics::fits((pixels.width, pixels.height), cols, rows, cell) =>
+                {
                     if !self.tiles.active() {
                         out.extend_from_slice(graphics::DELETE);
                     }

@@ -146,6 +146,15 @@ fn put_raw_file(
     );
 }
 
+/// Whether a frame of `size` pixels lines up with `cols` x `rows` cells of
+/// `cell` pixels, as `Tiles` and `layers::Layers` need: it must cover them
+/// exactly, give or take the pixel or two of rounding a viewport picks up,
+/// which is cropped.
+pub fn fits(size: (u32, u32), cols: u16, rows: u16, cell: (u32, u32)) -> bool {
+    let covers = |have: u32, cells: u16, size: u32| (0..=2).contains(&(have as i64 - cells as i64 * size as i64));
+    covers(size.0, cols, cell.0) && covers(size.1, rows, cell.1)
+}
+
 /// What `Tiles::draw` sent.
 #[derive(PartialEq, Eq, Debug)]
 pub enum Drawn {
@@ -180,14 +189,6 @@ impl Tiles {
     pub fn forget(&mut self) {
         self.shown = None;
         self.overlaid.clear();
-    }
-
-    /// Whether a frame lines up with `cols` x `rows` cells of `cell`
-    /// pixels: it must cover them exactly, give or take the pixel or two of
-    /// rounding a viewport picks up, which is cropped.
-    pub fn fits(pixels: &Pixels, cols: u16, rows: u16, cell: (u32, u32)) -> bool {
-        let covers = |have: u32, cells: u16, size: u32| (0..=2).contains(&(have as i64 - cells as i64 * size as i64));
-        covers(pixels.width, cols, cell.0) && covers(pixels.height, rows, cell.1)
     }
 
     /// Append the escapes that bring the screen to `new`, which must fit
@@ -376,9 +377,9 @@ mod tests {
         let (cols, rows, cell) = (30, 14, (2, 4));
         let mut tiles = Tiles::default();
         let mut out = Vec::new();
-        assert!(Tiles::fits(&solid(60, 56, 0), cols, rows, cell));
-        assert!(Tiles::fits(&solid(61, 57, 0), cols, rows, cell));
-        assert!(!Tiles::fits(&solid(59, 56, 0), cols, rows, cell));
+        assert!(fits((60, 56), cols, rows, cell));
+        assert!(fits((61, 57), cols, rows, cell));
+        assert!(!fits((59, 56), cols, rows, cell));
         // The first frame goes whole, a pixel too wide and cropped.
         assert_eq!(tiles.draw(&mut out, solid(61, 56, 0), cols, rows, cell, 2), Some(Drawn::Whole));
         let text = String::from_utf8(std::mem::take(&mut out)).unwrap();

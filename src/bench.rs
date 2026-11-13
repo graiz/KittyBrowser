@@ -317,7 +317,7 @@ fn run_modes(
                 Transfer::Tiles => {
                     let bytes = crate::base64::decode(&data).ok_or("Chrome sent a damaged frame")?;
                     let pixels = graphics::decode_png(&bytes, Vec::new()).ok_or("couldn't decode a frame")?;
-                    if !graphics::Tiles::fits(&pixels, cols, rows, (cell_w, cell_h)) {
+                    if !graphics::fits((pixels.width, pixels.height), cols, rows, (cell_w, cell_h)) {
                         return Err("frames don't line up with the cells, so they can't be tiled".into());
                     }
                     tiles.draw(&mut out, pixels, cols, rows, (cell_w, cell_h), 2).ok_or("couldn't write a tile")?;

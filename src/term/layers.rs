@@ -24,12 +24,14 @@
 //! screen always ends exactly at Chrome's frame: whatever isn't known to be
 //! on screen already, pixel for pixel, is sent.
 
-use super::graphics::{crop, cut, decode_png, transmit, Pixels};
+use super::graphics::{crop, cut, decode_png, fits, png_size, transmit, Pixels};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// Ids from here up are these images, clear of the page, tiles and queries.
 const FIRST_ID: u32 = 1000;
+/// How many image ids, and placement ids, are used before starting again.
+const IDS: u32 = 1_000_000;
 /// Images are stacked from here up, each above the last. Below
 /// -1,073,741,824 an image is drawn under text and cell backgrounds, as the
 /// page is (see graphics::PAGE_Z).
@@ -211,9 +213,9 @@ impl Layers {
     /// Append the escapes that bring the screen to `png_base64`, one of
     /// Chrome's frames, drawn at `top` (a screen row) over `cols` x `rows`
     /// cells of `cell` pixels. `None`, having appended nothing, if the frame
-    /// can't be decoded or doesn't line up with the cells (see
-    /// `Tiles::fits`); the caller then draws it some other way, and calls
-    /// `forget` once it has cleared the screen.
+    /// doesn't line up with the cells (see `graphics::fits`) or can't be
+    /// decoded; the caller then draws it some other way, and calls `forget`
+    /// once it has cleared the screen.
     pub fn draw(
         &mut self,
         out: &mut Vec<u8>,
@@ -223,10 +225,11 @@ impl Layers {
         cell: (u32, u32),
         top: u16,
     ) -> Option<Sent> {
-        let new = decode_png(&crate::base64::decode(png_base64)?, std::mem::take(&mut self.spare))?;
-        if !super::graphics::Tiles::fits(&new, cols, rows, cell) {
+        // Decoding takes 10 ms or so: not for a frame that can't be used.
+        if !png_size(png_base64).is_some_and(|size| fits(size, cols, rows, cell)) {
             return None;
         }
+        let new = decode_png(&crate::base64::decode(png_base64)?, std::mem::take(&mut self.spare))?;
         let bytes = if new.alpha { 4 } else { 3 };
         let new = crop(new, cols as u32 * cell.0, rows as u32 * cell.1, bytes)?;
         let hashes = column_hashes(&new, cell.0);
@@ -270,8 +273,9 @@ impl Layers {
         for held in self.held.drain(..) {
             delete_image(out, held.id);
         }
-        self.next_z = BOTTOM_Z;
-        let placement = self.new_placement(Rect { x: 0, y: 0, width: new.width, height: new.height });
+        // Nothing is left, so ids and z start again.
+        (self.next_image, self.next_placement, self.next_z) = (0, 0, BOTTOM_Z);
+        let placement = self.new_placement(Rect { x: 0, y: 0, width: new.width, height: new.height }, &[]);
         page.cursor(out, &placement);
         let keys = format!(
             "a=T,f=100,i={},p={},w={},h={},z={},C=1,q=2",
@@ -312,27 +316,28 @@ impl Layers {
         // each region, if any shows and no strip covers it (the first part
         // keeps the placement's id), then the held images placed again,
         // then the pieces sent.
-        let mut next = Vec::with_capacity(self.placements.len() + reused.len() + pieces.len());
-        for placement in std::mem::take(&mut self.placements) {
+        let old = std::mem::take(&mut self.placements);
+        let mut next = Vec::with_capacity(old.len() + reused.len() + pieces.len());
+        for placement in &old {
             let parts = regions
                 .iter()
                 .filter_map(|region| placement.moved(region, page.height))
                 .filter(|part| !strips.iter().any(|strip| strip.contains(&part.on_page())));
             for (n, part) in parts.enumerate() {
-                next.push(if n == 0 { part } else { Placement { id: self.next_id(), ..part } });
+                next.push(if n == 0 { part } else { Placement { id: self.next_id(&old), ..part } });
             }
-            self.placements.push(placement);
         }
         for &(image, from, x, y) in &reused {
             self.next_z += 1;
-            next.push(Placement { image, id: self.next_id(), z: self.next_z, from, x, y });
+            next.push(Placement { image, id: self.next_id(&old), z: self.next_z, from, x, y });
         }
         let first_sent = next.len();
         for piece in &pieces {
-            let mut placement = self.new_placement(*piece);
+            let mut placement = self.new_placement(*piece, &old);
             (placement.x, placement.y) = (piece.x, piece.y);
             next.push(placement);
         }
+        self.placements = old;
         let shows = visible(&next, new.width, page);
         if shows.iter().filter(|&&shows| shows).count() > MAX_PLACEMENTS {
             return Err(Why::Placements);
@@ -357,13 +362,18 @@ impl Layers {
             }
         }
 
+        // A piece that something above covers isn't sent at all: its
+        // placement would be forgotten here but not by the terminal, and
+        // show its stale pixels once what covers it goes.
+        let sent: Vec<&Placement> =
+            next[first_sent..].iter().zip(&shows[first_sent..]).filter(|(_, &shows)| shows).map(|(p, _)| p).collect();
         let cuts: Vec<Pixels> =
-            pieces.iter().map(|piece| cut(new, piece.x, piece.y, piece.width, piece.height)).collect();
+            sent.iter().map(|piece| cut(new, piece.x, piece.y, piece.from.width, piece.from.height)).collect();
         let compressed: Vec<Vec<u8>> = std::thread::scope(|scope| {
             let work: Vec<_> = cuts.iter().map(|cut| scope.spawn(move || compress(&cut.data))).collect();
             work.into_iter().map(|done| done.join().unwrap_or_default()).collect()
         });
-        for ((placement, data), pixels) in next[first_sent..].iter().zip(compressed).zip(cuts) {
+        for ((placement, data), pixels) in sent.into_iter().zip(compressed).zip(cuts) {
             page.cursor(out, placement);
             let keys = format!(
                 "a=T,f={},s={},v={},o=z,i={},p={},X={},Y={},z={},C=1,q=2",
@@ -489,15 +499,21 @@ impl Layers {
     }
 
     /// A new image of `size`, all of it placed at the page's top left, on
-    /// top of everything.
-    fn new_placement(&mut self, size: Rect) -> Placement {
-        // Ids wrap long before they could reach a live image's again.
-        self.next_image =
-            if (FIRST_ID..FIRST_ID + 1_000_000).contains(&self.next_image) { self.next_image + 1 } else { FIRST_ID };
+    /// top of everything. `live` are the placements on screen.
+    fn new_placement(&mut self, size: Rect, live: &[Placement]) -> Placement {
+        // Ids start again after `IDS`, skipping those still held: under an
+        // animation the first image can stay for as long as kb runs.
+        loop {
+            self.next_image =
+                if (FIRST_ID..FIRST_ID + IDS).contains(&self.next_image) { self.next_image + 1 } else { FIRST_ID };
+            if !self.held.iter().any(|held| held.id == self.next_image) {
+                break;
+            }
+        }
         self.next_z = self.next_z.max(BOTTOM_Z) + 1;
         Placement {
             image: self.next_image,
-            id: self.next_id(),
+            id: self.next_id(live),
             z: self.next_z,
             from: Rect { x: 0, y: 0, ..size },
             x: 0,
@@ -505,9 +521,14 @@ impl Layers {
         }
     }
 
-    fn next_id(&mut self) -> u32 {
-        self.next_placement = self.next_placement % 1_000_000 + 1;
-        self.next_placement
+    /// A placement id that none of `live`, the placements on screen, has.
+    fn next_id(&mut self, live: &[Placement]) -> u32 {
+        loop {
+            self.next_placement = self.next_placement % IDS + 1;
+            if !live.iter().any(|placement| placement.id == self.next_placement) {
+                return self.next_placement;
+            }
+        }
     }
 }
 
@@ -1122,6 +1143,99 @@ mod tests {
                 // Back up over rows seen before: placed again, not sent.
                 assert!(!String::from_utf8_lossy(&out).contains("a=T"), "sent rows the terminal had: {sent:?}");
             }
+        }
+    }
+
+    /// Check that the terminal holds exactly the images and placements
+    /// `layers` thinks it does: one it has forgotten could show again.
+    fn nothing_left_behind(layers: &Layers, screen: &Screen) {
+        let sorted = |mut list: Vec<(u32, u32)>| {
+            list.sort();
+            list
+        };
+        let held = sorted(layers.held.iter().map(|held| (held.id, 0)).collect());
+        let images = sorted(screen.images.keys().map(|&id| (id, 0)).collect());
+        assert_eq!(held, images, "images");
+        let placed = sorted(layers.placements.iter().map(|p| (p.image, p.id)).collect());
+        let placements = sorted(screen.placements.iter().map(|q| (q.0, q.1)).collect());
+        assert_eq!(placed, placements, "placements");
+    }
+
+    #[test]
+    fn ids_start_again_around_those_in_use() {
+        // The first image, and its first placement, stay all along while
+        // the ids run out: the page beside the sidebar scrolls, which cuts
+        // the first image in two placements, and a caret blinks.
+        let (cols, rows, cell) = (4u16, 30u16, (4u32, 4u32));
+        let (width, height) = (16, 120);
+        let frame = |scrolled: u32, caret: bool| {
+            frame(width, height, |x, y| match (x, y) {
+                (0..4, _) => (y * 5 % 256) as u8,
+                (10, 50..54) if caret => 0,
+                _ => ((y + scrolled) * 13 % 256 + x * 3) as u8,
+            })
+        };
+        let mut layers = Layers::default();
+        let mut screen = Screen::default();
+        for (n, scrolled) in [0, 0, 3, 6, 9, 12, 15, 18].into_iter().enumerate() {
+            let new = frame(scrolled, n % 2 == 1);
+            let mut out = Vec::new();
+            let sent = layers.draw(&mut out, &encode(&new), cols, rows, cell, 2).unwrap();
+            screen.feed(&out, cell);
+            assert!(screen.page(2, cell, width, height) == new.data, "step {n}: sent {sent:?}");
+            nothing_left_behind(&layers, &screen);
+            if n == 0 {
+                (layers.next_image, layers.next_placement) = (FIRST_ID + IDS - 1, IDS - 1);
+            }
+        }
+    }
+
+    #[test]
+    fn a_covered_piece_is_not_sent() {
+        // 2 columns, 10 rows of 4x4 pixel cells. Rows 8 to 16 change, and
+        // come as two strips: one row, then all of them over it.
+        let (cols, rows, cell) = (2, 10, (4, 4));
+        let mut layers = Layers::default();
+        let mut screen = Screen::default();
+        let mut out = Vec::new();
+        layers.draw(&mut out, &encode(&page(10)), cols, rows, cell, 2).unwrap();
+        let mut new = page(10);
+        new.data[8 * 24..16 * 24].fill(9);
+        let strips = [Rect { x: 0, y: 9, width: 8, height: 1 }, Rect { x: 0, y: 8, width: 8, height: 8 }];
+        let page = Page { top: 2, cell, height: 40 };
+        assert_eq!(layers.patch(&mut out, &new, &whole_page(0), &strips, page), Ok(()));
+        screen.feed(&out, cell);
+        assert!(screen.page(2, cell, 8, 40) == new.data);
+        nothing_left_behind(&layers, &screen);
+    }
+
+    #[test]
+    fn a_long_walk_leaves_nothing_behind() {
+        // A sidebar that stays put, a page that scrolls by any amount, and
+        // here and there a few pixels that change, smaller than a cell.
+        let (cols, rows, cell) = (6u16, 20u16, (4u32, 5u32));
+        let (width, height) = (24, 100);
+        let mut seed = 7u64;
+        let mut random = |below: u64| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % below
+        };
+        let mut layers = Layers::default();
+        let mut screen = Screen::default();
+        let mut scrolled = 300i64;
+        for step in 0..400 {
+            scrolled = (scrolled + random(41) as i64 - 20).max(0);
+            let (dot, dot_x, dot_y) = (random(3) == 0, random(width as u64) as u32, random(height as u64) as u32);
+            let new = frame(width, height, |x, y| match (x, y) {
+                (0..4, _) => (y * 5 % 256) as u8,
+                _ if dot && (dot_x..dot_x + 2).contains(&x) && (dot_y..dot_y + 3).contains(&y) => 1,
+                _ => ((y as i64 + scrolled) * 13 % 256 + x as i64 * 3) as u8,
+            });
+            let mut out = Vec::new();
+            let sent = layers.draw(&mut out, &encode(&new), cols, rows, cell, 2).unwrap();
+            screen.feed(&out, cell);
+            assert!(screen.page(2, cell, width, height) == new.data, "step {step}: sent {sent:?}");
+            nothing_left_behind(&layers, &screen);
         }
     }
 }
