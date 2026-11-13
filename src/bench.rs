@@ -15,11 +15,14 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
-usage: kb bench [--steps N] [--out FILE] [--scale N] [URL]
+usage: kb bench [--steps N] [--out FILE] [--scale N] [--scene scroll|type] [--modes WORD] [URL]
 
 Run it in the pane to measure. Loads the page (it needs to be a few screens
-tall), scrolls it N times (default 30) for each way of sending frames, and
-prints a table of median times in milliseconds. --out also writes the table
+tall), changes it N times (default 30) for each way of sending frames, and
+prints a table of median times in milliseconds. --scene scroll (the default)
+scrolls the page; --scene type types into a box on it, where little changes
+from one frame to the next. --modes keeps only the ways whose name contains
+WORD (pty for the ones that work over ssh). --out also writes the table
 to a file.";
 
 const DEFAULT_URL: &str = "https://en.wikipedia.org/wiki/Web_browser";
@@ -61,12 +64,25 @@ enum Msg {
     Term(Vec<u8>),
 }
 
-/// One scroll step, in milliseconds, and the size of the frame Chrome sent.
+#[derive(Clone, Copy, PartialEq)]
+enum Scene {
+    Scroll,
+    Type,
+}
+
+/// A box for `Scene::Type` to type into, over the page's top left.
+const TYPING_BOX: &str = "(() => { const box = document.createElement('textarea'); \
+    box.style.cssText = 'position:fixed;left:20px;top:20px;width:420px;height:160px;z-index:2147483647;font:16px sans-serif'; \
+    document.body.append(box); box.focus(); })()";
+
+/// One step, in milliseconds, the size of the frame Chrome sent, and how
+/// much went to the terminal.
 struct Sample {
     chrome: f64,
     prepare: f64,
     terminal: f64,
     bytes: usize,
+    wire: usize,
 }
 
 struct Bench {
@@ -164,7 +180,7 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     values.get(values.len() / 2).copied().unwrap_or(f64::NAN)
 }
 
-fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
+fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>) -> Result<String, String> {
     let window = settled_window()?;
     let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
         ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)
@@ -175,7 +191,8 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
     let (width_px, height_px) = (cols as u32 * cell_w, rows as u32 * cell_h);
     let viewport = ((width_px as f64 / scale).ceil() as u32, (height_px as f64 / scale).ceil() as u32);
 
-    let profile = crate::data_dir()?.join("profile-bench");
+    // Its own profile, so that benches can run side by side.
+    let profile = crate::data_dir()?.join(format!("profile-bench-{}", std::process::id()));
     std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
     let (chrome, mut receiver) = Chrome::launch(&profile, scale, false)?;
     let (tx, rx) = mpsc::channel();
@@ -202,16 +219,31 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
     bench.chrome.resize(viewport.0, viewport.1, scale);
     bench.chrome.navigate(url);
     bench.loaded(Duration::from_secs(30))?;
+    if scene == Scene::Type {
+        bench.chrome.evaluate(TYPING_BOX);
+    }
 
     let mut report = format!(
-        "kb bench: {url}\npane {}x{} cells, frames {width_px}x{height_px} pixels, {steps} scroll steps each, times in ms (median)\n\n\
-         {:<26} {:>7} {:>8} {:>9} {:>7} {:>6} {:>9}\n",
-        window.cols, window.rows, "frames sent as", "chrome", "prepare", "terminal", "total", "fps", "frame KB"
+        "kb bench: {url}\npane {}x{} cells, frames {width_px}x{height_px} pixels, {steps} {} steps each, times in ms (median)\n\n\
+         {:<26} {:>7} {:>8} {:>9} {:>7} {:>6} {:>9} {:>8}\n",
+        window.cols,
+        window.rows,
+        if scene == Scene::Type { "typing" } else { "scroll" },
+        "frames sent as",
+        "chrome",
+        "prepare",
+        "terminal",
+        "total",
+        "fps",
+        "frame KB",
+        "wire KB"
     );
     let (x, y) = (viewport.0 as f64 / 2.0, viewport.1 as f64 / 2.0);
-    for mode in MODES {
+    for mode in MODES.iter().filter(|mode| modes.is_none_or(|word| mode.name.contains(word))) {
         bench.chrome.stop_screencast();
-        bench.chrome.evaluate("scrollTo(0, 0)");
+        if scene == Scene::Scroll {
+            bench.chrome.evaluate("scrollTo(0, 0)");
+        }
         match mode.source {
             Source::Png => bench.chrome.start_screencast(),
             Source::Jpeg(quality) => bench.chrome.start_screencast_jpeg(quality),
@@ -223,10 +255,15 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
         let mut samples = Vec::new();
         let mut missed = 0;
         for step in 0..steps {
-            // Down ten steps, back up ten, so the page never runs out.
-            let dy = if (step / 10) % 2 == 0 { 240.0 } else { -240.0 };
             let start = Instant::now();
-            bench.chrome.wheel(x, y, 0.0, dy, 0);
+            match scene {
+                Scene::Scroll => {
+                    // Down ten steps, back up ten, so the page never runs out.
+                    let dy = if (step / 10) % 2 == 0 { 240.0 } else { -240.0 };
+                    bench.chrome.wheel(x, y, 0.0, dy, 0);
+                }
+                Scene::Type => bench.chrome.insert_text(if step % 8 == 7 { "\n" } else { "kb " }),
+            }
             let Some(data) = bench.frame(Duration::from_secs(2))? else {
                 missed += 1;
                 continue;
@@ -256,6 +293,7 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
                     graphics::put_file(&mut out, &path, &pixels, cols, rows);
                 }
             }
+            let wire = out.len();
             out.extend_from_slice(b"\x1b[5n");
             let ready = Instant::now();
             term::write(&out);
@@ -268,6 +306,7 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
                 prepare: ms(got, ready),
                 terminal: ms(ready, done),
                 bytes: data.len() * 3 / 4,
+                wire,
             });
             // A step can animate over several frames; let the rest pass.
             bench.settle(Duration::from_millis(80))?;
@@ -282,8 +321,9 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
         let terminal = median(samples.iter().map(|s| s.terminal));
         let total = median(samples.iter().map(|s| s.chrome + s.prepare + s.terminal));
         let size = median(samples.iter().map(|s| s.bytes as f64)) / 1024.0;
+        let wire = median(samples.iter().map(|s| s.wire as f64)) / 1024.0;
         report.push_str(&format!(
-            "{:<26} {chrome:>7.1} {prepare:>8.1} {terminal:>9.1} {total:>7.1} {:>6.0} {size:>9.0}",
+            "{:<26} {chrome:>7.1} {prepare:>8.1} {terminal:>9.1} {total:>7.1} {:>6.0} {size:>9.0} {wire:>8.0}",
             mode.name,
             1000.0 / total
         ));
@@ -293,10 +333,12 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
         report.push('\n');
     }
     report.push_str(
-        "\nchrome: from the scroll to the frame arriving. prepare: decoding and writing the file.\n\
-         terminal: from sending the frame to the terminal having read it.\n",
+        "\nchrome: from the change to the frame arriving. prepare: decoding and writing the file.\n\
+         terminal: from sending the frame to the terminal having read it. wire: bytes sent to\n\
+         the terminal, which is what crosses the network over ssh.\n",
     );
     bench.chrome.close();
+    let _ = std::fs::remove_dir_all(&profile);
     Ok(report)
 }
 
@@ -306,6 +348,8 @@ pub fn run(words: &[String]) -> i32 {
     let mut steps = 30;
     let mut out = None;
     let mut scale = if cfg!(target_os = "macos") { 2.0 } else { 1.0 };
+    let mut scene = Scene::Scroll;
+    let mut modes = None;
     let mut args = words.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -324,6 +368,21 @@ pub fn run(words: &[String]) -> i32 {
                 Some(n) => scale = n,
                 None => {
                     eprintln!("kb bench: --scale needs a positive number\n{USAGE}");
+                    return 2;
+                }
+            },
+            "--scene" => match args.next().map(String::as_str) {
+                Some("scroll") => scene = Scene::Scroll,
+                Some("type") => scene = Scene::Type,
+                _ => {
+                    eprintln!("kb bench: --scene is scroll or type\n{USAGE}");
+                    return 2;
+                }
+            },
+            "--modes" => match args.next() {
+                Some(word) => modes = Some(word.clone()),
+                None => {
+                    eprintln!("kb bench: --modes needs a word\n{USAGE}");
                     return 2;
                 }
             },
@@ -348,7 +407,7 @@ pub fn run(words: &[String]) -> i32 {
         eprintln!("kb bench: {error}");
         return 1;
     }
-    let result = measure(&url, steps, scale);
+    let result = measure(&url, steps, scale, scene, modes.as_deref());
     term::leave();
     match result {
         Ok(report) => {
