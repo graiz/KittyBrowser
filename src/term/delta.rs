@@ -120,11 +120,6 @@ pub struct Delta {
 }
 
 impl Delta {
-    /// Whether the screen holds a page this drew.
-    pub fn active(&self) -> bool {
-        self.frame.is_some()
-    }
-
     /// The screen was cleared of images: the next draw sends the whole page.
     pub fn forget(&mut self) {
         self.frame = None;

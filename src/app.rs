@@ -209,9 +209,10 @@ struct App {
     last_file: Option<std::path::PathBuf>,
     /// The page as tiles, when it is drawn that way.
     tiles: graphics::Tiles,
-    /// The page as changed rectangles through the pty, when it is drawn
-    /// that way (the terminal can't read files, as over ssh).
-    delta: crate::term::delta::Delta,
+    /// The page through the pty, moved as it scrolls and only what changed
+    /// sent, when it is drawn that way (the terminal can't read files, as
+    /// over ssh).
+    layers: crate::term::layers::Layers,
     /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
     /// so the page reflows as in a desktop browser and stays sharp.
     zoom: f64,
@@ -343,7 +344,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         by_file: false,
         last_file: None,
         tiles: graphics::Tiles::default(),
-        delta: Default::default(),
+        layers: Default::default(),
         zoom: 1.0,
         fit_request: None,
         help: false,
@@ -659,7 +660,7 @@ impl App {
         term::write(b"\x1b[2J");
         term::write(graphics::DELETE);
         self.tiles.forget();
-        self.delta.forget();
+        self.layers.forget();
         self.help_rect = None;
     }
 
@@ -945,20 +946,20 @@ impl App {
             };
             // Through the pty, only what changed, when the frame lines up.
             if pixels.is_none() && !self.by_file && self.fixed.is_none() {
-                match self.delta.draw(&mut out, png, cols, rows, cell, 2) {
+                match self.layers.draw(&mut out, png, cols, rows, cell, 2) {
                     Some(sent) => {
                         log(format_args!("drew {sent:?}"));
                         drawn = true;
                     }
-                    None if self.delta.active() => {
+                    None if self.layers.active() => {
                         out.extend_from_slice(graphics::DELETE);
-                        self.delta.forget();
+                        self.layers.forget();
                     }
                     None => {}
                 }
-            } else if self.delta.active() {
+            } else if self.layers.active() {
                 out.extend_from_slice(graphics::DELETE);
-                self.delta.forget();
+                self.layers.forget();
             }
             if !drawn {
                 if self.tiles.active() {
@@ -1008,9 +1009,6 @@ impl App {
         self.render_help(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
-        // While the terminal reads a page sent whole, decode it to compare
-        // the next frame with.
-        self.delta.finish();
     }
 
     /// Open the find field in the address bar's place.
