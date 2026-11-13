@@ -94,19 +94,75 @@ pub struct Chrome {
 
 /// Chrome's headless window. Frames are usually the size of the viewport
 /// set by `resize`, but some Chromes (seen on a Mac whose display was
-/// asleep) crop them to this window instead, which can be far smaller, so
-/// it is sized to fit.
+/// asleep) make them the size of this window less a margin instead,
+/// whatever the viewport. Once a frame shows that, the window is kept at
+/// the viewport plus that margin.
 struct Window {
     id: u64,
-    /// Its size as last set, in CSS pixels.
-    width: i64,
-    height: i64,
-    /// Whether it has been resized to fit frames, after which it follows
-    /// the viewport.
-    steered: bool,
-    /// The size, in CSS pixels, of frames from before the last change,
-    /// which are no measure of the window.
-    stale: Option<(i64, i64)>,
+    /// Its size as last set, or as Chrome started it, in CSS pixels.
+    size: (i64, i64),
+    /// How much bigger than its frames the window is, once a frame of
+    /// another size than the viewport has shown it.
+    margin: Option<(i64, i64)>,
+    /// Viewports asked for before the current one, and sizes the window had
+    /// before, newest last: frames made then can still be arriving.
+    earlier_viewports: Vec<(i64, i64)>,
+    earlier_windows: Vec<(i64, i64)>,
+}
+
+/// How many earlier sizes to remember: more than can change between two
+/// frames.
+const EARLIER: usize = 8;
+
+fn remember(list: &mut Vec<(i64, i64)>, size: (i64, i64)) {
+    list.push(size);
+    if list.len() > EARLIER {
+        list.remove(0);
+    }
+}
+
+impl Window {
+    fn new(id: u64, size: (i64, i64)) -> Window {
+        Window { id, size, margin: None, earlier_viewports: Vec::new(), earlier_windows: Vec::new() }
+    }
+
+    /// The viewport changed from `old` to `new`: the size to make the
+    /// window, if it needs another.
+    fn resized(&mut self, old: Option<(i64, i64)>, new: (i64, i64)) -> Option<(i64, i64)> {
+        remember(&mut self.earlier_viewports, old.filter(|&old| old != new)?);
+        self.fit(new)
+    }
+
+    /// A frame of size `frame` came while the viewport was `viewport`: the
+    /// size to make the window, if the frame shows it needs another. A
+    /// frame that could have been made before the last change shows
+    /// nothing; any other was made in the window as it is, which gives the
+    /// margin. The margin is learnt again whenever a frame disagrees with
+    /// it, and the window set to an absolute size, so a wrong guess is put
+    /// right by the next frame rather than added to.
+    fn frame(&mut self, viewport: (i64, i64), frame: (i64, i64)) -> Option<(i64, i64)> {
+        let late = |size: &(i64, i64)| match self.margin {
+            Some(margin) => (size.0 - margin.0, size.1 - margin.1) == frame,
+            None => false,
+        };
+        if frame == viewport || self.earlier_viewports.contains(&frame) || self.earlier_windows.iter().any(late) {
+            return None;
+        }
+        // Never less than nothing: a window the system won't make as small
+        // as asked (a Mac's are at least 500 wide) isn't a bigger margin.
+        self.margin = Some(((self.size.0 - frame.0).max(0), (self.size.1 - frame.1).max(0)));
+        self.fit(viewport)
+    }
+
+    fn fit(&mut self, viewport: (i64, i64)) -> Option<(i64, i64)> {
+        let (width, height) = self.margin?;
+        let size = (viewport.0 + width, viewport.1 + height);
+        if size == self.size {
+            return None;
+        }
+        remember(&mut self.earlier_windows, std::mem::replace(&mut self.size, size));
+        Some(size)
+    }
 }
 
 /// Whether `url` is a file or a server on this machine or network: a page
@@ -352,18 +408,12 @@ impl Chrome {
             call(&mut tx, &mut rx, "Target.attachToTarget", json!({"targetId": target, "flatten": true}), None)?;
         let session = attached["sessionId"].as_str().ok_or("Chrome gave no session")?.to_owned();
         let s = Some(session.as_str());
-        // The window holding the page, and its size, for `fit_window`.
+        // The window holding the page, and its size, for `check_frame_size`.
         let window = call(&mut tx, &mut rx, "Browser.getWindowForTarget", json!({"targetId": target}), None)
             .ok()
             .and_then(|reply| {
                 let bounds = &reply["bounds"];
-                Some(Window {
-                    id: reply["windowId"].as_u64()?,
-                    width: bounds["width"].as_u64()? as i64,
-                    height: bounds["height"].as_u64()? as i64,
-                    steered: false,
-                    stale: None,
-                })
+                Some(Window::new(reply["windowId"].as_u64()?, (bounds["width"].as_i64()?, bounds["height"].as_i64()?)))
             });
 
         call(&mut tx, &mut rx, "Page.enable", json!({}), s)?;
@@ -556,46 +606,27 @@ impl Chrome {
                 "screenHeight": height.max(982),
             }),
         );
-        let (Some(window), Some((old_width, old_height))) = (&mut self.window, self.viewport.replace((width, height)))
-        else {
-            return;
-        };
-        // Frames still coming at the old size say nothing about the window.
-        window.stale = Some((old_width as i64, old_height as i64));
-        // A window already fitted keeps what it learnt of its edges.
-        if window.steered {
-            self.fit_window(width as i64 - old_width as i64, height as i64 - old_height as i64, None);
-        }
+        let size = |(width, height): (u32, u32)| (width as i64, height as i64);
+        let old = self.viewport.replace((width, height)).map(size);
+        let fit = self.window.as_mut().and_then(|window| window.resized(old, size((width, height))));
+        self.set_window(fit);
     }
 
-    /// Grow or shrink the window by this many CSS pixels. `stale` is the
-    /// size of frames that are from before.
-    fn fit_window(&mut self, dw: i64, dh: i64, stale: Option<(i64, i64)>) {
-        let Some(window) = &mut self.window else { return };
-        if dw == 0 && dh == 0 {
-            return;
-        }
-        window.width = (window.width + dw).max(100);
-        window.height = (window.height + dh).max(100);
-        window.steered = true;
-        window.stale = stale.or(window.stale);
-        let bounds = json!({"windowId": window.id, "bounds": {"width": window.width, "height": window.height}});
+    fn set_window(&mut self, size: Option<(i64, i64)>) {
+        let (Some(window), Some((width, height))) = (&self.window, size) else { return };
+        let bounds = json!({"windowId": window.id, "bounds": {"width": width, "height": height}});
         self.send_browser("Browser.setWindowBounds", bounds);
     }
 
-    /// When a frame isn't the size of the viewport, the window is cropping
-    /// it: make the window larger or smaller by the difference.
+    /// Fit the window to the viewport if this frame shows it cropping them.
     fn check_frame_size(&mut self, metadata: &Value) {
-        let (Some((width, height)), Some(got_width), Some(got_height)) =
-            (self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
+        let (Some(window), Some((width, height)), Some(got_width), Some(got_height)) =
+            (&mut self.window, self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
         else {
             return;
         };
-        let got = (got_width.round() as i64, got_height.round() as i64);
-        if self.window.as_ref().is_none_or(|window| window.stale == Some(got)) {
-            return;
-        }
-        self.fit_window(width as i64 - got.0, height as i64 - got.1, Some(got));
+        let fit = window.frame((width as i64, height as i64), (got_width.round() as i64, got_height.round() as i64));
+        self.set_window(fit);
     }
 
     /// Evaluate JavaScript in the page and have its value in the reply to
@@ -848,5 +879,133 @@ mod tests {
         for url in ["https://example.com/", "https://localhost.example.com/", "about:blank", "http://8.8.8.8/"] {
             assert!(!is_local(url), "{url}");
         }
+    }
+
+    /// A Chrome whose frames are its window less `margin`, as one's were on
+    /// a Mac whose display was asleep (a margin of 0x143, and windows no
+    /// narrower than 500), or with a margin of `None`, the viewport.
+    struct Model {
+        window: (i64, i64),
+        margin: Option<(i64, i64)>,
+        /// How many times kb set the window.
+        sets: usize,
+    }
+
+    impl Model {
+        fn new(margin: Option<(i64, i64)>) -> Model {
+            Model { window: (1368, 300), margin, sets: 0 }
+        }
+
+        /// The size of a frame made now at this viewport.
+        fn frame(&self, viewport: (i64, i64)) -> (i64, i64) {
+            match self.margin {
+                Some(margin) => (self.window.0 - margin.0, self.window.1 - margin.1),
+                None => viewport,
+            }
+        }
+
+        fn set(&mut self, size: Option<(i64, i64)>) {
+            if let Some((width, height)) = size {
+                self.window = (width.max(500), height);
+                self.sets += 1;
+            }
+        }
+    }
+
+    /// Resize through `viewports`, with each frame arriving `lag` resizes
+    /// after it was made, then let the frames catch up. The first frame can
+    /// be `odd` by some pixels, as one was: 500x128 from a 500x256 window
+    /// whose frames after were 143 short.
+    fn run(margin: Option<(i64, i64)>, odd: (i64, i64), lag: usize, viewports: &[(i64, i64)]) -> (Window, Model) {
+        let mut window = Window::new(1, (1368, 300));
+        let mut chrome = Model::new(margin);
+        let mut in_flight = std::collections::VecDeque::new();
+        let mut viewport = None;
+        for &size in viewports {
+            chrome.set(window.resized(viewport, size));
+            viewport = Some(size);
+            let mut frame = chrome.frame(size);
+            if chrome.sets == 0 && in_flight.is_empty() {
+                frame = (frame.0 + odd.0, frame.1 + odd.1);
+            }
+            in_flight.push_back(frame);
+            if in_flight.len() > lag {
+                chrome.set(window.frame(size, in_flight.pop_front().unwrap()));
+            }
+        }
+        let size = viewport.unwrap();
+        for frame in in_flight {
+            chrome.set(window.frame(size, frame));
+        }
+        for _ in 0..3 {
+            chrome.set(window.frame(size, chrome.frame(size)));
+        }
+        (window, chrome)
+    }
+
+    const ZOOM: [(i64, i64); 9] = [
+        (1280, 799),
+        (1164, 726),
+        (1067, 666),
+        (1164, 726),
+        (1280, 799),
+        (1422, 888),
+        (1600, 999),
+        (1422, 888),
+        (1280, 799),
+    ];
+    const DRAG: [(i64, i64); 6] = [(1300, 1000), (1400, 900), (1200, 700), (900, 500), (1500, 950), (1200, 700)];
+
+    #[test]
+    fn frames_that_fit_send_nothing() {
+        for lag in 0..4 {
+            for viewports in [&ZOOM[..], &DRAG[..], &[(300, 100), (320, 110)][..]] {
+                let (_, chrome) = run(None, (0, 0), lag, viewports);
+                assert_eq!(chrome.sets, 0, "lag {lag}, {viewports:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn frames_that_follow_the_window_end_whole() {
+        // Two or three resizes before a frame from the first arrives, as
+        // with Ctrl+= twice or a drag: the window used to be moved by C-A
+        // and then by C-B, ending at 3C-A-B.
+        for lag in 0..4 {
+            for odd in [(0, 0), (0, 15)] {
+                for viewports in [&ZOOM[..], &DRAG[..]] {
+                    let (_, chrome) = run(Some((0, 143)), odd, lag, viewports);
+                    let last = *viewports.last().unwrap();
+                    assert_eq!(chrome.frame(last), last, "lag {lag}, odd {odd:?}, {viewports:?}");
+                    assert_eq!(chrome.window, (last.0, last.1 + 143));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_frame_of_another_size_fits_the_window() {
+        // As seen: a 1368x300 window, frames of 1368x157.
+        let mut window = Window::new(1, (1368, 300));
+        assert_eq!(window.frame((1280, 799), (1368, 157)), Some((1280, 942)));
+        assert_eq!(window.frame((1280, 799), (1280, 799)), None);
+        // Late, from the window before.
+        assert_eq!(window.frame((1280, 799), (1368, 157)), None);
+        // As seen too: a 500x256 window whose first frame was 500x128 and
+        // the next ones 143 short. The margin is learnt again.
+        let mut window = Window::new(1, (500, 256));
+        assert_eq!(window.frame((1368, 833), (500, 128)), Some((1368, 961)));
+        assert_eq!(window.frame((1368, 833), (1368, 818)), Some((1368, 976)));
+        assert_eq!(window.frame((1368, 833), (1368, 833)), None);
+    }
+
+    #[test]
+    fn a_viewport_narrower_than_a_window_can_be() {
+        // The window is asked for once; that the Mac keeps it 500 wide
+        // doesn't start a loop of asking again.
+        let (mut window, chrome) = run(Some((0, 143)), (0, 0), 0, &[(300, 100)]);
+        assert_eq!((chrome.window, chrome.sets), ((500, 243), 1));
+        assert_eq!(window.frame((300, 100), chrome.frame((300, 100))), None);
+        assert_eq!(window.resized(Some((300, 100)), (320, 110)), Some((320, 253)));
     }
 }

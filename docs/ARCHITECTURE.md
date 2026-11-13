@@ -155,12 +155,20 @@ ms to show, but soft text for a third of a second), JPEG from Chrome,
 `captureScreenshot`, and `--disable-frame-rate-limit` (halves Chrome's time,
 but animated pages then take three cores).
 
-**Headless window.** On a Mac whose display is asleep, Chrome crops
-screencast frames to its headless window, which can be as small as 500x256,
-whatever viewport `Emulation.setDeviceMetricsOverride` sets. kb compares
-each frame's size in its metadata with the viewport it asked for and, when
-they differ, resizes the window by the difference
-(`Browser.setWindowBounds`). Where frames already match, nothing is sent.
+**Headless window.** On a Mac whose display is asleep, Chrome makes
+screencast frames the size of its headless window less a margin, whatever
+viewport `Emulation.setDeviceMetricsOverride` sets: a 500x256 window gave
+frames of 500x113 CSS pixels, 143 short. kb compares each frame's size in
+its metadata with the viewport. A frame of another size that can't be a
+late one (the size of an earlier viewport, or of an earlier window less the
+margin) was made in the window as it is, so gives the margin, and the
+window is set to the viewport plus the margin (`Browser.setWindowBounds`).
+Every resize sets it so again. The size is absolute, so a late frame
+can't make it drift, and a wrong margin (Chrome's very first frame can be
+off by a few pixels) is put right by the next frame (`Window` in
+`engine/chrome.rs`). Where frames match, nothing is ever sent. macOS keeps
+windows at least 500 wide, so there a narrower viewport comes in frames
+500 wide.
 
 **Pacing** (`App::frame_gap`). Chrome sends a frame, then waits for it to be
 acknowledged; kb decides when. While the page is in use (a key, the mouse,
