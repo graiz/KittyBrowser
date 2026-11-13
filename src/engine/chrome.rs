@@ -92,15 +92,14 @@ pub struct Chrome {
     viewport: Option<(u32, u32)>,
     /// How the screencast was started, while it runs, and the id of the
     /// reply to the last change to the window, after which it is started
-    /// again: seen on a Mac whose display was asleep, frames stop when the
-    /// window changes, until then.
+    /// again: on a Mac, frames stop when the window changes, until then.
     screencast: Option<Value>,
     window_reply: Option<u64>,
 }
 
 /// Chrome's headless window. Frames are usually the size of the viewport
-/// set by `resize`, but some Chromes (seen on a Mac whose display was
-/// asleep) make them the size of this window less a margin instead,
+/// set by `resize`, but on a Mac Chrome makes them the size of this window
+/// less a margin instead,
 /// whatever the viewport. So the window is kept at the viewport plus that
 /// margin, as frames show it. That also gives pages a window as big as
 /// they are: headless, it is 500x256 whatever the viewport, smaller than
