@@ -151,6 +151,70 @@ fn find_binary() -> Option<PathBuf> {
 }
 
 /// Turn off the password manager and autofill in the profile before Chrome
+/// The client hints a browser like `binary` sends, for `product` (as
+/// Browser.getVersion has it, "HeadlessChrome/157.0.8103.78"): its brand
+/// beside Chromium's and a made-up one, as Chrome sends, and the platform.
+fn agent_metadata(product: &str, binary: &Path) -> Value {
+    let full = product.rsplit('/').next().unwrap_or("");
+    let major = full.split('.').next().unwrap_or("");
+    let name = binary.to_string_lossy().to_lowercase();
+    let brand = if name.contains("edge") {
+        Some("Microsoft Edge")
+    } else if name.contains("brave") {
+        Some("Brave")
+    } else if name.contains("chromium") {
+        None
+    } else {
+        Some("Google Chrome")
+    };
+    let mut brands = vec![("Not.A/Brand", "99", "99.0.0.0"), ("Chromium", major, full)];
+    brands.extend(brand.map(|brand| (brand, major, full)));
+    let short: Vec<Value> = brands.iter().map(|b| json!({"brand": b.0, "version": b.1})).collect();
+    let long: Vec<Value> = brands.iter().map(|b| json!({"brand": b.0, "version": b.2})).collect();
+    let (platform, architecture) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => ("macOS", "arm"),
+        ("macos", _) => ("macOS", "x86"),
+        (_, "aarch64") => ("Linux", "arm"),
+        _ => ("Linux", "x86"),
+    };
+    json!({
+        "brands": short,
+        "fullVersionList": long,
+        "fullVersion": full,
+        "platform": platform,
+        "platformVersion": platform_version(),
+        "architecture": architecture,
+        "bitness": "64",
+        "model": "",
+        "mobile": false,
+    })
+}
+
+/// The system's version, as Chrome reports it: macOS's ("26.0.1").
+#[cfg(target_os = "macos")]
+fn platform_version() -> String {
+    let mut buf = [0u8; 64];
+    let mut len = buf.len();
+    let name = c"kern.osproductversion";
+    let got = unsafe { libc::sysctlbyname(name.as_ptr(), buf.as_mut_ptr().cast(), &mut len, std::ptr::null_mut(), 0) };
+    match got {
+        0 => String::from_utf8_lossy(&buf[..len]).trim_end_matches('\0').to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// The system's version, as Chrome reports it: the kernel's release,
+/// without what follows the numbers ("6.8.0" of "6.8.0-45-generic").
+#[cfg(not(target_os = "macos"))]
+fn platform_version() -> String {
+    let mut system: libc::utsname = unsafe { std::mem::zeroed() };
+    if unsafe { libc::uname(&mut system) } != 0 {
+        return String::new();
+    }
+    let release: String = system.release.iter().take_while(|&&c| c != 0).map(|&c| c as u8 as char).collect();
+    release.split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or("").to_owned()
+}
+
 /// starts. After a login form is submitted, Chrome offers to save the
 /// password; headless, the offer has nowhere to show, and while it is
 /// pending the page can stop receiving mouse and key events.
@@ -244,6 +308,9 @@ impl Chrome {
             .arg(format!("--force-device-scale-factor={scale}"))
             .args(["--hide-scrollbars", "--no-first-run", "--no-default-browser-check"])
             .arg("--disable-features=PasswordManagerOnboarding,AutofillServerCommunication")
+            // Otherwise navigator.webdriver is true, which sites such as
+            // Google take as a robot and answer with a captcha.
+            .arg("--disable-blink-features=AutomationControlled")
             .args(if devtools {
                 &["--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1"][..]
             } else {
@@ -306,11 +373,20 @@ impl Chrome {
         }
         let tree = call(&mut tx, &mut rx, "Page.getFrameTree", json!({}), s)?;
         let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or(&target).to_owned();
-        // Some sites turn away anything that calls itself headless.
+        // Some sites turn away anything that calls itself headless. The
+        // client hints go with the name: overriding it alone leaves them
+        // empty, which is a robot's mark too.
         let version = call(&mut tx, &mut rx, "Browser.getVersion", json!({}), None)?;
-        if let Some(agent) = version["userAgent"].as_str() {
+        if let (Some(agent), Some(product)) = (version["userAgent"].as_str(), version["product"].as_str()) {
             let agent = agent.replace("HeadlessChrome", "Chrome");
-            call(&mut tx, &mut rx, "Emulation.setUserAgentOverride", json!({"userAgent": agent}), s)?;
+            let metadata = agent_metadata(product, &binary);
+            call(
+                &mut tx,
+                &mut rx,
+                "Emulation.setUserAgentOverride",
+                json!({"userAgent": agent, "userAgentMetadata": metadata}),
+                s,
+            )?;
         }
         // Without this the page believes it is in the background: no caret, no focus styles.
         call(&mut tx, &mut rx, "Emulation.setFocusEmulationEnabled", json!({"enabled": true}), s)?;
@@ -468,7 +544,17 @@ impl Chrome {
     pub fn resize(&mut self, width: u32, height: u32, scale: f64) {
         self.send(
             "Emulation.setDeviceMetricsOverride",
-            json!({"width": width, "height": height, "deviceScaleFactor": scale, "mobile": false}),
+            json!({
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": scale,
+                "mobile": false,
+                // Headless, the screen is 400x300, smaller than the page on
+                // it: a robot's mark. A laptop's screen, or the page's size if
+                // larger.
+                "screenWidth": width.max(1512),
+                "screenHeight": height.max(982),
+            }),
         );
         let (Some(window), Some((old_width, old_height))) = (&mut self.window, self.viewport.replace((width, height)))
         else {
@@ -726,6 +812,24 @@ impl Chrome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_hints_name_the_browser() {
+        let hints = super::agent_metadata(
+            "HeadlessChrome/157.0.8103.78",
+            std::path::Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        );
+        let brands: Vec<&str> =
+            hints["brands"].as_array().unwrap().iter().map(|b| b["brand"].as_str().unwrap()).collect();
+        assert_eq!(brands, ["Not.A/Brand", "Chromium", "Google Chrome"]);
+        assert_eq!(hints["brands"][2]["version"], "157");
+        assert_eq!(hints["fullVersionList"][2]["version"], "157.0.8103.78");
+        let chromium = super::agent_metadata("HeadlessChrome/157.0.1.2", std::path::Path::new("/usr/bin/chromium"));
+        assert_eq!(chromium["brands"].as_array().unwrap().len(), 2);
+        let edge = super::agent_metadata("HeadlessChrome/157.0.1.2", std::path::Path::new("/usr/bin/microsoft-edge"));
+        assert_eq!(edge["brands"][2]["brand"], "Microsoft Edge");
+        assert!(super::platform_version().starts_with(|c: char| c.is_ascii_digit()));
+    }
+
     use super::*;
 
     #[test]
