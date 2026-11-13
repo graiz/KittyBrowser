@@ -1,6 +1,6 @@
 //! Pane size in cells and pixels.
 //!
-//! Note from the prototype: a new Rex pane reports 80x24 for a moment before
+//! A new Rex pane reports 80x24 for a moment before
 //! it is laid out, so the app polls `window` rather than trusting the first
 //! reading.
 

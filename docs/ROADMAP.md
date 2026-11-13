@@ -4,9 +4,9 @@
 
 Terminals such as kitty, Ghostty, WezTerm and Rex can draw images in a pane.
 That is enough to show a web page next to your editor or your agent without
-leaving the terminal. The shell prototype in `prototype/webshot.sh` proved
-the idea: it screenshots a page with headless Chrome at the pane's exact pixel
-size and prints it, as a one-shot still image that takes seconds. kb makes
+leaving the terminal. kb began as a shell script that proved the idea: it
+took a screenshot with headless Chrome at the pane's exact pixel size and
+printed it, a still image that took seconds. kb makes
 that live, interactive and fast, and gives agents a way to drive it.
 
 ## Goals
