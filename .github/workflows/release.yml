@@ -9,8 +9,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Read-only by default; only publish, which runs no build, can write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,7 +37,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      # No build cache: a release is built from nothing, so a cache written
+      # by another workflow can't end up in it.
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
@@ -54,11 +56,14 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      # Pinned: it runs with write access to the repository.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: kb-*.tar.gz*
           generate_release_notes: true

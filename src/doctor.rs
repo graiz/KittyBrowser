@@ -6,179 +6,116 @@
 //! only show a blank pane or stray escape codes then, so this names the
 //! cause before the user has to guess.
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// What the environment says about the terminal kb is running in.
-#[derive(Default)]
-pub struct Env {
-    pub term: Option<String>,
-    pub term_program: Option<String>,
-    pub tmux: bool,
-    pub screen: bool,
-    pub kitty: bool,
-    pub wezterm: bool,
-    pub rex: bool,
-}
+/// The terminals kb is known to draw in, and where to get them.
+pub const TERMINALS: &[(&str, &str)] = &[
+    ("Ghostty", "https://ghostty.org"),
+    ("kitty", "https://sw.kovidgoyal.net/kitty"),
+    ("WezTerm", "https://wezterm.org"),
+    ("Rex", "https://www.superlogical.com"),
+];
 
-impl Env {
-    pub fn read() -> Env {
-        let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-        Env {
-            term: var("TERM"),
-            term_program: var("TERM_PROGRAM"),
-            tmux: var("TMUX").is_some(),
-            screen: var("STY").is_some(),
-            kitty: var("KITTY_WINDOW_ID").is_some(),
-            wezterm: var("WEZTERM_EXECUTABLE").is_some() || var("WEZTERM_PANE").is_some(),
-            rex: var("REX_SESSION").is_some(),
-        }
-    }
-}
+/// How long kb waits for the terminal to say whether it draws kitty
+/// graphics before going ahead anyway. kb doctor isn't in a hurry, so it
+/// waits longer, which gets an answer over slower links.
+pub const ASK_KB: Duration = Duration::from_millis(1500);
+const ASK_DOCTOR: Duration = Duration::from_secs(5);
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Terminal {
-    /// One kb is known to draw in.
-    Supported(&'static str),
-    /// One kb can't draw in, and why, with what to do instead.
-    Unsupported(String),
-    /// One kb doesn't recognise; it may work.
-    Unknown(String),
-}
-
-const USE_INSTEAD: &str = "use Ghostty, kitty, WezTerm or Rex";
-
-/// Decide from the environment alone, without asking the terminal.
-pub fn terminal(env: &Env) -> Terminal {
-    // tmux and screen sit between kb and the terminal and drop its images,
-    // whatever the terminal outside them supports.
-    if env.tmux {
-        return Terminal::Unsupported(format!(
-            "kb is running inside tmux, which doesn't pass images through; run kb in a plain pane ({USE_INSTEAD})"
-        ));
-    }
-    if env.screen || env.term.as_deref().is_some_and(|term| term.starts_with("screen")) {
-        return Terminal::Unsupported(format!(
-            "kb is running inside GNU screen, which doesn't pass images through; run kb in a plain pane ({USE_INSTEAD})"
-        ));
-    }
-    if env.kitty || env.term.as_deref() == Some("xterm-kitty") {
-        return Terminal::Supported("kitty");
-    }
-    if env.rex {
-        return Terminal::Supported("Rex");
-    }
-    if env.wezterm {
-        return Terminal::Supported("WezTerm");
-    }
-    match env.term_program.as_deref() {
-        Some("ghostty") => Terminal::Supported("Ghostty"),
-        Some("WezTerm") => Terminal::Supported("WezTerm"),
-        Some("Apple_Terminal") => {
-            Terminal::Unsupported(format!("Terminal.app can't draw kitty graphics; {USE_INSTEAD}"))
-        }
-        Some("iTerm.app") => Terminal::Unsupported(format!("iTerm2 can't draw kitty graphics; {USE_INSTEAD}")),
-        Some(other) => Terminal::Unknown(other.to_owned()),
-        None if env.term.as_deref() == Some("xterm-ghostty") => Terminal::Supported("Ghostty"),
-        None => Terminal::Unknown(env.term.clone().unwrap_or_else(|| "unknown".to_owned())),
+/// The multiplexer kb is running inside, if any: these sit between kb and
+/// the terminal and don't pass its images on, whatever the terminal outside
+/// them supports. TMUX and ZELLIJ are set inside them; reached over ssh,
+/// only TERM is left, and tmux names itself screen there by default.
+fn multiplexer(tmux: bool, zellij: bool, term: &str) -> Option<&'static str> {
+    if tmux || term.starts_with("tmux") {
+        Some("tmux")
+    } else if zellij {
+        Some("Zellij")
+    } else if term.starts_with("screen") {
+        Some("tmux or screen")
+    } else {
+        None
     }
 }
 
-/// Stop before taking over the screen when the terminal can't show kb at
-/// all, so the user reads why rather than a blank pane. KB_FORCE=1 skips it,
-/// for a terminal that has gained support since.
-pub fn refuse_unsupported_terminal() -> Result<(), String> {
-    if std::env::var_os("KB_FORCE").is_some() {
-        return Ok(());
-    }
-    match terminal(&Env::read()) {
-        Terminal::Unsupported(why) => {
-            Err(format!("{why}.\nkb doctor checks your setup; KB_FORCE=1 kb ... tries anyway."))
-        }
-        _ => Ok(()),
-    }
+fn multiplexer_here() -> Option<&'static str> {
+    multiplexer(
+        std::env::var_os("TMUX").is_some(),
+        std::env::var_os("ZELLIJ").is_some(),
+        &std::env::var("TERM").unwrap_or_default(),
+    )
 }
 
-/// Ask the terminal itself whether it draws kitty graphics: send a query
-/// image and then a device attributes request, which every terminal
-/// answers. A graphics reply before the attributes means yes. None when
-/// stdin isn't a terminal or nothing answered.
-fn probe_graphics() -> Option<bool> {
-    unsafe {
-        if libc::isatty(0) == 0 || libc::isatty(1) == 0 {
-            return None;
-        }
-        let mut original: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(0, &mut original) < 0 {
-            return None;
-        }
-        let mut raw = original;
-        libc::cfmakeraw(&mut raw);
-        libc::tcsetattr(0, libc::TCSANOW, &raw);
-        let mut out = std::io::stdout().lock();
-        let _ = out.write_all(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c");
-        let _ = out.flush();
-        let reply = read_until_attributes(Duration::from_millis(800));
-        libc::tcflush(0, libc::TCIFLUSH);
-        libc::tcsetattr(0, libc::TCSANOW, &original);
-        reply.map(|bytes| answered_graphics(&bytes))
-    }
+/// The terminal's name, to show; what it can do is asked of it directly.
+/// It comes from variables that multiplexers and ssh pass on, so it can
+/// name the terminal outside them.
+fn terminal_name(program: Option<&str>, term: &str, rex: bool) -> Option<String> {
+    Some(match program {
+        Some("Apple_Terminal") => "Terminal".to_owned(),
+        Some("iTerm.app") => "iTerm2".to_owned(),
+        Some("vscode") => "VS Code's terminal".to_owned(),
+        Some("ghostty") => "Ghostty".to_owned(),
+        Some("rex") => "Rex".to_owned(),
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ if term == "xterm-kitty" => "kitty".to_owned(),
+        _ if term == "xterm-ghostty" => "Ghostty".to_owned(),
+        _ if rex => "Rex".to_owned(),
+        _ => return None,
+    })
 }
 
-/// Read stdin until the device attributes reply (ESC [ ? ... c) or the
-/// timeout.
-fn read_until_attributes(timeout: Duration) -> Option<Vec<u8>> {
-    let deadline = std::time::Instant::now() + timeout;
-    let mut bytes = Vec::new();
-    loop {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return if bytes.is_empty() { None } else { Some(bytes) };
-        }
-        let mut poll = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
-        if unsafe { libc::poll(&mut poll, 1, left.as_millis() as i32) } <= 0 {
-            continue;
-        }
-        let mut buf = [0u8; 256];
-        let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
-        if n <= 0 {
-            return None;
-        }
-        bytes.extend_from_slice(&buf[..n as usize]);
-        if has_attributes(&bytes) {
-            return Some(bytes);
-        }
+fn terminal_name_here() -> Option<String> {
+    terminal_name(
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        &std::env::var("TERM").unwrap_or_default(),
+        std::env::var_os("REX_SESSION").is_some(),
+    )
+}
+
+/// "Ghostty, kitty, WezTerm or Rex".
+fn terminal_list() -> String {
+    let names: Vec<&str> = TERMINALS.iter().map(|(name, _)| *name).collect();
+    match names.split_last() {
+        Some((last, [])) => last.to_string(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
     }
 }
 
-fn has_attributes(bytes: &[u8]) -> bool {
-    bytes.windows(3).enumerate().any(|(start, window)| window == b"\x1b[?" && bytes[start..].contains(&b'c'))
-}
-
-fn answered_graphics(bytes: &[u8]) -> bool {
-    bytes.windows(7).any(|window| window == b"\x1b_Gi=31")
-}
-
-/// Where the browser kb would start is. KB_CHROME may be a bare name, which
-/// Chrome is started through PATH like any command, so look it up there.
-fn resolve(path: &Path) -> Result<PathBuf, String> {
-    if path.components().count() > 1 {
-        return if path.is_file() { Ok(path.to_owned()) } else { Err(path.display().to_string()) };
+/// Why the terminal can't draw. A name from `TERMINALS` was passed on
+/// through something kb didn't recognise, so that terminal isn't blamed.
+fn why_no_graphics(multiplexer: Option<&str>, terminal: Option<&str>) -> String {
+    if let Some(name) = multiplexer {
+        return format!(
+            "kb is running inside {name}, which doesn't pass the kitty graphics\n\
+             protocol on to your terminal. Run kb outside {name}, in one of these:"
+        );
     }
-    std::env::var_os("PATH")
-        .and_then(|dirs| std::env::split_paths(&dirs).map(|dir| dir.join(path)).find(|path| path.is_file()))
-        .ok_or_else(|| path.display().to_string())
+    let this = terminal.filter(|name| !TERMINALS.iter().any(|(known, _)| known == name)).unwrap_or("this terminal");
+    format!(
+        "kb draws real web pages in your terminal, pixel for pixel, using the\n\
+         kitty graphics protocol, and {this} doesn't support it.\n\
+         Run kb in a terminal that does:"
+    )
 }
 
-/// The browser kb would start, or why there is none and what to do.
-pub fn browser() -> Result<PathBuf, String> {
-    match crate::engine::chrome::find_binary() {
-        Some(path) => resolve(&path).map_err(|path| format!("KB_CHROME is {path}, which isn't a program kb can find")),
-        None => {
-            Err("no Chrome, Chromium, Edge or Brave found; install one, or set KB_CHROME=/path/to/browser".to_owned())
-        }
+/// Why kb can't run here, for a terminal that answered without kitty
+/// graphics: the banner from the help, what's missing, and where kb runs.
+pub fn no_graphics() -> String {
+    let why = why_no_graphics(multiplexer_here(), terminal_name_here().as_deref());
+    let mut text = String::from("\n");
+    for line in crate::ui::ART {
+        text.push_str(&format!("  \x1b[38;5;141m{line}\x1b[0m\n"));
     }
+    text.push_str(&format!("\n{why}\n\n"));
+    for (name, url) in TERMINALS {
+        text.push_str(&format!("    {name:<9} {url}\n"));
+    }
+    text.push_str(
+        "\nkb doctor checks your setup. If you're sure the terminal can draw\n\
+         kitty graphics, KB_FORCE=1 kb starts it anyway.\n\n",
+    );
+    text
 }
 
 struct Report {
@@ -204,32 +141,30 @@ pub fn run() -> i32 {
     let mut report = Report { problems: 0 };
     println!("kb {} on {}\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
 
-    let verdict = terminal(&Env::read());
-    let known_bad = matches!(verdict, Terminal::Unsupported(_));
-    match verdict {
-        Terminal::Supported(name) => report.ok("terminal", name),
-        Terminal::Unsupported(why) => report.fail("terminal", &why),
-        Terminal::Unknown(name) => report.note("terminal", &format!("{name} isn't one kb knows; checking it directly")),
+    // The name is only to show: whether it can draw is asked of it next.
+    let name = terminal_name_here().unwrap_or_else(|| "not one kb knows by name".to_owned());
+    match multiplexer_here() {
+        Some(multiplexer) => report.note("terminal", &format!("{name}, through {multiplexer}")),
+        None => report.note("terminal", &name),
     }
-    // Asking a terminal already known not to work would only report the
-    // same problem twice.
-    if !known_bad {
-        match probe_graphics() {
-            Some(true) => report.ok("graphics", "the terminal answers kitty graphics queries"),
-            Some(false) => report.fail("graphics", &format!("the terminal doesn't draw kitty graphics; {USE_INSTEAD}")),
-            None => report.note("graphics", "couldn't ask the terminal (not a terminal, or it didn't answer)"),
+    let terminal = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
+    let draws = crate::term::draws_graphics(ASK_DOCTOR);
+    match (draws, multiplexer_here()) {
+        (Some(true), _) => report.ok("graphics", "the terminal draws kitty graphics"),
+        (Some(false), Some(name)) => {
+            report.fail("graphics", &format!("{name} doesn't pass kitty graphics on; run kb outside it"))
         }
-    }
-    if let Some(window) = crate::term::size::window() {
-        let pixels = if window.width_px > 0 {
-            format!(", {}x{} pixels", window.width_px, window.height_px)
-        } else {
-            String::new()
-        };
-        report.ok("pane", &format!("{}x{} cells{pixels}", window.cols, window.rows));
+        (Some(false), None) => {
+            report.fail("graphics", &format!("the terminal doesn't draw kitty graphics; use {}", terminal_list()))
+        }
+        (None, _) if !terminal => {
+            report.note("graphics", "not asked: this isn't a terminal; run kb doctor in the pane kb will use")
+        }
+        (None, _) => report
+            .note("graphics", &format!("the terminal didn't answer in {} s (a very slow link?)", ASK_DOCTOR.as_secs())),
     }
 
-    match browser() {
+    match crate::engine::chrome::find_binary() {
         Ok(path) => report.ok("browser", &path.display().to_string()),
         Err(why) => report.fail("browser", &why),
     }
@@ -248,22 +183,17 @@ pub fn run() -> i32 {
         Err(error) => report.fail("data", &error),
     }
 
-    let running = crate::control::running();
-    match running.len() {
-        0 => report.note("running", "no kb is open now"),
-        n => report.ok("running", &format!("{n} kb{} open (kb list)", if n == 1 { "" } else { "s" })),
-    }
     report.note("agent skill", &crate::skill::status().unwrap_or_else(|error| error));
     report.note(
         "mcp",
-        match crate::mcp::status() {
-            "on" => "on (kb mcp off turns it off)",
-            _ => "off (kb mcp on turns it on)",
-        },
+        if crate::mcp::enabled() { "on (kb mcp off turns it off)" } else { "off (kb mcp on turns it on)" },
     );
 
     println!();
-    if report.problems == 0 {
+    if report.problems == 0 && draws.is_none() {
+        println!("Nothing is missing, but the terminal couldn't be asked about graphics.");
+        0
+    } else if report.problems == 0 {
         println!("Everything kb needs is here. Try: kb example.com");
         0
     } else {
@@ -280,41 +210,31 @@ pub fn run() -> i32 {
 mod tests {
     use super::*;
 
-    fn with(program: Option<&str>, term: Option<&str>) -> Env {
-        Env { term_program: program.map(str::to_owned), term: term.map(str::to_owned), ..Env::default() }
+    #[test]
+    fn multiplexers() {
+        assert_eq!(multiplexer(true, false, "xterm-kitty"), Some("tmux"));
+        assert_eq!(multiplexer(false, false, "tmux-256color"), Some("tmux"));
+        assert_eq!(multiplexer(false, true, "xterm-ghostty"), Some("Zellij"));
+        assert_eq!(multiplexer(false, false, "screen-256color"), Some("tmux or screen"));
+        assert_eq!(multiplexer(false, false, "xterm-ghostty"), None);
     }
 
     #[test]
-    fn known_terminals() {
-        assert_eq!(terminal(&with(Some("ghostty"), None)), Terminal::Supported("Ghostty"));
-        assert_eq!(terminal(&with(None, Some("xterm-ghostty"))), Terminal::Supported("Ghostty"));
-        assert_eq!(terminal(&with(None, Some("xterm-kitty"))), Terminal::Supported("kitty"));
-        assert_eq!(terminal(&with(Some("WezTerm"), None)), Terminal::Supported("WezTerm"));
-        assert!(matches!(terminal(&with(Some("Apple_Terminal"), None)), Terminal::Unsupported(_)));
-        assert!(matches!(terminal(&with(Some("iTerm.app"), None)), Terminal::Unsupported(_)));
-        assert!(matches!(terminal(&with(Some("vscode"), None)), Terminal::Unknown(_)));
+    fn terminal_names() {
+        assert_eq!(terminal_name(Some("Apple_Terminal"), "xterm-256color", false).as_deref(), Some("Terminal"));
+        assert_eq!(terminal_name(Some("ghostty"), "xterm-ghostty", false).as_deref(), Some("Ghostty"));
+        assert_eq!(terminal_name(None, "xterm-ghostty", true).as_deref(), Some("Ghostty"));
+        assert_eq!(terminal_name(None, "xterm-256color", true).as_deref(), Some("Rex"));
+        assert_eq!(terminal_name(None, "xterm-256color", false), None);
     }
 
     #[test]
-    fn multiplexers_win() {
-        let tmux = Env { tmux: true, kitty: true, ..Env::default() };
-        assert!(matches!(terminal(&tmux), Terminal::Unsupported(why) if why.contains("tmux")));
-        assert!(matches!(terminal(&with(Some("ghostty"), Some("screen-256color"))), Terminal::Unsupported(_)));
-    }
-
-    #[test]
-    fn browser_paths() {
-        assert!(resolve(Path::new("sh")).is_ok_and(|path| path.is_absolute()));
-        assert!(resolve(Path::new("/bin/sh")).is_ok());
-        assert!(resolve(Path::new("/no/such/browser")).is_err());
-        assert!(resolve(Path::new("no-such-browser-kb")).is_err());
-    }
-
-    #[test]
-    fn replies() {
-        assert!(answered_graphics(b"\x1b_Gi=31;OK\x1b\\\x1b[?62;22c"));
-        assert!(!answered_graphics(b"\x1b[?62;22c"));
-        assert!(has_attributes(b"\x1b[?1;2c"));
-        assert!(!has_attributes(b"\x1b_Gi=31;OK\x1b\\"));
+    fn says_why_without_blaming_a_terminal_that_works() {
+        assert!(why_no_graphics(None, Some("Terminal")).contains("and Terminal doesn't support it"));
+        assert!(why_no_graphics(None, None).contains("and this terminal doesn't"));
+        // Ghostty's name, passed on through something kb didn't recognise.
+        assert!(why_no_graphics(None, Some("Ghostty")).contains("and this terminal doesn't"));
+        assert!(why_no_graphics(Some("Zellij"), Some("Ghostty")).contains("inside Zellij,"));
+        assert_eq!(terminal_list(), "Ghostty, kitty, WezTerm or Rex");
     }
 }

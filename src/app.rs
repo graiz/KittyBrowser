@@ -263,13 +263,9 @@ struct App {
 }
 
 pub fn run(options: Options) -> Result<(), String> {
-    // Both are checked before the terminal is touched, so the reason is
-    // printed plainly instead of behind a blank pane.
-    crate::doctor::refuse_unsupported_terminal()?;
-    crate::doctor::browser().map_err(|why| format!("{why}\nkb doctor checks your setup."))?;
-    if term::draws_graphics() == Some(false) {
-        return Err(no_graphics());
-    }
+    // Checked before the terminal is taken over, so the reason is printed
+    // plainly instead of behind a blank pane.
+    crate::engine::chrome::find_binary().map_err(|why| format!("{why}\nkb doctor checks your setup."))?;
     // Before anything is written to the terminal: a failure after that
     // leaves the terminal's replies to our queries for the shell to read.
     let claim = control::claim()?;
@@ -282,6 +278,15 @@ pub fn run(options: Options) -> Result<(), String> {
     std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
     let window = size::window().ok_or("can't read the terminal size")?;
 
+    // Asked last, just before raw mode, with nothing left that can fail:
+    // when the terminal answers too late for the question, kb's input
+    // reader takes the replies instead of the shell.
+    if std::env::var_os("KB_FORCE").is_none() && term::draws_graphics(crate::doctor::ASK_KB) == Some(false) {
+        let _ = std::fs::remove_file(&claim.socket);
+        eprint!("{}", crate::doctor::no_graphics());
+        // Explained already; main has nothing to add.
+        return Err(String::new());
+    }
     term::enter().map_err(|e| e.to_string())?;
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -293,32 +298,6 @@ pub fn run(options: Options) -> Result<(), String> {
     let _ = std::fs::remove_file(socket);
     term::leave();
     result
-}
-
-/// Why kb can't run here, for a terminal that answered without kitty graphics.
-fn no_graphics() -> String {
-    let multiplexer = match (std::env::var_os("TMUX"), std::env::var("TERM").unwrap_or_default()) {
-        (Some(_), _) => Some("tmux"),
-        (None, term) if term.starts_with("screen") => Some("screen"),
-        _ => None,
-    };
-    if let Some(name) = multiplexer {
-        return format!(
-            "{name} doesn't pass on the kitty graphics protocol, which kb needs to draw pages.\n\
-             Run kb outside {name}, in Ghostty, kitty, WezTerm or Rex."
-        );
-    }
-    let this = match std::env::var("TERM_PROGRAM").as_deref() {
-        Ok("Apple_Terminal") => "Terminal".to_owned(),
-        Ok("iTerm.app") => "iTerm2".to_owned(),
-        Ok("vscode") => "VS Code's terminal".to_owned(),
-        Ok(name) if !name.is_empty() => name.to_owned(),
-        _ => "This terminal".to_owned(),
-    };
-    format!(
-        "{this} doesn't support the kitty graphics protocol, which kb needs to draw pages.\n\
-         Run kb in Ghostty, kitty, WezTerm or Rex."
-    )
 }
 
 fn browse(options: Options, profile: &std::path::Path, window: Window, claim: control::Claim) -> Result<(), String> {
@@ -856,6 +835,7 @@ impl App {
                 },
             ),
             ("agents", format!("kb ctl -i {} ...   (kb ctl --help)", self.instance)),
+            ("trouble", "kb doctor checks the terminal and Chrome".to_owned()),
         ] {
             info.push(format!("\t{name:<10}{value}"));
         }

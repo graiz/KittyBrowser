@@ -45,7 +45,8 @@ it open, as the user may want to keep looking.
 
 In any other terminal, ask the user to start `kb URL` in a pane of a terminal
 with the kitty graphics protocol (Ghostty, kitty, WezTerm), then find its
-number with `kb list`.
+number with `kb list`. If kb won't start there, or its pane stays blank,
+`kb doctor` run in that pane says why.
 
 ## Selectors
 

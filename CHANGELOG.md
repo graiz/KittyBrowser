@@ -12,12 +12,14 @@ Notable changes to kb. The format follows
 - A ✕ at the right of the bar quits, after asking "Quit KittyBrowser?"
   (Yes or Enter, No or Esc).
 - `kb doctor` checks the terminal (asking it directly whether it draws kitty
-  graphics), tmux and screen, Chrome, the data folder, the agent skill and
-  the MCP server, and says what to fix.
-- kb stops with a plain reason in Terminal.app, iTerm2, tmux and screen, or
-  when there's no Chrome, instead of a blank pane (`KB_FORCE=1` overrides).
+  graphics), tmux, screen and Zellij, Chrome, the data folder, the agent
+  skill and the MCP server, and says what to fix.
+- kb asks the terminal when it starts, and in one without the kitty
+  graphics protocol (Terminal, iTerm2, tmux, screen, Zellij), or with no
+  Chrome, says why and where kb runs instead of showing a blank pane
+  (`KB_FORCE=1` skips the terminal's question).
 - Prebuilt kb for macOS and Linux (Intel and ARM) on each release, and
-  `install.sh`, so installing doesn't need Rust.
+  `install.sh`, so installing doesn't need Rust once a release is out.
 - Copy: Cmd+C or Ctrl+C copies the selection, or the address while editing
   it, to the system clipboard through the terminal; what pages copy
   themselves (copy buttons) goes there too.
@@ -31,8 +33,6 @@ Notable changes to kb. The format follows
   for its selector, size and styles; the selector is copied.
 - Chrome DevTools on F12, with `kb --devtools`.
 - Function keys reach the page, and `kb ctl press F5` works.
-- In a terminal without the kitty graphics protocol (Terminal, iTerm2,
-  tmux), kb says so and exits, instead of drawing nothing.
 - Much faster over ssh: when the terminal can't read kb's files, only what
   moved or changed is sent. A scroll step went from 1.1 MB to about 5 KB and
   155 to 109 ms, a keystroke from 1.1 MB to a few KB and 110 to 72 ms.

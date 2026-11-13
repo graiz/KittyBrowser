@@ -22,6 +22,19 @@ frames arrived, only the newest is drawn, and a burst of mouse moves collapses
 to the last one. Writing a frame to the terminal blocks until the terminal has
 taken it, which is what keeps a slow terminal from falling behind.
 
+## Startup
+
+Before Chrome starts, kb asks the terminal whether it draws kitty graphics
+(`term::draws_graphics`): a query about a one-pixel image, then a request
+for its attributes (DA1). Every terminal answers DA1, and answers in order,
+so a DA1 reply with no graphics reply before it means no. kb then prints
+why (naming tmux, screen or Zellij when it is inside one) and exits instead
+of showing a blank pane. It waits 1.5 s at most (`kb doctor` waits 5). With
+no answer by then, as over a slow link, kb goes ahead as if the answer were
+yes. It asks last, just before entering raw mode, so replies that come
+later are read and ignored by the input thread instead of being left for
+the shell when a later step fails. `KB_FORCE=1` skips the question.
+
 ## Engine (`src/engine/`)
 
 `cdp.rs` is the transport: Chrome is started with `--remote-debugging-pipe`

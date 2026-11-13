@@ -118,7 +118,10 @@ fn main() {
         options.url = Some(address.join(" "));
     }
     if let Err(err) = app::run(options) {
-        eprintln!("kb: {err}");
+        // An empty error has been explained already, at more length.
+        if !err.is_empty() {
+            eprintln!("kb: {err}");
+        }
         std::process::exit(1);
     }
 }
