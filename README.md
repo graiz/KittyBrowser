@@ -235,6 +235,11 @@ it's worth knowing before you turn on the MCP server. See
 
 ## Troubleshooting
 
+- **Over ssh:** kb works, drawing through the terminal and sending only
+  what moved or changed: a scroll step is a few KB. OpenSSH 10 and later
+  hold back what you type for up to 20 ms to hide your typing rhythm; for a
+  host you trust, `ObscureKeystrokeTiming no` in its `~/.ssh/config` block
+  makes typing into kb quicker.
 - **"can't find Chrome":** install Chrome or Chromium, or set `KB_CHROME`.
 - **Nothing is drawn, or escape codes appear:** the terminal doesn't support
   the kitty graphics protocol, or you're inside tmux or screen.

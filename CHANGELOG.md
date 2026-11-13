@@ -19,6 +19,15 @@ Notable changes to kb. The format follows
   for its selector, size and styles; the selector is copied.
 - Chrome DevTools on F12, with `kb --devtools`.
 - Function keys reach the page, and `kb ctl press F5` works.
+- Much faster over ssh: when the terminal can't read kb's files, only what
+  moved or changed is sent. A scroll step went from 1.1 MB to about 5 KB and
+  155 to 109 ms, a keystroke from 1.1 MB to a few KB and 110 to 72 ms.
+- Pages no longer come out cropped and stretched on a Mac whose display is
+  asleep, where Chrome cut frames to its headless window.
+- Frames are decoded faster (base64), which helps locally too.
+- `kb bench` has a typing scene (`--scene type`), `--modes`, the bytes sent
+  to the terminal, and `KB_BENCH_DUMP` and `KB_BENCH_HOLD` for looking at
+  frames.
 - `kb list`, `kb ctl` and the other subcommands exit quietly when their
   output is cut short (`kb list | head`), rather than panicking.
 
