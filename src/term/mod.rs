@@ -3,6 +3,7 @@
 pub mod graphics;
 pub mod input;
 pub mod layers;
+pub mod page;
 pub mod size;
 
 use std::io::{self, Write};

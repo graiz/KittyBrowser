@@ -205,14 +205,8 @@ struct App {
     frame: Option<String>,
     /// Whether the terminal reads frames from temporary files.
     by_file: bool,
-    /// The last frame written whole to a file.
-    last_file: Option<std::path::PathBuf>,
-    /// The page as tiles, when it is drawn that way.
-    tiles: graphics::Tiles,
-    /// The page through the pty, moved as it scrolls and only what changed
-    /// sent, when it is drawn that way (the terminal can't read files, as
-    /// over ssh).
-    layers: crate::term::layers::Layers,
+    /// The page's image on the screen.
+    page: crate::term::page::PageImage,
     /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
     /// so the page reflows as in a desktop browser and stays sharp.
     zoom: f64,
@@ -371,9 +365,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         loading: false,
         frame: None,
         by_file: false,
-        last_file: None,
-        tiles: graphics::Tiles::default(),
-        layers: Default::default(),
+        page: Default::default(),
         zoom: 1.0,
         fit_request: None,
         help: false,
@@ -499,7 +491,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 }
                 Msg::Term(Event::Graphics { id, ok }) => {
                     log(format_args!("graphics reply for image {id}: {ok}"));
-                    if !ok && app.layers.lost(id) {
+                    if !ok && app.page.lost(id) {
                         // The terminal dropped an image the page was drawn
                         // with: start again from the whole page.
                         term::write(graphics::DELETE);
@@ -657,9 +649,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         }
     };
     app.history.save();
-    if let Some(path) = app.last_file.take() {
-        let _ = std::fs::remove_file(path);
-    }
+    app.page.close();
     app.chrome.close();
     result
 }
@@ -694,8 +684,7 @@ impl App {
     fn clear(&mut self) {
         term::write(b"\x1b[2J");
         term::write(graphics::DELETE);
-        self.tiles.forget();
-        self.layers.forget();
+        self.page.forget();
         self.help_rect = None;
     }
 
@@ -955,68 +944,9 @@ impl App {
         }
         if let Some(png) = self.frame.as_deref().filter(|_| frame) {
             let (cols, rows) = self.shown;
-            let pixels = match self.by_file {
-                true => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes, Vec::new())),
-                false => None,
-            };
-            // Only what changed, when the frame lines up with the cells;
-            // otherwise (a fixed viewport, or a terminal that won't read
-            // files) one image scaled to fit.
-            let mut drawn = false;
-            let pixels = match pixels {
-                Some(pixels)
-                    if self.fixed.is_none() && graphics::fits((pixels.width, pixels.height), cols, rows, cell) =>
-                {
-                    if !self.tiles.active() {
-                        out.extend_from_slice(graphics::DELETE);
-                    }
-                    match self.tiles.draw(&mut out, pixels, cols, rows, cell, 2) {
-                        Some(sent) => {
-                            log(format_args!("drew {sent:?}"));
-                            drawn = true;
-                        }
-                        None => out.extend_from_slice(graphics::DELETE),
-                    }
-                    None
-                }
-                other => other,
-            };
-            // Through the pty, only what changed, when the frame lines up.
-            if pixels.is_none() && !self.by_file && self.fixed.is_none() {
-                match self.layers.draw(&mut out, png, cols, rows, cell, 2) {
-                    Some(sent) => {
-                        log(format_args!("drew {sent:?}"));
-                        drawn = true;
-                    }
-                    None if self.layers.active() => {
-                        out.extend_from_slice(graphics::DELETE);
-                        self.layers.forget();
-                    }
-                    None => {}
-                }
-            } else if self.layers.active() {
-                out.extend_from_slice(graphics::DELETE);
-                self.layers.forget();
-            }
-            if !drawn {
-                if self.tiles.active() {
-                    out.extend_from_slice(graphics::DELETE);
-                    self.tiles.forget();
-                }
-                out.extend_from_slice(b"\x1b[2;1H");
-                let path = graphics::next_path();
-                match pixels.filter(|pixels| std::fs::write(&path, &pixels.data).is_ok()) {
-                    Some(pixels) => {
-                        graphics::put_file(&mut out, &path, &pixels, cols, rows);
-                        // The terminal deletes each file once read; this
-                        // covers one it didn't get to.
-                        if let Some(old) = self.last_file.replace(path) {
-                            let _ = std::fs::remove_file(old);
-                        }
-                    }
-                    None => graphics::put_png(&mut out, png, cols, rows),
-                }
-            }
+            let scaled = self.fixed.is_some();
+            let drawn = self.page.draw(&mut out, png, self.by_file, scaled, cols, rows, cell, 2);
+            log(format_args!("drew {drawn}"));
         }
         let cols = self.window.cols as usize;
         let mut badge = String::new();
