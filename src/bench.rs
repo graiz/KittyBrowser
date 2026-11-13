@@ -42,6 +42,9 @@ enum Transfer {
     /// Decoded here, and only what changed left in files: what kb
     /// itself does when the terminal reads files.
     Tiles,
+    /// Decoded here, and only the rectangles that changed sent through
+    /// the pty, or Chrome's PNG when nearly all of the page did.
+    Delta,
 }
 
 struct Mode {
@@ -52,6 +55,7 @@ struct Mode {
 
 const MODES: &[Mode] = &[
     Mode { name: "png through the pty", source: Source::Png, transfer: Transfer::Pty },
+    Mode { name: "png, changed rects (ptyA)", source: Source::Png, transfer: Transfer::Delta },
     Mode { name: "png, pixels by file", source: Source::Png, transfer: Transfer::File },
     Mode { name: "png, changed tiles by file", source: Source::Png, transfer: Transfer::Tiles },
     Mode { name: "jpeg 100, pixels by file", source: Source::Jpeg(100), transfer: Transfer::File },
@@ -252,8 +256,10 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
 
         term::write(graphics::DELETE);
         let mut tiles = graphics::Tiles::default();
+        let mut delta = term::delta::Delta::default();
         let mut samples = Vec::new();
         let mut missed = 0;
+        let mut odd = Vec::new();
         for step in 0..steps {
             let start = Instant::now();
             match scene {
@@ -281,6 +287,15 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
             let mut out = b"\x1b[2;1H".to_vec();
             match mode.transfer {
                 Transfer::Pty => graphics::put_png(&mut out, &data, cols, rows),
+                Transfer::Delta => {
+                    if delta.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2).is_none() {
+                        // A frame that doesn't line up with the cells goes whole.
+                        delta.forget();
+                        out.extend_from_slice(graphics::DELETE);
+                        graphics::put_png(&mut out, &data, cols, rows);
+                        odd.push(graphics::png_size(&data));
+                    }
+                }
                 Transfer::Tiles => {
                     let bytes = crate::base64::decode(&data).ok_or("Chrome sent a damaged frame")?;
                     let pixels = graphics::decode_png(&bytes).ok_or("couldn't decode a frame")?;
@@ -305,6 +320,8 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
             out.extend_from_slice(b"\x1b[5n");
             let ready = Instant::now();
             term::write(&out);
+            // While the terminal reads it, finish decoding a page sent whole.
+            delta.finish();
             bench.answered(Duration::from_secs(10))?;
             let done = Instant::now();
 
@@ -335,6 +352,9 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
             mode.name,
             1000.0 / total
         ));
+        if !odd.is_empty() {
+            report.push_str(&format!("   ({} frames didn't fit the cells: {:?})", odd.len(), &odd[..odd.len().min(3)]));
+        }
         if missed > 0 {
             report.push_str(&format!("   ({missed} steps gave no frame)"));
         }

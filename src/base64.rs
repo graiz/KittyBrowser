@@ -1,39 +1,59 @@
 //! Base64, for the frames Chrome sends and the file names the terminal is given.
 
+const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// The value of each byte as a base64 digit, or `INVALID`, which has the
+/// top bit set where no digit does.
+const INVALID: u8 = 0xff;
+const VALUES: [u8; 256] = {
+    let mut values = [INVALID; 256];
+    let mut i = 0;
+    while i < 64 {
+        values[ALPHABET[i] as usize] = i as u8;
+        i += 1;
+    }
+    values
+};
+
 /// Decode standard base64. Padding is optional; anything else that isn't in
 /// the alphabet is an error.
 pub fn decode(text: &str) -> Option<Vec<u8>> {
     let text = text.trim_end_matches('=').as_bytes();
-    let mut out = Vec::with_capacity(text.len() * 3 / 4);
-    for quad in text.chunks(4) {
-        let mut bits = 0u32;
-        for c in quad {
-            let value = match c {
-                b'A'..=b'Z' => c - b'A',
-                b'a'..=b'z' => c - b'a' + 26,
-                b'0'..=b'9' => c - b'0' + 52,
-                b'+' => 62,
-                b'/' => 63,
-                _ => return None,
-            };
-            bits = bits << 6 | value as u32;
+    let mut out = Vec::with_capacity(text.len() * 3 / 4 + 3);
+    // A frame is a megabyte of this, so whole groups go through the table
+    // with one check for a bad digit each.
+    let whole = text.len() / 4 * 4;
+    for quad in text[..whole].chunks_exact(4) {
+        let [a, b, c, d] = [quad[0], quad[1], quad[2], quad[3]].map(|c| VALUES[c as usize]);
+        if (a | b | c | d) & 0x80 != 0 {
+            return None;
         }
-        // 2, 3 or 4 characters carry 1, 2 or 3 bytes.
-        let bytes = match quad.len() {
-            4 => 3,
-            3 => 2,
-            2 => 1,
-            _ => return None,
-        };
-        bits <<= 6 * (4 - quad.len());
-        out.extend_from_slice(&bits.to_be_bytes()[1..1 + bytes]);
+        let bits = (a as u32) << 18 | (b as u32) << 12 | (c as u32) << 6 | d as u32;
+        out.extend_from_slice(&bits.to_be_bytes()[1..]);
     }
+    // 2 or 3 characters at the end carry 1 or 2 bytes.
+    let rest = &text[whole..];
+    let bytes = match rest.len() {
+        0 => return Some(out),
+        3 => 2,
+        2 => 1,
+        _ => return None,
+    };
+    let mut bits = 0u32;
+    for &c in rest {
+        let value = VALUES[c as usize];
+        if value == INVALID {
+            return None;
+        }
+        bits = bits << 6 | value as u32;
+    }
+    bits <<= 6 * (4 - rest.len());
+    out.extend_from_slice(&bits.to_be_bytes()[1..1 + bytes]);
     Some(out)
 }
 
 /// Encode as standard base64, padded.
 pub fn encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for triple in bytes.chunks(3) {
         let mut bits = 0u32;
