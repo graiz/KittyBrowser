@@ -827,7 +827,7 @@ impl App {
             (Action::Inspect, "inspect an element"),
             (Action::Devtools, "Chrome DevTools (start kb with --devtools)"),
             (Action::Help, "this help"),
-            (Action::Quit, "quit"),
+            (Action::Quit, "quit (the ✕ in the bar asks first)"),
         ] {
             let keys = keys(action);
             if !keys.is_empty() {

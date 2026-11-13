@@ -50,9 +50,11 @@ Ctrl+/ shows the keys, Ctrl+Q quits (or the ✕ at the right of the bar, which a
 
 ## Requirements
 
-- **A terminal with the kitty graphics protocol:** Ghostty, kitty, WezTerm
-  or Rex. Terminal.app and iTerm2 don't support it, and kb doesn't work
-  inside tmux or screen.
+- **A terminal with the kitty graphics protocol:**
+  [Ghostty](https://ghostty.org), [kitty](https://sw.kovidgoyal.net/kitty),
+  [WezTerm](https://wezterm.org) or [Rex](https://www.superlogical.com).
+  Terminal.app and iTerm2 don't support it, and kb doesn't work inside tmux or
+  screen.
 - **Chrome, Chromium, Edge or Brave**, installed where kb can find it, or
   named with `KB_CHROME`.
 - **Rust** (stable, from [rustup](https://rustup.rs)) to build it.

@@ -43,8 +43,16 @@ Things it takes care of itself:
   So the scale is fixed per run. Resizing the viewport later needs no restart.
 - **New windows.** There are no tabs. A page opened by a link or script is
   loaded in the one page instead and its own target closed.
-- **User agent.** "HeadlessChrome" is replaced with "Chrome"; some sites
-  refuse the former.
+- **Looking like a browser.** Sites such as Google answer what looks like a
+  robot with captchas, and headless Chrome looks like one in four ways, each
+  put right: `navigator.webdriver` is true (Chrome starts with
+  `--disable-blink-features=AutomationControlled`); the user agent says
+  "HeadlessChrome" (replaced with "Chrome"); replacing it empties the client
+  hints, `Sec-CH-UA` and `navigator.userAgentData` (so kb gives them: the
+  browser it runs, its version, the system's); and the screen is 400x300 and
+  the window 500x256, smaller than the page (the screen is given as a
+  laptop's, or the page's if larger, and the window is kept a browser's frame
+  bigger than the page, below).
 - **Exit.** `Browser.close` first, so cookies reach the profile, then a kill
   if Chrome hasn't gone within two seconds.
 
@@ -155,7 +163,9 @@ ms to show, but soft text for a third of a second), JPEG from Chrome,
 `captureScreenshot`, and `--disable-frame-rate-limit` (halves Chrome's time,
 but animated pages then take three cores).
 
-**Headless window.** On a Mac whose display is asleep, Chrome makes
+**Headless window.** Pages see the headless window as their outer window,
+so it is kept the viewport plus a browser's frame: 143 CSS pixels of
+height, as measured on a Mac. On a Mac whose display is asleep, Chrome makes
 screencast frames the size of its headless window less a margin, whatever
 viewport `Emulation.setDeviceMetricsOverride` sets: a 500x256 window gave
 frames of 500x113 CSS pixels, 143 short. kb compares each frame's size in
@@ -166,7 +176,8 @@ window is set to the viewport plus the margin (`Browser.setWindowBounds`).
 Every resize sets it so again. The size is absolute, so a late frame
 can't make it drift, and a wrong margin (Chrome's very first frame can be
 off by a few pixels) is put right by the next frame (`Window` in
-`engine/chrome.rs`). Where frames match, nothing is ever sent. macOS keeps
+`engine/chrome.rs`). Where frames follow the viewport, the margin stays as
+it started. macOS keeps
 windows at least 500 wide, so there a narrower viewport comes in frames
 500 wide.
 
