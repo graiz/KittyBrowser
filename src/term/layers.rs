@@ -283,59 +283,66 @@ impl Layers {
         strips: &[Rect],
         page: Page,
     ) -> Result<(), Why> {
-        // Each placement becomes its part in each region, if any shows and
-        // no strip covers it; the first part keeps the placement's id.
-        let mut moved: Vec<(Placement, Vec<Placement>)> = Vec::with_capacity(self.placements.len());
-        // Compressing is most of the work, so big strips are cut into
-        // pieces compressed side by side.
         let mut reused = Vec::new();
         let mut send = Vec::new();
         for strip in strips {
             self.reuse(new, *strip, &mut reused, &mut send);
         }
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_THREADS);
-        let pieces = split(&send, threads);
-        let mut count = pieces.len() + reused.len();
-        for placement in &self.placements {
-            let parts: Vec<Placement> = regions
-                .iter()
-                .filter_map(|region| placement.moved(region, page.height))
-                .filter(|part| !strips.iter().any(|strip| strip.contains(&part.on_page())))
-                .collect();
-            count += parts.len();
-            moved.push((*placement, parts));
-        }
         if area(&send) * 2 >= new.width as u64 * new.height as u64 {
             return Err(Why::Changed);
         }
-        if count > MAX_PLACEMENTS {
+        // Compressing is most of the work, so big strips are cut into
+        // pieces compressed side by side.
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_THREADS);
+        let pieces = split(&send, threads);
+
+        // Where everything goes, bottom to top: each placement's part in
+        // each region, if any shows and no strip covers it (the first part
+        // keeps the placement's id), then the held images placed again,
+        // then the pieces sent.
+        let mut next = Vec::with_capacity(self.placements.len() + reused.len() + pieces.len());
+        for placement in std::mem::take(&mut self.placements) {
+            let parts = regions
+                .iter()
+                .filter_map(|region| placement.moved(region, page.height))
+                .filter(|part| !strips.iter().any(|strip| strip.contains(&part.on_page())));
+            for (n, part) in parts.enumerate() {
+                next.push(if n == 0 { part } else { Placement { id: self.next_id(), ..part } });
+            }
+            self.placements.push(placement);
+        }
+        for &(image, from, x, y) in &reused {
+            self.next_z += 1;
+            next.push(Placement { image, id: self.next_id(), z: self.next_z, from, x, y });
+        }
+        let first_sent = next.len();
+        for piece in &pieces {
+            let mut placement = self.new_placement(*piece);
+            (placement.x, placement.y) = (piece.x, piece.y);
+            next.push(placement);
+        }
+        let shows = visible(&next, new.width, page);
+        if shows.iter().filter(|&&shows| shows).count() > MAX_PLACEMENTS {
             return Err(Why::Placements);
         }
 
-        let mut placements = Vec::with_capacity(count);
-        for (placement, parts) in &moved {
-            for (n, part) in parts.iter().enumerate() {
-                let part = if n == 0 { *part } else { Placement { id: self.next_id(), ..*part } };
-                if part != *placement {
-                    page.place(out, &part);
-                }
-                placements.push(part);
-            }
-        }
         // A placement that went is deleted, but not its image, which
         // `tidy` keeps or deletes.
-        for (placement, parts) in &moved {
-            if parts.is_empty() {
+        let before: HashMap<(u32, u32), Placement> =
+            self.placements.iter().map(|placement| ((placement.image, placement.id), *placement)).collect();
+        let after: std::collections::HashSet<(u32, u32)> =
+            next.iter().zip(&shows).filter(|(_, &shows)| shows).map(|(p, _)| (p.image, p.id)).collect();
+        for placement in &self.placements {
+            if !after.contains(&(placement.image, placement.id)) {
                 out.extend_from_slice(
                     format!("\x1b_Ga=d,d=i,i={},p={},q=2\x1b\\", placement.image, placement.id).as_bytes(),
                 );
             }
         }
-        for (image, from, x, y) in reused {
-            self.next_z += 1;
-            let placement = Placement { image, id: self.next_id(), z: self.next_z, from, x, y };
-            page.place(out, &placement);
-            placements.push(placement);
+        for (placement, _) in next[..first_sent].iter().zip(&shows).filter(|(_, &shows)| shows) {
+            if before.get(&(placement.image, placement.id)) != Some(placement) {
+                page.place(out, placement);
+            }
         }
 
         let cuts: Vec<Pixels> = pieces.iter().map(|piece| cut(new, *piece)).collect();
@@ -343,26 +350,23 @@ impl Layers {
             let work: Vec<_> = cuts.iter().map(|cut| scope.spawn(move || compress(&cut.data))).collect();
             work.into_iter().map(|done| done.join().unwrap_or_default()).collect()
         });
-        for ((strip, data), pixels) in pieces.iter().zip(compressed).zip(cuts) {
-            let mut placement = self.new_placement(*strip);
-            (placement.x, placement.y) = (strip.x, strip.y);
-            page.cursor(out, &placement);
+        for ((placement, data), pixels) in next[first_sent..].iter().zip(compressed).zip(cuts) {
+            page.cursor(out, placement);
             let keys = format!(
                 "a=T,f={},s={},v={},o=z,i={},p={},X={},Y={},z={},C=1,q=2",
                 if new.alpha { 32 } else { 24 },
-                strip.width,
-                strip.height,
+                pixels.width,
+                pixels.height,
                 placement.image,
                 placement.id,
-                strip.x % page.cell.0,
-                strip.y % page.cell.1,
+                placement.x % page.cell.0,
+                placement.y % page.cell.1,
                 placement.z
             );
             transmit(out, &keys, &crate::base64::encode(&data));
-            placements.push(placement);
-            self.held.push(Held { id: placement.image, x: strip.x, pixels, used: self.clock, rows: Vec::new() });
+            self.held.push(Held { id: placement.image, x: placement.x, pixels, used: self.clock, rows: Vec::new() });
         }
-        self.placements = placements;
+        self.placements = next.into_iter().zip(shows).filter(|(_, shows)| *shows).map(|(p, _)| p).collect();
         self.tidy(out, new.width as u64 * new.height as u64);
         Ok(())
     }
@@ -492,6 +496,42 @@ impl Layers {
         self.next_placement = self.next_placement % 1_000_000 + 1;
         self.next_placement
     }
+}
+
+/// Which of `placements`, bottom to top on a page `width` pixels wide,
+/// can be seen: those with a cell that the placements above them don't
+/// cover. A cell counts as covered only by one placement that covers all
+/// of it, which errs towards keeping a placement.
+fn visible(placements: &[Placement], width: u32, page: Page) -> Vec<bool> {
+    let (cols, rows) = (width.div_ceil(page.cell.0) as usize, page.height.div_ceil(page.cell.1) as usize);
+    let mut covered = vec![false; cols * rows];
+    let mut order: Vec<usize> = (0..placements.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse((placements[i].z, i)));
+    let mut shows = vec![false; placements.len()];
+    for i in order {
+        let rect = placements[i].on_page();
+        let touched = (
+            rect.x / page.cell.0,
+            rect.y / page.cell.1,
+            (rect.x + rect.width).div_ceil(page.cell.0),
+            (rect.y + rect.height).div_ceil(page.cell.1),
+        );
+        let inside = (
+            rect.x.div_ceil(page.cell.0),
+            rect.y.div_ceil(page.cell.1),
+            (rect.x + rect.width) / page.cell.0,
+            (rect.y + rect.height) / page.cell.1,
+        );
+        let cells = |(left, top, right, bottom): (u32, u32, u32, u32)| {
+            (top as usize..bottom as usize)
+                .flat_map(move |row| (left as usize..right as usize).map(move |col| row * cols + col))
+        };
+        shows[i] = cells(touched).any(|at| !covered[at]);
+        for at in cells(inside) {
+            covered[at] = true;
+        }
+    }
+    shows
 }
 
 /// Where the page is on the screen.
