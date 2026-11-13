@@ -61,8 +61,9 @@ pub struct Pixels {
 }
 
 pub fn decode_png(bytes: &[u8]) -> Option<Pixels> {
-    let mut reader = png::Decoder::new(bytes).read_info().ok()?;
-    let mut data = vec![0; reader.output_buffer_size()];
+    // png 0.18 reads from anything that can seek, so a slice goes in a cursor.
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
+    let mut data = vec![0; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut data).ok()?;
     data.truncate(info.buffer_size());
     let alpha = match (info.color_type, info.bit_depth) {
@@ -74,7 +75,7 @@ pub fn decode_png(bytes: &[u8]) -> Option<Pixels> {
 }
 
 pub fn decode_jpeg(bytes: &[u8]) -> Option<Pixels> {
-    let mut decoder = zune_jpeg::JpegDecoder::new(bytes);
+    let mut decoder = zune_jpeg::JpegDecoder::new(zune_jpeg::zune_core::bytestream::ZCursor::new(bytes));
     let data = decoder.decode().ok()?;
     let (width, height) = decoder.dimensions()?;
     (data.len() == width * height * 3).then_some(Pixels {
@@ -303,6 +304,18 @@ pub fn png_size(png_base64: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_png_and_jpeg() {
+        let png = decode_png(include_bytes!("../../assets/logo.png")).expect("the logo decodes");
+        assert_eq!((png.width, png.height), (570, 435));
+        assert_eq!(png.data.len(), 570 * 435 * if png.alpha { 4 } else { 3 });
+        if let Ok(path) = std::env::var("KB_TEST_JPEG") {
+            let jpeg = decode_jpeg(&std::fs::read(path).unwrap()).expect("the jpeg decodes");
+            assert_eq!(jpeg.data.len() as u32, jpeg.width * jpeg.height * 3);
+            println!("jpeg {}x{}", jpeg.width, jpeg.height);
+        }
+    }
 
     #[test]
     fn reads_png_size() {
