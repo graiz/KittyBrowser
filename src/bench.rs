@@ -269,6 +269,14 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
                 continue;
             };
             let got = Instant::now();
+            // KB_BENCH_DUMP=DIR keeps each mode's last frame, to see what Chrome sent.
+            if let Some(dir) = std::env::var_os("KB_BENCH_DUMP") {
+                let name = format!("{}-{step}.png", mode.name.replace(' ', "-"));
+                let _ = std::fs::write(
+                    std::path::Path::new(&dir).join(name),
+                    crate::base64::decode(&data).unwrap_or_default(),
+                );
+            }
 
             let mut out = b"\x1b[2;1H".to_vec();
             match mode.transfer {
