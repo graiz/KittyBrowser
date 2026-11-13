@@ -8,18 +8,21 @@
 //! of an image at any pixel, so to scroll, the placements are moved up or
 //! down and cut to what is still on the page; then what the move didn't
 //! account for, the newly exposed rows and whatever didn't move with the
-//! page (a sticky header), goes as small PNGs on top.
+//! page (a sticky header), goes on top as raw pixels, zlib-compressed. When
+//! the page doesn't move (a typed letter) only that goes.
 //!
 //! Part of a page can scroll while the rest stays put (a fixed sidebar, a
 //! scrolling box), so the frame is cut into columns a cell wide, each finds
 //! how far it moved, and neighbours that moved alike are moved together.
 //!
-//! Placements that leave the page or are covered are deleted, and images
-//! with none left, so the terminal holds about a screenful of pixels. When
-//! too much changed for strips to pay, or placements pile up, the whole
-//! frame is sent again as it came. The screen always ends exactly at
-//! Chrome's frame: strips are cut from the frame itself, wherever it differs
-//! from what the screen shows.
+//! Images that scroll off are kept for a while, with their pixels here:
+//! scrolled back, the page shows them again, and rows found in one are
+//! placed from it instead of sent. Placements that leave the page or are
+//! hidden are deleted, and images that haven't shown for longest beyond a
+//! couple of pages' worth. When too much is new for strips to pay, or
+//! placements pile up, the whole frame goes again as Chrome sent it. The
+//! screen always ends exactly at Chrome's frame: whatever isn't known to be
+//! on screen already, pixel for pixel, is sent.
 
 use super::graphics::{crop, Pixels};
 use std::collections::HashMap;
@@ -1188,64 +1191,6 @@ mod tests {
                 // Back up over rows seen before: placed again, not sent.
                 assert!(!String::from_utf8_lossy(&out).contains("a=T"), "sent rows the terminal had: {sent:?}");
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod profile {
-    use super::*;
-
-    /// KB_FRAME=a frame cargo test --release profile -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn draw_a_scroll() {
-        let png = std::fs::read(std::env::var("KB_FRAME").unwrap()).unwrap();
-        let first = decode(&png, Vec::new()).unwrap();
-        let bytes = if first.alpha { 4 } else { 3 };
-        let stride = first.width as usize * bytes;
-        // The middle column scrolls up 480 rows; what comes in is the top.
-        let mut second = Pixels { data: first.data.clone(), ..first };
-        for y in 0..first.height as usize {
-            let from = (y + 480) % first.height as usize;
-            second.data[y * stride + 528 * bytes..y * stride + 2208 * bytes]
-                .copy_from_slice(&first.data[from * stride + 528 * bytes..from * stride + 2208 * bytes]);
-        }
-        let encode = |p: &Pixels| {
-            let mut out = Vec::new();
-            let mut e = png::Encoder::new(&mut out, p.width, p.height);
-            e.set_color(if p.alpha { png::ColorType::Rgba } else { png::ColorType::Rgb });
-            e.set_compression(png::Compression::Balanced);
-            let mut w = e.write_header().unwrap();
-            w.write_image_data(&p.data).unwrap();
-            w.finish().unwrap();
-            crate::base64::encode(&out)
-        };
-        let (a, b) = (crate::base64::encode(&png), encode(&second));
-        if std::env::var_os("KB_TYPING").is_some() {
-            // A caret's worth changes, and back.
-            let mut typed = Pixels { data: first.data.clone(), ..first };
-            for y in 100..140 {
-                typed.data[y * stride + 300 * bytes..y * stride + 330 * bytes].fill(0);
-            }
-            let (a, b) = (a.clone(), encode(&typed));
-            let mut layers = Layers::default();
-            let mut out = Vec::new();
-            for i in 0..8 {
-                out.clear();
-                let t = std::time::Instant::now();
-                let sent = layers.draw(&mut out, if i % 2 == 0 { &a } else { &b }, 171, 49, (16, 34), 2);
-                println!("{sent:?} {} KB in {:?}", out.len() / 1024, t.elapsed());
-            }
-            return;
-        }
-        let mut layers = Layers::default();
-        let mut out = Vec::new();
-        for i in 0..6 {
-            out.clear();
-            let t = std::time::Instant::now();
-            let sent = layers.draw(&mut out, if i % 2 == 0 { &a } else { &b }, 171, 49, (16, 34), 2);
-            println!("{sent:?} {} KB in {:?}", out.len() / 1024, t.elapsed());
         }
     }
 }

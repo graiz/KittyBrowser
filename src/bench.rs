@@ -45,9 +45,8 @@ enum Transfer {
     /// Decoded here, and only the rectangles that changed sent through
     /// the pty, or Chrome's PNG when nearly all of the page did.
     Delta,
-    /// Chrome's PNG decoded here; when the page scrolls, what the
-    /// terminal already has is moved and only the rest sent, as PNGs
-    /// through the pty (term::layers).
+    /// Decoded here; what the terminal already has is moved where the
+    /// page scrolled it, and only the rest sent through the pty.
     Layers,
 }
 
@@ -192,14 +191,7 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     values.get(values.len() / 2).copied().unwrap_or(f64::NAN)
 }
 
-fn measure(
-    url: &str,
-    steps: usize,
-    scale: f64,
-    scene: Scene,
-    modes: Option<&str>,
-    hold: u64,
-) -> Result<String, String> {
+fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>) -> Result<String, String> {
     let window = settled_window()?;
     let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
         ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)
@@ -238,8 +230,6 @@ fn measure(
     bench.chrome.resize(viewport.0, viewport.1, scale);
     bench.chrome.navigate(url);
     bench.loaded(Duration::from_secs(30))?;
-    // Again, as a page from a file can come up in a new renderer without it.
-    bench.chrome.resize(viewport.0, viewport.1, scale);
     if scene == Scene::Type {
         bench.chrome.evaluate(TYPING_BOX);
     }
@@ -366,13 +356,6 @@ fn measure(
                 bytes: data.len() * 3 / 4,
                 wire,
             });
-            if hold > 0 && (step == steps / 3 || step + 1 == steps) {
-                // Leave the frame on screen to be compared with Chrome's.
-                if let Some(png) = crate::base64::decode(&data) {
-                    let _ = std::fs::write(format!("/tmp/kb-hold-{step}.png"), png);
-                }
-                std::thread::sleep(Duration::from_secs(hold));
-            }
             // A step can animate over several frames; let the rest pass.
             bench.settle(Duration::from_millis(80))?;
             last = Some(data);
@@ -443,7 +426,6 @@ pub fn run(words: &[String]) -> i32 {
     let mut scale = if cfg!(target_os = "macos") { 2.0 } else { 1.0 };
     let mut scene = Scene::Scroll;
     let mut modes = None;
-    let mut hold = 0;
     let mut args = words.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -480,15 +462,6 @@ pub fn run(words: &[String]) -> i32 {
                     return 2;
                 }
             },
-            // Hold a frame on screen this many seconds a third of the way
-            // through and at the end, its PNG in /tmp, to check the screen.
-            "--hold" => match args.next().and_then(|n| n.parse().ok()) {
-                Some(n) => hold = n,
-                None => {
-                    eprintln!("kb bench: --hold needs a number of seconds\n{USAGE}");
-                    return 2;
-                }
-            },
             "--out" => match args.next() {
                 Some(path) => out = Some(path.clone()),
                 None => {
@@ -510,7 +483,7 @@ pub fn run(words: &[String]) -> i32 {
         eprintln!("kb bench: {error}");
         return 1;
     }
-    let result = measure(&url, steps, scale, scene, modes.as_deref(), hold);
+    let result = measure(&url, steps, scale, scene, modes.as_deref());
     term::leave();
     match result {
         Ok(report) => {
