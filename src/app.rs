@@ -9,6 +9,7 @@ use crate::engine::chrome::{self, Chrome, PageEvent};
 use crate::history::History;
 use crate::keys::{Action, Bindings};
 use crate::term::input::{Button, Event, Key, KeyCode, Mouse, MouseKind, Parser};
+use crate::term::page::{PageImage, Route};
 use crate::term::size::{self, Window};
 use crate::term::{self, graphics};
 use crate::ui::{self, AddressBar, Edit, Hit};
@@ -206,7 +207,9 @@ struct App {
     /// Whether the terminal reads frames from temporary files.
     by_file: bool,
     /// The page's image on the screen.
-    page: crate::term::page::PageImage,
+    page: PageImage,
+    /// Whether frames go through the pty only whole (`KB_TRANSFER=png`).
+    png_only: bool,
     /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
     /// so the page reflows as in a desktop browser and stays sharp.
     zoom: f64,
@@ -366,6 +369,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         frame: None,
         by_file: false,
         page: Default::default(),
+        png_only: false,
         zoom: 1.0,
         fit_request: None,
         help: false,
@@ -398,9 +402,13 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         app.note(&format!("~/.kittybrowser/keys {error}"));
     }
     app.layout();
-    // KB_TRANSFER=pty keeps frames on the pty, should files misbehave.
-    if std::env::var("KB_TRANSFER").as_deref() != Ok("pty") {
-        graphics::ask_about_files();
+    // KB_TRANSFER=pty keeps frames on the pty, should files misbehave;
+    // KB_TRANSFER=png also sends them whole, for a terminal that can't
+    // place parts of images.
+    match std::env::var("KB_TRANSFER").as_deref() {
+        Ok("png") => app.png_only = true,
+        Ok("pty") => {}
+        _ => graphics::ask_about_files(),
     }
     app.chrome.hold_acks();
     app.chrome.start_screencast();
@@ -812,7 +820,11 @@ impl App {
             ("pane", format!("{}x{} cells of {cell_w}x{cell_h} pixels", self.window.cols, self.window.rows)),
             (
                 "frames",
-                if self.by_file { "by file, changed blocks only".to_owned() } else { "through the pty".to_owned() },
+                match (self.by_file, self.png_only) {
+                    (true, _) => "by file, changed blocks only".to_owned(),
+                    (false, false) => "through the pty, what moved or changed".to_owned(),
+                    (false, true) => "through the pty, whole PNG frames (KB_TRANSFER=png)".to_owned(),
+                },
             ),
             ("agents", format!("kb ctl -i {} ...   (kb ctl --help)", self.instance)),
         ] {
@@ -945,7 +957,12 @@ impl App {
         if let Some(png) = self.frame.as_deref().filter(|_| frame) {
             let (cols, rows) = self.shown;
             let scaled = self.fixed.is_some();
-            let drawn = self.page.draw(&mut out, png, self.by_file, scaled, cols, rows, cell, 2);
+            let route = match (self.by_file, self.png_only) {
+                (true, _) => Route::Files,
+                (false, false) => Route::Layers,
+                (false, true) => Route::Png,
+            };
+            let drawn = self.page.draw(&mut out, png, route, scaled, cols, rows, cell, 2);
             log(format_args!("drew {drawn}"));
         }
         let cols = self.window.cols as usize;

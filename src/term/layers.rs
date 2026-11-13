@@ -23,6 +23,9 @@
 //! placements pile up, the whole frame goes again as Chrome sent it. The
 //! screen always ends exactly at Chrome's frame: whatever isn't known to be
 //! on screen already, pixel for pixel, is sent.
+//!
+//! Images are placed at their own size, not scaled to cells, so this relies
+//! on `cell` being the terminal's cell to the pixel (`KB_TRANSFER=png` if not).
 
 use super::graphics::{crop, cut, decode_png, fits, png_size, transmit, Pixels};
 use std::collections::HashMap;

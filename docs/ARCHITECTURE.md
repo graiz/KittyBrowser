@@ -125,6 +125,18 @@ with the one on screen:
   terminal to report errors (`q=1`); if it says it no longer has an image,
   everything is drawn again.
 
+This needs more of the protocol than a whole frame does: placements of
+part of an image (`x,y,w,h`), offsets within a cell (`X,Y`), stacking (`z`)
+and zlib-compressed pixels (`o=z`). For a terminal that has only the basics,
+`KB_TRANSFER=png` sends every frame whole, as a PNG scaled to the cells
+(`a=T,f=100,c,r`), as kb did before.
+
+Which of these drew what is on screen is noted (`term::page::PageImage`):
+each knows only its own images, so when another takes over, all images are
+deleted first. A frame that doesn't fit the cells (one rendered before a
+resize) goes whole, as image 1, above the layers; left there, it would hide
+every frame they draw after it.
+
 Measured with `kb bench` over ssh on a LAN (Ghostty, 171x50 cells, frames
 2736x1666, Wikipedia), median milliseconds per step:
 

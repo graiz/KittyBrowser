@@ -231,6 +231,7 @@ it's worth knowing before you turn on the MCP server. See
 | `KB_CHROME` | The browser to run, if kb doesn't find one |
 | `KB_CHROME_ARGS` | Extra flags for Chrome, separated by spaces |
 | `KB_TRANSFER=pty` | Always send frames through the terminal, never by file |
+| `KB_TRANSFER=png` | Through the terminal, and each frame whole as a PNG: for a terminal that shows kb's page broken over ssh |
 | `KB_LOG` | A file to append diagnostics to (sizes, frames, clicks) |
 
 ## Troubleshooting

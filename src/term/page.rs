@@ -18,6 +18,19 @@ pub struct PageImage {
     on_screen: Option<Drawer>,
 }
 
+/// How frames reach the terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Route {
+    /// In files, which the terminal reads itself.
+    Files,
+    /// Through the pty, only what moved or changed. This needs placements
+    /// with source rectangles, offsets within cells, z and `o=z`.
+    Layers,
+    /// Through the pty, whole PNG frames only (`KB_TRANSFER=png`): for a
+    /// terminal with no more of the kitty protocol than that.
+    Png,
+}
+
 /// The ways of drawing the page.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Drawer {
@@ -66,23 +79,23 @@ impl PageImage {
 
     /// Append the escapes that draw `png`, one of Chrome's frames, over
     /// `cols` x `rows` cells of `cell` pixels from screen row `top`.
-    /// `by_file` says the terminal reads files; `scaled`, that the frame is
-    /// a fixed viewport, scaled to fit. Returns what was sent, to log.
+    /// `scaled` says the frame is a fixed viewport, scaled to fit. Returns
+    /// what was sent, to log.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         out: &mut Vec<u8>,
         png: &str,
-        by_file: bool,
+        route: Route,
         scaled: bool,
         cols: u16,
         rows: u16,
         cell: (u32, u32),
         top: u16,
     ) -> String {
-        let mut pixels = match by_file {
-            true => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes, Vec::new())),
-            false => None,
+        let mut pixels = match route {
+            Route::Files => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes, Vec::new())),
+            Route::Layers | Route::Png => None,
         };
         // Only what changed, when the frame lines up with the cells: tiles
         // by file, or layers through the pty. Otherwise (a fixed viewport,
@@ -90,7 +103,7 @@ impl PageImage {
         let lined_up = !scaled && graphics::png_size(png).is_some_and(|size| graphics::fits(size, cols, rows, cell));
         let drawer = match &pixels {
             Some(_) if lined_up => Drawer::Tiles,
-            None if lined_up && !by_file => Drawer::Layers,
+            None if lined_up && route == Route::Layers => Drawer::Layers,
             _ => Drawer::Whole,
         };
         self.hand_to(out, drawer);
@@ -143,12 +156,14 @@ mod tests {
         frame(width, 40, |x, y| ((y + scrolled) * 7 % 251 + x) as u8)
     }
 
-    /// Draw `new` and check the screen then shows it, and only it.
-    fn shows(image: &mut PageImage, screen: &mut Screen, new: &graphics::Pixels, by_file: bool) {
+    /// Draw `new` and check the screen then shows it, and only it. Returns
+    /// the escapes sent.
+    fn shows(image: &mut PageImage, screen: &mut Screen, new: &graphics::Pixels, route: Route) -> String {
         let mut out = Vec::new();
-        let drawn = image.draw(&mut out, &encode(new), by_file, false, COLS, ROWS, CELL, 2);
+        let drawn = image.draw(&mut out, &encode(new), route, false, COLS, ROWS, CELL, 2);
         screen.feed(&out, CELL);
         assert!(screen.page(2, CELL, 16, 40) == new.data, "after {drawn}");
+        String::from_utf8(out).unwrap()
     }
 
     #[test]
@@ -156,11 +171,11 @@ mod tests {
         // A frame a column narrow, as one rendered before a resize, goes
         // whole between two that layers draw.
         let (mut image, mut screen) = (PageImage::default(), Screen::default());
-        shows(&mut image, &mut screen, &page(16, 0), false);
+        shows(&mut image, &mut screen, &page(16, 0), Route::Layers);
         let mut out = Vec::new();
-        image.draw(&mut out, &encode(&page(12, 5)), false, false, COLS, ROWS, CELL, 2);
+        image.draw(&mut out, &encode(&page(12, 5)), Route::Layers, false, COLS, ROWS, CELL, 2);
         screen.feed(&out, CELL);
-        shows(&mut image, &mut screen, &page(16, 10), false);
+        shows(&mut image, &mut screen, &page(16, 10), Route::Layers);
     }
 
     #[test]
@@ -168,8 +183,23 @@ mod tests {
         // The terminal's answer that it reads files comes after layers
         // drew the first frame.
         let (mut image, mut screen) = (PageImage::default(), Screen::default());
-        shows(&mut image, &mut screen, &page(16, 0), false);
-        shows(&mut image, &mut screen, &page(16, 3), true);
-        shows(&mut image, &mut screen, &page(16, 6), true);
+        shows(&mut image, &mut screen, &page(16, 0), Route::Layers);
+        shows(&mut image, &mut screen, &page(16, 3), Route::Files);
+        shows(&mut image, &mut screen, &page(16, 6), Route::Files);
+    }
+
+    #[test]
+    fn png_frames_only_when_asked() {
+        // Each frame whole, as Chrome sent it, scaled to the cells: no
+        // placements, offsets or compressed pixels.
+        let (mut image, mut screen) = (PageImage::default(), Screen::default());
+        for scrolled in [0, 3, 6] {
+            let text = shows(&mut image, &mut screen, &page(16, scrolled), Route::Png);
+            assert!(text.contains("\x1b[2;1H\x1b_Ga=T,f=100,i=1,p=1,"), "{text:?}");
+            assert!(text.contains(",c=4,r=10,"), "{text:?}");
+            for key in ["a=p", "o=z", "X=", "Y="] {
+                assert!(!text.contains(key), "{text:?}");
+            }
+        }
     }
 }
