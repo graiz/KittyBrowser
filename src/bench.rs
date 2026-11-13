@@ -45,6 +45,10 @@ enum Transfer {
     /// Decoded here, and only the rectangles that changed sent through
     /// the pty, or Chrome's PNG when nearly all of the page did.
     Delta,
+    /// Chrome's PNG decoded here; when the page scrolls, what the
+    /// terminal already has is moved and only the rest sent, as PNGs
+    /// through the pty (term::layers).
+    Layers,
 }
 
 struct Mode {
@@ -56,6 +60,7 @@ struct Mode {
 const MODES: &[Mode] = &[
     Mode { name: "png through the pty", source: Source::Png, transfer: Transfer::Pty },
     Mode { name: "png, changed rects (ptyA)", source: Source::Png, transfer: Transfer::Delta },
+    Mode { name: "png, moved layers, ptyB", source: Source::Png, transfer: Transfer::Layers },
     Mode { name: "png, pixels by file", source: Source::Png, transfer: Transfer::File },
     Mode { name: "png, changed tiles by file", source: Source::Png, transfer: Transfer::Tiles },
     Mode { name: "jpeg 100, pixels by file", source: Source::Jpeg(100), transfer: Transfer::File },
@@ -184,7 +189,7 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     values.get(values.len() / 2).copied().unwrap_or(f64::NAN)
 }
 
-fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>) -> Result<String, String> {
+fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>, hold: u64) -> Result<String, String> {
     let window = settled_window()?;
     let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
         ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)
@@ -223,6 +228,8 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
     bench.chrome.resize(viewport.0, viewport.1, scale);
     bench.chrome.navigate(url);
     bench.loaded(Duration::from_secs(30))?;
+    // Again, as a page from a file can come up in a new renderer without it.
+    bench.chrome.resize(viewport.0, viewport.1, scale);
     if scene == Scene::Type {
         bench.chrome.evaluate(TYPING_BOX);
     }
@@ -257,6 +264,8 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
         term::write(graphics::DELETE);
         let mut tiles = graphics::Tiles::default();
         let mut delta = term::delta::Delta::default();
+        let mut layers = crate::term::layers::Layers::default();
+        let mut sent = Vec::new();
         let mut samples = Vec::new();
         let mut missed = 0;
         let mut odd = Vec::new();
@@ -297,6 +306,18 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
                         odd.push(graphics::png_size(&data));
                     }
                 }
+                Transfer::Layers => {
+                    match layers.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2) {
+                        Some(what) => sent.push(what),
+                        None => {
+                            // What the app would do: the frame as it came.
+                            layers.forget();
+                            out.extend_from_slice(graphics::DELETE);
+                            graphics::put_png(&mut out, &data, cols, rows);
+                            odd.push(graphics::png_size(&data));
+                        }
+                    }
+                }
                 Transfer::Tiles => {
                     let bytes = crate::base64::decode(&data).ok_or("Chrome sent a damaged frame")?;
                     let pixels = graphics::decode_png(&bytes).ok_or("couldn't decode a frame")?;
@@ -334,6 +355,13 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
                 bytes: data.len() * 3 / 4,
                 wire,
             });
+            if hold > 0 && (step == steps / 3 || step + 1 == steps) {
+                // Leave the frame on screen to be compared with Chrome's.
+                if let Some(png) = crate::base64::decode(&data) {
+                    let _ = std::fs::write(format!("/tmp/kb-hold-{step}.png"), png);
+                }
+                std::thread::sleep(Duration::from_secs(hold));
+            }
             // A step can animate over several frames; let the rest pass.
             bench.settle(Duration::from_millis(80))?;
             last = Some(data);
@@ -370,6 +398,18 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
             report.push_str(&format!("   ({missed} steps gave no frame)"));
         }
         report.push('\n');
+        if !sent.is_empty() {
+            use crate::term::layers::Sent;
+            let whole = sent.iter().filter(|s| matches!(s, Sent::Whole(_))).count();
+            let shifts: Vec<String> = sent
+                .iter()
+                .map(|s| match s {
+                    Sent::Whole(why) => format!("W:{why:?}"),
+                    Sent::Strips { shift, strips } => format!("{shift}/{strips}"),
+                })
+                .collect();
+            report.push_str(&format!("    {whole} whole; shift/strips: {}\n", shifts.join(" ")));
+        }
     }
     report.push_str(
         "\nchrome: from the change to the frame arriving. prepare: decoding and writing the file.\n\
@@ -389,6 +429,7 @@ pub fn run(words: &[String]) -> i32 {
     let mut scale = if cfg!(target_os = "macos") { 2.0 } else { 1.0 };
     let mut scene = Scene::Scroll;
     let mut modes = None;
+    let mut hold = 0;
     let mut args = words.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -425,6 +466,15 @@ pub fn run(words: &[String]) -> i32 {
                     return 2;
                 }
             },
+            // Hold a frame on screen this many seconds a third of the way
+            // through and at the end, its PNG in /tmp, to check the screen.
+            "--hold" => match args.next().and_then(|n| n.parse().ok()) {
+                Some(n) => hold = n,
+                None => {
+                    eprintln!("kb bench: --hold needs a number of seconds\n{USAGE}");
+                    return 2;
+                }
+            },
             "--out" => match args.next() {
                 Some(path) => out = Some(path.clone()),
                 None => {
@@ -446,7 +496,7 @@ pub fn run(words: &[String]) -> i32 {
         eprintln!("kb bench: {error}");
         return 1;
     }
-    let result = measure(&url, steps, scale, scene, modes.as_deref());
+    let result = measure(&url, steps, scale, scene, modes.as_deref(), hold);
     term::leave();
     match result {
         Ok(report) => {
