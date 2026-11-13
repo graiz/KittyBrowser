@@ -260,6 +260,7 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
         let mut samples = Vec::new();
         let mut missed = 0;
         let mut odd = Vec::new();
+        let mut last = None;
         for step in 0..steps {
             let start = Instant::now();
             match scene {
@@ -335,6 +336,16 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
             });
             // A step can animate over several frames; let the rest pass.
             bench.settle(Duration::from_millis(80))?;
+            last = Some(data);
+        }
+        // To check what the terminal shows: the last frame drawn, saved
+        // as Chrome sent it, and held on screen for a screenshot.
+        if let (Some(secs), Some(data)) = (std::env::var("KB_BENCH_HOLD").ok().and_then(|s| s.parse().ok()), &last) {
+            let name = mode.name.replace([' ', ',', '(', ')'], "_");
+            let _ = std::fs::write(format!("/tmp/kbhold-{name}.png"), crate::base64::decode(data).unwrap_or_default());
+            let _ = std::fs::write("/tmp/kbhold-ready", &name);
+            std::thread::sleep(Duration::from_secs(secs));
+            let _ = std::fs::remove_file("/tmp/kbhold-ready");
         }
 
         if samples.is_empty() {
