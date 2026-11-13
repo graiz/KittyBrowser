@@ -17,9 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
-png = "0.17"
+png = "0.18"
 serde_json = "1"
-zune-jpeg = "0.4"
+zune-jpeg = "0.5"
 
 [profile.release]
 lto = true
