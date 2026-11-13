@@ -760,7 +760,7 @@ fn find_regions(old: &[u64], new: &[u64], height: usize, column: u32, width: u32
     // for every fourth column: enough to find a part that moved a few cells
     // wide, in a quarter of the time.
     let sampled = || (0..columns).step_by(SAMPLE).flat_map(|c| (0..height).map(move |y| (c, y)));
-    let key = |c: usize, hash: u64| hash.wrapping_add(c as u64 * 0x9e37_79b9_7f4a_7c15);
+    let key = |c: usize, hash: u64| hash.wrapping_add((c as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
     let mut rows: HashMap<u64, Option<usize>, BuildHasherDefault<Identity>> = HashMap::default();
     rows.reserve(old.len() / SAMPLE + height);
     for (c, y) in sampled() {
@@ -941,7 +941,11 @@ mod tests {
         // column of its own.
         let at = |scrolled| {
             column_hashes(
-                &frame(18, 40, |x, y| if x < 4 { y as u8 } else { ((y + scrolled) * 7 % 251) as u8 + x as u8 }),
+                &frame(
+                    18,
+                    40,
+                    |x, y| if x < 4 { y as u8 } else { (((y + scrolled) * 7 % 251) as u8).wrapping_add(x as u8) },
+                ),
                 4,
             )
         };
