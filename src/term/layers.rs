@@ -21,7 +21,7 @@
 //! Chrome's frame: strips are cut from the frame itself, wherever it differs
 //! from what the screen shows.
 
-use super::graphics::{crop, decode_png, Pixels};
+use super::graphics::{crop, Pixels};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -38,6 +38,12 @@ const MAX_PLACEMENTS: usize = 96;
 const GAP: u32 = 16;
 /// One column in this many votes on how far things moved.
 const SAMPLE: usize = 4;
+/// Images that no longer show are kept, up to this many pages' worth, to
+/// be placed again when the page scrolls back to them.
+const RETAIN: u64 = 2;
+/// Rows of a held image are placed again only this many at a time or
+/// more; fewer cost about as much to place as to send.
+const MIN_RUN: u32 = 32;
 /// The protocol's limit on the payload of one escape.
 const CHUNK: usize = 4096;
 
@@ -147,13 +153,39 @@ pub struct Layers {
     next_image: u32,
     next_placement: u32,
     next_z: i64,
+    /// A frame's worth of memory to decode the next frame into: a new one
+    /// costs a page fault every 16 KB, a millisecond or two a frame.
+    spare: Vec<u8>,
+    /// The images the terminal holds, oldest first, with their pixels.
+    held: Vec<Held>,
+    /// Draws so far, to know which held image showed least recently.
+    clock: u64,
 }
+
+/// An image the terminal holds, placed or not, and what is in it. Once a
+/// strip has scrolled off the page it is kept for a while: scrolled back,
+/// the page shows it again, and it can be placed instead of sent.
+struct Held {
+    id: u32,
+    /// The page column of its left edge (pages move only up and down).
+    x: u32,
+    pixels: Pixels,
+    /// The draw it last showed in.
+    used: u64,
+    /// Where each row that occurs once in it is, by a hash of its columns
+    /// `.0` to `.0 + .1`: made when first looked in, kept for next time.
+    rows: Vec<(u32, u32, Rows)>,
+}
+
+/// Rows by their hash, `None` for one that occurs more than once.
+type Rows = HashMap<u64, Option<u32>, BuildHasherDefault<Identity>>;
 
 impl Layers {
     /// The screen was cleared of images: the next draw sends the whole frame.
     pub fn forget(&mut self) {
         self.shown = None;
         self.placements.clear();
+        self.held.clear();
     }
 
     /// Append the escapes that bring the screen to `png_base64`, one of
@@ -171,7 +203,7 @@ impl Layers {
         cell: (u32, u32),
         top: u16,
     ) -> Option<Sent> {
-        let new = decode_png(&crate::base64::decode(png_base64)?)?;
+        let new = decode(&crate::base64::decode(png_base64)?, std::mem::take(&mut self.spare))?;
         if !super::graphics::Tiles::fits(&new, cols, rows, cell) {
             return None;
         }
@@ -183,7 +215,7 @@ impl Layers {
         let old = self.shown.take().filter(|old| {
             (old.pixels.width, old.pixels.height, old.pixels.alpha) == (new.width, new.height, new.alpha)
         });
-        let sent = match old {
+        let sent = match &old {
             None => Sent::Whole(Why::First),
             Some(old) => {
                 let regions = find_regions(&old.hashes, &hashes, new.height as usize, cell.0, new.width);
@@ -206,18 +238,18 @@ impl Layers {
             self.whole(out, png_base64, &new, page);
         }
         self.shown = Some(Shown { pixels: new, hashes });
+        if let Some(old) = old {
+            self.spare = old.pixels.data;
+        }
         Some(sent)
     }
 
     /// Replace everything with the frame Chrome sent, which may be a pixel
     /// or two larger than `new` (its cropped copy): only `new`'s part shows.
     fn whole(&mut self, out: &mut Vec<u8>, png_base64: &str, new: &Pixels, page: Page) {
-        let mut deleted = Vec::new();
-        for placement in self.placements.drain(..) {
-            if !deleted.contains(&placement.image) {
-                deleted.push(placement.image);
-                delete_image(out, placement.image);
-            }
+        self.placements.clear();
+        for held in self.held.drain(..) {
+            delete_image(out, held.id);
         }
         self.next_z = BOTTOM_Z;
         let placement = self.new_placement(Rect { x: 0, y: 0, width: new.width, height: new.height });
@@ -228,6 +260,8 @@ impl Layers {
         );
         transmit(out, &keys, png_base64);
         self.placements.push(placement);
+        let pixels = Pixels { data: new.data.clone(), ..*new };
+        self.held.push(Held { id: placement.image, x: 0, pixels, used: self.clock, rows: Vec::new() });
     }
 
     /// Move the placements as `regions` say and lay `strips` of `new` over
@@ -246,9 +280,14 @@ impl Layers {
         let mut moved: Vec<(Placement, Vec<Placement>)> = Vec::with_capacity(self.placements.len());
         // Compressing is most of the work, so big strips are cut into
         // pieces compressed side by side.
+        let mut reused = Vec::new();
+        let mut send = Vec::new();
+        for strip in strips {
+            self.reuse(new, *strip, &mut reused, &mut send);
+        }
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_THREADS);
-        let pieces = split(strips, threads);
-        let mut count = pieces.len();
+        let pieces = split(&send, threads);
+        let mut count = pieces.len() + reused.len();
         for placement in &self.placements {
             let parts: Vec<Placement> = regions
                 .iter()
@@ -272,24 +311,28 @@ impl Layers {
                 placements.push(part);
             }
         }
+        // A placement that went is deleted, but not its image, which
+        // `tidy` keeps or deletes.
         for (placement, parts) in &moved {
             if parts.is_empty() {
-                match placements.iter().any(|p| p.image == placement.image) {
-                    true => out.extend_from_slice(
-                        format!("\x1b_Ga=d,d=i,i={},p={},q=2\x1b\\", placement.image, placement.id).as_bytes(),
-                    ),
-                    false => delete_image(out, placement.image),
-                }
+                out.extend_from_slice(
+                    format!("\x1b_Ga=d,d=i,i={},p={},q=2\x1b\\", placement.image, placement.id).as_bytes(),
+                );
             }
         }
-        // An image whose placements all went has been deleted above once
-        // per placement; that's harmless, and rare enough not to track.
+        for (image, from, x, y) in reused {
+            self.next_z += 1;
+            let placement = Placement { image, id: self.next_id(), z: self.next_z, from, x, y };
+            page.place(out, &placement);
+            placements.push(placement);
+        }
 
+        let cuts: Vec<Pixels> = pieces.iter().map(|piece| cut(new, *piece)).collect();
         let compressed: Vec<Vec<u8>> = std::thread::scope(|scope| {
-            let work: Vec<_> = pieces.iter().map(|piece| scope.spawn(move || compress(new, *piece))).collect();
+            let work: Vec<_> = cuts.iter().map(|cut| scope.spawn(move || compress(&cut.data))).collect();
             work.into_iter().map(|done| done.join().unwrap_or_default()).collect()
         });
-        for (strip, data) in pieces.iter().zip(compressed) {
+        for ((strip, data), pixels) in pieces.iter().zip(compressed).zip(cuts) {
             let mut placement = self.new_placement(*strip);
             (placement.x, placement.y) = (strip.x, strip.y);
             page.cursor(out, &placement);
@@ -306,9 +349,114 @@ impl Layers {
             );
             transmit(out, &keys, &crate::base64::encode(&data));
             placements.push(placement);
+            self.held.push(Held { id: placement.image, x: strip.x, pixels, used: self.clock, rows: Vec::new() });
         }
         self.placements = placements;
+        self.tidy(out, new.width as u64 * new.height as u64);
         Some(())
+    }
+
+    /// Note which images show, and delete those that haven't for longest
+    /// beyond `RETAIN` pages' worth of pixels.
+    fn tidy(&mut self, out: &mut Vec<u8>, page: u64) {
+        self.clock += 1;
+        for held in &mut self.held {
+            if self.placements.iter().any(|p| p.image == held.id) {
+                held.used = self.clock;
+            }
+        }
+        let size = |held: &Held| held.pixels.width as u64 * held.pixels.height as u64;
+        let mut kept: u64 = self.held.iter().filter(|h| h.used < self.clock).map(size).sum();
+        while kept > RETAIN * page {
+            let unused = self.held.iter().enumerate().filter(|(_, h)| h.used < self.clock);
+            let Some((oldest, _)) = unused.min_by_key(|(_, h)| h.used) else { break };
+            let held = self.held.remove(oldest);
+            kept -= size(&held);
+            delete_image(out, held.id);
+        }
+    }
+
+    /// Split `strip` of `new` into what held images already have, pushed
+    /// to `reused` as the image, the part of it, and where it goes on the
+    /// page, and the rest, pushed to `send`.
+    fn reuse(&mut self, new: &Pixels, strip: Rect, reused: &mut Vec<(u32, Rect, u32, u32)>, send: &mut Vec<Rect>) {
+        if strip.height < MIN_RUN {
+            send.push(strip);
+            return;
+        }
+        let line = |pixels, x, y| line(pixels, x, y, strip.width);
+        let mut done = vec![false; strip.height as usize];
+        let hashes: Vec<u64> = (0..strip.height).map(|y| row_hash(line(new, strip.x, strip.y + y))).collect();
+        for held in self.held.iter_mut().rev() {
+            if held.pixels.alpha != new.alpha || strip.x < held.x || strip.x + strip.width > held.x + held.pixels.width {
+                continue;
+            }
+            if done.iter().all(|&d| d) {
+                break;
+            }
+            let from = strip.x - held.x;
+            let index = match held.rows.iter().position(|(x, width, _)| (*x, *width) == (from, strip.width)) {
+                Some(index) => index,
+                None => {
+                    let mut rows = Rows::default();
+                    for y in 0..held.pixels.height {
+                        let hash = row_hash(line(&held.pixels, from, y));
+                        rows.entry(hash).and_modify(|row| *row = None).or_insert(Some(y));
+                    }
+                    // A strip of a sidebar and one of the page beside it
+                    // take turns: each keeps its index.
+                    if held.rows.len() == 2 {
+                        held.rows.remove(0);
+                    }
+                    held.rows.push((from, strip.width, rows));
+                    held.rows.len() - 1
+                }
+            };
+            let rows = &held.rows[index].2;
+            let same = |y: u32, k: u32| line(new, strip.x, strip.y + y) == line(&held.pixels, from, k);
+            let mut y = 0;
+            while y < strip.height {
+                let found = match rows.get(&hashes[y as usize]) {
+                    Some(Some(k)) if !done[y as usize] && same(y, *k) => *k,
+                    _ => {
+                        y += 1;
+                        continue;
+                    }
+                };
+                // Grow the match up and down over rows not yet found.
+                let (mut top, mut k_top) = (y, found);
+                while top > 0 && k_top > 0 && !done[top as usize - 1] && same(top - 1, k_top - 1) {
+                    (top, k_top) = (top - 1, k_top - 1);
+                }
+                let mut bottom = y + 1;
+                while bottom < strip.height
+                    && k_top + (bottom - top) < held.pixels.height
+                    && !done[bottom as usize]
+                    && same(bottom, k_top + bottom - top)
+                {
+                    bottom += 1;
+                }
+                if bottom - top >= MIN_RUN {
+                    done[top as usize..bottom as usize].fill(true);
+                    let part = Rect { x: from, y: k_top, width: strip.width, height: bottom - top };
+                    reused.push((held.id, part, strip.x, strip.y + top));
+                }
+                y = bottom;
+            }
+        }
+        // What no image had is sent, a run of rows at a time.
+        let mut y = 0;
+        while y < strip.height {
+            if done[y as usize] {
+                y += 1;
+                continue;
+            }
+            let start = y;
+            while y < strip.height && !done[y as usize] {
+                y += 1;
+            }
+            send.push(Rect { y: strip.y + start, height: y - start, ..strip });
+        }
     }
 
     /// A new image of `size`, all of it placed at the page's top left, on
@@ -401,6 +549,24 @@ fn transmit(out: &mut Vec<u8>, keys: &str, base64: &str) {
 /// them larger.
 const LEVEL: u8 = 3;
 
+/// Decode a PNG into `data`, which is reused if it is large enough.
+fn decode(bytes: &[u8], mut data: Vec<u8>) -> Option<Pixels> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    // Frames come from Chrome over a pipe, not off a disk or a network:
+    // checking their checksums is a tenth of the time for nothing.
+    decoder.ignore_checksums(true);
+    let mut reader = decoder.read_info().ok()?;
+    data.resize(reader.output_buffer_size()?, 0);
+    let info = reader.next_frame(&mut data).ok()?;
+    data.truncate(info.buffer_size());
+    let alpha = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgb, png::BitDepth::Eight) => false,
+        (png::ColorType::Rgba, png::BitDepth::Eight) => true,
+        _ => return None,
+    };
+    Some(Pixels { width: info.width, height: info.height, alpha, data })
+}
+
 /// At most this many strips are compressed at once.
 const MAX_THREADS: usize = 4;
 /// A strip is cut in pieces of no fewer than this many pixels.
@@ -422,14 +588,38 @@ fn split(strips: &[Rect], threads: usize) -> Vec<Rect> {
 }
 
 /// The pixels of `rect`, zlib-compressed for the terminal.
-fn compress(pixels: &Pixels, rect: Rect) -> Vec<u8> {
+fn compress(data: &[u8]) -> Vec<u8> {
+    miniz_oxide::deflate::compress_to_vec_zlib(data, LEVEL)
+}
+
+/// The pixels of `rect` of `pixels`.
+fn cut(pixels: &Pixels, rect: Rect) -> Pixels {
     let bytes = if pixels.alpha { 4 } else { 3 };
     let stride = pixels.width as usize * bytes;
     let mut data = Vec::with_capacity(rect.width as usize * rect.height as usize * bytes);
     for y in rect.y..rect.y + rect.height {
         data.extend_from_slice(&pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes]);
     }
-    miniz_oxide::deflate::compress_to_vec_zlib(&data, LEVEL)
+    Pixels { width: rect.width, height: rect.height, alpha: pixels.alpha, data }
+}
+
+/// `width` pixels of row `y` of `pixels`, from column `x`.
+fn line(pixels: &Pixels, x: u32, y: u32, width: u32) -> &[u8] {
+    let bytes = if pixels.alpha { 4 } else { 3 };
+    &pixels.data[(y as usize * pixels.width as usize + x as usize) * bytes..][..width as usize * bytes]
+}
+
+/// A hash of a row of pixels.
+fn row_hash(row: &[u8]) -> u64 {
+    let mut words = row.chunks_exact(8);
+    let mut hash = row.len() as u64;
+    for word in &mut words {
+        hash = mix(hash, u64::from_le_bytes(word.try_into().unwrap()));
+    }
+    for &byte in words.remainder() {
+        hash = mix(hash, byte as u64);
+    }
+    hash
 }
 
 /// The hashes in `find_regions` are already well mixed: hashing them again
@@ -784,7 +974,7 @@ mod profile {
     #[ignore]
     fn draw_a_scroll() {
         let png = std::fs::read(std::env::var("KB_FRAME").unwrap()).unwrap();
-        let first = decode_png(&png).unwrap();
+        let first = decode(&png, Vec::new()).unwrap();
         let bytes = if first.alpha { 4 } else { 3 };
         let stride = first.width as usize * bytes;
         // The middle column scrolls up 480 rows; what comes in is the top.
