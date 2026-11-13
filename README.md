@@ -241,8 +241,13 @@ it's worth knowing before you turn on the MCP server. See
   host you trust, `ObscureKeystrokeTiming no` in its `~/.ssh/config` block
   makes typing into kb quicker.
 - **"can't find Chrome":** install Chrome or Chromium, or set `KB_CHROME`.
-- **Nothing is drawn, or escape codes appear:** the terminal doesn't support
-  the kitty graphics protocol, or you're inside tmux or screen.
+- **"doesn't support the kitty graphics protocol":** kb asks the terminal
+  when it starts, and stops if the answer is no, as in Terminal, iTerm2 or
+  VS Code's terminal, or inside tmux or screen. Run it in Ghostty, kitty,
+  WezTerm or Rex.
+- **Nothing is drawn, or escape codes appear:** the terminal didn't answer
+  kb's question in time (over a very slow link, say), and doesn't support
+  the protocol either.
 - **The page is blurry or tiny:** set `--scale` to your display's pixel
   ratio.
 - **Sites show their phone layout:** the pane is narrow. Widen it, zoom out

@@ -84,3 +84,69 @@ pub fn leave() {
         }
     }
 }
+
+/// Whether the terminal draws kitty graphics: `Some(false)` when it answered
+/// without them, `None` when it didn't answer in time (a slow link, or a
+/// terminal that ignores the question), so the caller can go ahead. It asks
+/// about a one-pixel image and then for the terminal's attributes (DA1),
+/// which every terminal answers, in that order: a reply to the first that
+/// hasn't come by the second never will. Run it before `enter`, so the
+/// replies it reads aren't ones the app is waiting for.
+pub fn draws_graphics() -> Option<bool> {
+    const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+    let mut answer = Vec::new();
+    unsafe {
+        if libc::isatty(0) == 0 || libc::isatty(1) == 0 {
+            return None;
+        }
+        let mut original: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(0, &mut original) < 0 {
+            return None;
+        }
+        let mut raw = original;
+        libc::cfmakeraw(&mut raw);
+        libc::tcsetattr(0, libc::TCSANOW, &raw);
+        write(QUERY);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while graphics_answer(&answer).is_none() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let mut poll = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+            if left.is_zero() || libc::poll(&mut poll, 1, left.as_millis() as i32) <= 0 {
+                break;
+            }
+            let mut buf = [0u8; 256];
+            let n = libc::read(0, buf.as_mut_ptr().cast(), buf.len());
+            if n <= 0 {
+                break;
+            }
+            answer.extend_from_slice(&buf[..n as usize]);
+        }
+        libc::tcsetattr(0, libc::TCSANOW, &original);
+    }
+    graphics_answer(&answer)
+}
+
+/// What the replies to `draws_graphics`'s questions say, once the answer to
+/// the second (`ESC [ ? ... c`) is in.
+fn graphics_answer(replies: &[u8]) -> Option<bool> {
+    let attributes = replies.windows(3).position(|w| w == b"\x1b[?")?;
+    replies[attributes..].iter().position(|&b| b == b'c')?;
+    Some(replies[..attributes].windows(8).any(|w| w == b"\x1b_Gi=31;"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::graphics_answer;
+
+    #[test]
+    fn reads_whether_the_terminal_draws_graphics() {
+        assert_eq!(graphics_answer(b"\x1b_Gi=31;OK\x1b\\\x1b[?62;22;52c"), Some(true));
+        // Apple's Terminal: only the attributes.
+        assert_eq!(graphics_answer(b"\x1b[?1;2c"), Some(false));
+        // Not finished yet, or nothing.
+        assert_eq!(graphics_answer(b"\x1b_Gi=31;OK\x1b\\\x1b[?62;2"), None);
+        assert_eq!(graphics_answer(b""), None);
+        // An error about the image still means the protocol is there.
+        assert_eq!(graphics_answer(b"\x1b_Gi=31;EINVAL:bad\x1b\\\x1b[?62c"), Some(true));
+    }
+}

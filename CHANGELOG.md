@@ -19,6 +19,8 @@ Notable changes to kb. The format follows
   for its selector, size and styles; the selector is copied.
 - Chrome DevTools on F12, with `kb --devtools`.
 - Function keys reach the page, and `kb ctl press F5` works.
+- In a terminal without the kitty graphics protocol (Terminal, iTerm2,
+  tmux), kb says so and exits, instead of drawing nothing.
 - Much faster over ssh: when the terminal can't read kb's files, only what
   moved or changed is sent. A scroll step went from 1.1 MB to about 5 KB and
   155 to 109 ms, a keystroke from 1.1 MB to a few KB and 110 to 72 ms.
