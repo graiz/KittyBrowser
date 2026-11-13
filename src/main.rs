@@ -10,6 +10,7 @@ mod cli;
 mod commands;
 mod control;
 mod devtools;
+mod doctor;
 mod engine;
 mod history;
 mod keys;
@@ -22,6 +23,7 @@ mod ui;
 const USAGE: &str = "\
 usage: kb [--scale N] [--dark | --light] [--devtools] [URL]
        kb list             the kbs running now, numbered
+       kb doctor           check this terminal and machine can run kb, and what to fix
        kb keys             the key bindings, and how to change them
        kb ctl <command>    control a running kb; see kb ctl --help
        kb mcp <command>    the MCP server for agents; see kb mcp --help
@@ -62,13 +64,14 @@ fn main() {
     // The subcommands print and exit, so a reader that stops early (kb list
     // | head) should end them quietly, as it would any Unix tool. Not the
     // browser: it writes to Chrome's pipe, and must outlive Chrome closing it.
-    if matches!(words.first().map(String::as_str), Some("ctl" | "list" | "keys" | "skill" | "mcp")) {
+    if matches!(words.first().map(String::as_str), Some("ctl" | "list" | "keys" | "skill" | "mcp" | "doctor")) {
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     }
     match words.first().map(String::as_str) {
         Some("ctl") => std::process::exit(cli::run(&words[1..])),
         Some("mcp") => std::process::exit(mcp::run(&words[1..])),
         Some("list") => std::process::exit(cli::list()),
+        Some("doctor") => std::process::exit(doctor::run()),
         Some("bench") => std::process::exit(bench::run(&words[1..])),
         Some("skill") => std::process::exit(skill::run(&words[1..])),
         Some("keys") => {

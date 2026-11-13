@@ -244,7 +244,7 @@ fn is_local(url: &str) -> bool {
     }
 }
 
-fn find_binary() -> Option<PathBuf> {
+pub fn find_binary() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("KB_CHROME") {
         return Some(path.into());
     }

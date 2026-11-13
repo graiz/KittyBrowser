@@ -39,14 +39,18 @@ you, a star helps other people find it.
 
 ## Quick start
 
-With [Rust](https://rustup.rs) and Chrome installed:
+With Chrome installed, and no Rust needed:
 
 ```sh
-cargo install --git https://github.com/graiz/kittybrowser
+curl -fsSL https://raw.githubusercontent.com/graiz/kittybrowser/main/install.sh | sh
+kb doctor                  # checks your terminal and Chrome, and says what to fix
 kb news.ycombinator.com
 ```
 
-Ctrl+/ shows the keys, Ctrl+Q quits (or the ✕ at the right of the bar, which asks first).
+Ctrl+/ shows the keys, Ctrl+Q quits (or the ✕ at the right of the bar, which asks first). The script downloads a prebuilt kb for
+your Mac or Linux machine into `~/.local/bin` (set `KB_INSTALL_DIR` to put it
+elsewhere), or builds it with cargo when there's no prebuilt one yet. With
+Rust you can also `cargo install --git https://github.com/graiz/kittybrowser`.
 
 ## Requirements
 
@@ -57,15 +61,21 @@ Ctrl+/ shows the keys, Ctrl+Q quits (or the ✕ at the right of the bar, which a
   screen.
 - **Chrome, Chromium, Edge or Brave**, installed where kb can find it, or
   named with `KB_CHROME`.
-- **Rust** (stable, from [rustup](https://rustup.rs)) to build it.
+- **Rust** (stable, from [rustup](https://rustup.rs)) only to build it
+  yourself.
+
+`kb doctor` checks all of these and asks the terminal directly whether it
+can draw kitty graphics. kb also refuses to start in a terminal it knows
+can't (Terminal.app, iTerm2, tmux, screen) and says why, rather than showing
+a blank pane; `KB_FORCE=1` starts it anyway.
 
 ## Install
 
 ### macOS
 
 ```sh
-brew install --cask google-chrome                     # if you don't have Chrome
-cargo install --git https://github.com/graiz/kittybrowser   # puts kb in ~/.cargo/bin
+brew install --cask google-chrome      # if you don't have Chrome
+curl -fsSL https://raw.githubusercontent.com/graiz/kittybrowser/main/install.sh | sh
 kb https://example.com
 ```
 
@@ -76,7 +86,7 @@ On a non-retina display, start it with `kb --scale 1`.
 Install Chrome or Chromium from your distribution or google.com/chrome, then:
 
 ```sh
-cargo install --git https://github.com/graiz/kittybrowser
+curl -fsSL https://raw.githubusercontent.com/graiz/kittybrowser/main/install.sh | sh
 kb --scale 2 https://example.com    # --scale 2 on a HiDPI screen; the default is 1
 ```
 
@@ -102,7 +112,7 @@ Windows). This is untested.
 
 ### Updating
 
-Run the same `cargo install` again (add `--force` if it says kb is already
+Run the install script again, or the same `cargo install` (add `--force` if it says kb is already
 installed). If you use the agent skill, run `kb skill install` afterwards so
 it matches the new version.
 
@@ -111,7 +121,8 @@ it matches the new version.
 ```sh
 kb skill remove                 # if you installed the agent skill
 kb mcp off                      # if you turned on the MCP server
-cargo uninstall kittybrowser
+rm ~/.local/bin/kb              # if you used the install script
+cargo uninstall kittybrowser    # if you used cargo
 rm -rf ~/.kittybrowser          # history, profiles and cookies
 ```
 
@@ -234,9 +245,13 @@ it's worth knowing before you turn on the MCP server. See
 | `KB_CHROME_ARGS` | Extra flags for Chrome, separated by spaces |
 | `KB_TRANSFER=pty` | Always send frames through the terminal, never by file |
 | `KB_TRANSFER=png` | Through the terminal, and each frame whole as a PNG: for a terminal that shows kb's page broken over ssh |
+| `KB_FORCE` | Start even in a terminal kb thinks can't draw it |
 | `KB_LOG` | A file to append diagnostics to (sizes, frames, clicks) |
 
 ## Troubleshooting
+
+Start with `kb doctor`: it checks the terminal, tmux, Chrome and kb's data
+folder, and prints what to fix.
 
 - **Over ssh:** kb works, drawing through the terminal and sending only
   what moved or changed: a scroll step is a few KB. OpenSSH 10 and later

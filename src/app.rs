@@ -263,6 +263,10 @@ struct App {
 }
 
 pub fn run(options: Options) -> Result<(), String> {
+    // Both are checked before the terminal is touched, so the reason is
+    // printed plainly instead of behind a blank pane.
+    crate::doctor::refuse_unsupported_terminal()?;
+    crate::doctor::browser().map_err(|why| format!("{why}\nkb doctor checks your setup."))?;
     if term::draws_graphics() == Some(false) {
         return Err(no_graphics());
     }

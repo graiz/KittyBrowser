@@ -29,6 +29,15 @@ fn enabled() -> bool {
     switch().is_ok_and(|path| path.exists())
 }
 
+/// "on" or "off".
+pub fn status() -> &'static str {
+    if enabled() {
+        "on"
+    } else {
+        "off"
+    }
+}
+
 /// Run `kb mcp` with the words after it. Returns the exit status.
 pub fn run(words: &[String]) -> i32 {
     let result = match words.first().map(String::as_str) {
@@ -43,7 +52,7 @@ pub fn run(words: &[String]) -> i32 {
             println!("kb's MCP server is off.");
         }),
         Some("status") => {
-            println!("kb's MCP server is {}.", if enabled() { "on" } else { "off" });
+            println!("kb's MCP server is {}.", status());
             Ok(())
         }
         Some("serve") => serve(),
