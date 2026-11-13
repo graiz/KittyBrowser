@@ -1,7 +1,9 @@
 //! Everything that touches the terminal.
 
+pub mod delta;
 pub mod graphics;
 pub mod input;
+pub mod layers;
 pub mod size;
 
 use std::io::{self, Write};

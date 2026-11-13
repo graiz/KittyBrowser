@@ -69,9 +69,11 @@ There are two ways to send a frame:
   terminal reads the file and deletes it. At startup kb asks whether the
   terminal will do this (`a=q` with a one-pixel file); a terminal on another
   machine can't see the file and says no.
-- **Through the pty.** The base64 PNG is passed on as Chrome sent it, never
-  decoded, in 4096-byte chunks (`f=100`). This works everywhere and is what
-  kb uses until the terminal has said yes to files.
+- **Through the pty.** The data goes inside the escapes, in 4096-byte
+  chunks. This works everywhere, over ssh too, and is what kb uses until the
+  terminal has said yes to files. Only what moved or changed is sent (see
+  "Over a network" below); the base64 PNG as Chrome sent it (`f=100`) is
+  the fallback when a frame can't be drawn that way.
 
 What Rex accepts, found by querying it: raw pixels directly, raw pixels with
 zlib, and raw pixels from a file in a temporary directory. It refuses PNG
@@ -99,6 +101,54 @@ whole page as tiles took 89 ms a step against 72. A viewport is rounded up
 to cover the cells, and the extra pixel is cropped, so tiles and page line
 up exactly. A fixed viewport (`kb ctl viewport`) is scaled to fit and so is
 always sent whole.
+
+**Over a network** (`term::layers`). When the terminal can't read files,
+which is always the case over ssh, every byte crosses the link: a whole
+2736x1666 frame is about 1.1 MB, and resending it for each scroll step or
+keystroke cost 50 to 70 ms on a LAN. So each frame is decoded and compared
+with the one on screen:
+
+- **What moved.** The frame is cut into columns a cell wide, and rows that
+  occur once in a column vote on how far it moved. Neighbouring columns that
+  moved alike become one region, so a sidebar that stays put and an article
+  that scrolls are each found. Images already in the terminal are placed
+  again, shifted, with a source rectangle and a pixel offset inside the cell,
+  and only the newly exposed rows are sent.
+- **What changed.** Whatever still differs (a caret, a typed word, a sticky
+  header) is sent as small rectangles of raw pixels compressed with zlib
+  (`f=24,o=z`, level 3, on a few threads), laid on top with a higher z.
+- **What came back.** Images that scroll off are kept for a while, two pages'
+  worth, and kb keeps their rows' hashes; scrolling back places them again
+  instead of sending them.
+- **Starting again.** When most of the page changed, or placements pile up,
+  the whole frame is sent and the layers are dropped. Re-placements ask the
+  terminal to report errors (`q=1`); if it says it no longer has an image,
+  everything is drawn again.
+
+Measured with `kb bench` over ssh on a LAN (Ghostty, 171x50 cells, frames
+2736x1666, Wikipedia), median milliseconds per step:
+
+| Frames sent as | Chrome | kb | Terminal | Total | KB sent |
+| --- | --- | --- | --- | --- | --- |
+| Scroll, PNG through the pty | 78 | 0 | 77 | 155 | 1154 |
+| Scroll, moved layers | 75 | 12 | 22 | 109 | 5 |
+| Typing, PNG through the pty | 44 | 0 | 72 | 110 | 1169 |
+| Typing, moved layers | 47 | 9 | 17 | 72 | 1 to 3 |
+
+What's left is Chrome's capture, and ssh: OpenSSH 10 holds back small
+packets on a 20 ms clock (`ObscureKeystrokeTiming`), which the terminal
+column includes. Also tried and left out: lossy frames while scrolling
+(Chrome sending a third of the size, 256 colours, sharpened when still: 76
+ms to show, but soft text for a third of a second), JPEG from Chrome,
+`captureScreenshot`, and `--disable-frame-rate-limit` (halves Chrome's time,
+but animated pages then take three cores).
+
+**Headless window.** On a Mac whose display is asleep, Chrome crops
+screencast frames to its headless window, which can be as small as 500x256,
+whatever viewport `Emulation.setDeviceMetricsOverride` sets. kb compares
+each frame's size in its metadata with the viewport it asked for and, when
+they differ, resizes the window by the difference
+(`Browser.setWindowBounds`). Where frames already match, nothing is sent.
 
 **Pacing** (`App::frame_gap`). Chrome sends a frame, then waits for it to be
 acknowledged; kb decides when. While the page is in use (a key, the mouse,
@@ -275,6 +325,8 @@ cause of the clicks that don't arrive.
 - Should instances share one Chrome, so they share logins?
 - Does replacing the image by id flicker in any terminal?
 - Is a persistent background Chrome acceptable, to hide its startup cost?
-- Over SSH or a remote Rex host only the pty path works. Is it usable?
+- Over ssh, layers have been checked in Ghostty and Rex. Do kitty and
+  WezTerm keep images after their last placement is deleted, as layers
+  expect?
 - What does "super fast" mean in numbers? Proposed: under 300 ms to first
   paint with a warm engine, under 30 ms from scroll key to new frame.

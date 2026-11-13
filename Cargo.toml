@@ -5,7 +5,6 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/graiz/kittybrowser"
 readme = "README.md"
-homepage = "https://github.com/graiz/kittybrowser"
 keywords = ["browser", "terminal", "kitty", "chrome", "agents"]
 categories = ["command-line-utilities", "web-programming"]
 authors = ["Gregory Raiz"]
@@ -17,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 libc = "0.2"
+miniz_oxide = "0.8"
 png = "0.18"
 serde_json = "1"
 zune-jpeg = "0.5"

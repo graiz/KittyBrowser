@@ -15,11 +15,14 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "\
-usage: kb bench [--steps N] [--out FILE] [--scale N] [URL]
+usage: kb bench [--steps N] [--out FILE] [--scale N] [--scene scroll|type] [--modes WORD] [URL]
 
 Run it in the pane to measure. Loads the page (it needs to be a few screens
-tall), scrolls it N times (default 30) for each way of sending frames, and
-prints a table of median times in milliseconds. --out also writes the table
+tall), changes it N times (default 30) for each way of sending frames, and
+prints a table of median times in milliseconds. --scene scroll (the default)
+scrolls the page; --scene type types into a box on it, where little changes
+from one frame to the next. --modes keeps only the ways whose name contains
+WORD (pty for the ones that work over ssh). --out also writes the table
 to a file.";
 
 const DEFAULT_URL: &str = "https://en.wikipedia.org/wiki/Web_browser";
@@ -39,6 +42,12 @@ enum Transfer {
     /// Decoded here, and only what changed left in files: what kb
     /// itself does when the terminal reads files.
     Tiles,
+    /// Decoded here, and only the rectangles that changed sent through
+    /// the pty, or Chrome's PNG when nearly all of the page did.
+    Delta,
+    /// Decoded here; what the terminal already has is moved where the
+    /// page scrolled it, and only the rest sent through the pty.
+    Layers,
 }
 
 struct Mode {
@@ -49,6 +58,8 @@ struct Mode {
 
 const MODES: &[Mode] = &[
     Mode { name: "png through the pty", source: Source::Png, transfer: Transfer::Pty },
+    Mode { name: "png, changed rects (ptyA)", source: Source::Png, transfer: Transfer::Delta },
+    Mode { name: "png, moved layers, ptyB", source: Source::Png, transfer: Transfer::Layers },
     Mode { name: "png, pixels by file", source: Source::Png, transfer: Transfer::File },
     Mode { name: "png, changed tiles by file", source: Source::Png, transfer: Transfer::Tiles },
     Mode { name: "jpeg 100, pixels by file", source: Source::Jpeg(100), transfer: Transfer::File },
@@ -61,12 +72,25 @@ enum Msg {
     Term(Vec<u8>),
 }
 
-/// One scroll step, in milliseconds, and the size of the frame Chrome sent.
+#[derive(Clone, Copy, PartialEq)]
+enum Scene {
+    Scroll,
+    Type,
+}
+
+/// A box for `Scene::Type` to type into, over the page's top left.
+const TYPING_BOX: &str = "(() => { const box = document.createElement('textarea'); \
+    box.style.cssText = 'position:fixed;left:20px;top:20px;width:420px;height:160px;z-index:2147483647;font:16px sans-serif'; \
+    document.body.append(box); box.focus(); })()";
+
+/// One step, in milliseconds, the size of the frame Chrome sent, and how
+/// much went to the terminal.
 struct Sample {
     chrome: f64,
     prepare: f64,
     terminal: f64,
     bytes: usize,
+    wire: usize,
 }
 
 struct Bench {
@@ -74,6 +98,8 @@ struct Bench {
     rx: mpsc::Receiver<Msg>,
     /// What the terminal has sent that hasn't been looked at.
     replies: Vec<u8>,
+    /// Errors the terminal reported for images.
+    errors: usize,
 }
 
 impl Bench {
@@ -131,7 +157,8 @@ impl Bench {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(at) = self.replies.windows(REPLY.len()).position(|w| w == REPLY) {
-                self.replies.drain(..at + REPLY.len());
+                let read: Vec<u8> = self.replies.drain(..at + REPLY.len()).collect();
+                self.errors += read.windows(3).filter(|w| w == b"\x1b_G").count();
                 return Ok(());
             }
             match self.next(deadline) {
@@ -164,7 +191,7 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     values.get(values.len() / 2).copied().unwrap_or(f64::NAN)
 }
 
-fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
+fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>) -> Result<String, String> {
     let window = settled_window()?;
     let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
         ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)
@@ -175,7 +202,8 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
     let (width_px, height_px) = (cols as u32 * cell_w, rows as u32 * cell_h);
     let viewport = ((width_px as f64 / scale).ceil() as u32, (height_px as f64 / scale).ceil() as u32);
 
-    let profile = crate::data_dir()?.join("profile-bench");
+    // Its own profile, so that benches can run side by side.
+    let profile = crate::data_dir()?.join(format!("profile-bench-{}", std::process::id()));
     std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
     let (chrome, mut receiver) = Chrome::launch(&profile, scale, false)?;
     let (tx, rx) = mpsc::channel();
@@ -198,20 +226,35 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
         }
     });
 
-    let mut bench = Bench { chrome, rx, replies: Vec::new() };
+    let mut bench = Bench { chrome, rx, replies: Vec::new(), errors: 0 };
     bench.chrome.resize(viewport.0, viewport.1, scale);
     bench.chrome.navigate(url);
     bench.loaded(Duration::from_secs(30))?;
+    if scene == Scene::Type {
+        bench.chrome.evaluate(TYPING_BOX);
+    }
 
     let mut report = format!(
-        "kb bench: {url}\npane {}x{} cells, frames {width_px}x{height_px} pixels, {steps} scroll steps each, times in ms (median)\n\n\
-         {:<26} {:>7} {:>8} {:>9} {:>7} {:>6} {:>9}\n",
-        window.cols, window.rows, "frames sent as", "chrome", "prepare", "terminal", "total", "fps", "frame KB"
+        "kb bench: {url}\npane {}x{} cells, frames {width_px}x{height_px} pixels, {steps} {} steps each, times in ms (median)\n\n\
+         {:<26} {:>7} {:>8} {:>9} {:>7} {:>6} {:>9} {:>8}\n",
+        window.cols,
+        window.rows,
+        if scene == Scene::Type { "typing" } else { "scroll" },
+        "frames sent as",
+        "chrome",
+        "prepare",
+        "terminal",
+        "total",
+        "fps",
+        "frame KB",
+        "wire KB"
     );
     let (x, y) = (viewport.0 as f64 / 2.0, viewport.1 as f64 / 2.0);
-    for mode in MODES {
+    for mode in MODES.iter().filter(|mode| modes.is_none_or(|word| mode.name.contains(word))) {
         bench.chrome.stop_screencast();
-        bench.chrome.evaluate("scrollTo(0, 0)");
+        if scene == Scene::Scroll {
+            bench.chrome.evaluate("scrollTo(0, 0)");
+        }
         match mode.source {
             Source::Png => bench.chrome.start_screencast(),
             Source::Jpeg(quality) => bench.chrome.start_screencast_jpeg(quality),
@@ -220,22 +263,62 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
 
         term::write(graphics::DELETE);
         let mut tiles = graphics::Tiles::default();
+        let mut delta = term::delta::Delta::default();
+        let mut layers = crate::term::layers::Layers::default();
+        let mut sent = Vec::new();
         let mut samples = Vec::new();
+        bench.errors = 0;
         let mut missed = 0;
+        let mut odd = Vec::new();
+        let mut last = None;
         for step in 0..steps {
-            // Down ten steps, back up ten, so the page never runs out.
-            let dy = if (step / 10) % 2 == 0 { 240.0 } else { -240.0 };
             let start = Instant::now();
-            bench.chrome.wheel(x, y, 0.0, dy, 0);
+            match scene {
+                Scene::Scroll => {
+                    // Down ten steps, back up ten, so the page never runs out.
+                    let dy = if (step / 10) % 2 == 0 { 240.0 } else { -240.0 };
+                    bench.chrome.wheel(x, y, 0.0, dy, 0);
+                }
+                Scene::Type => bench.chrome.insert_text(if step % 8 == 7 { "\n" } else { "kb " }),
+            }
             let Some(data) = bench.frame(Duration::from_secs(2))? else {
                 missed += 1;
                 continue;
             };
             let got = Instant::now();
+            // KB_BENCH_DUMP=DIR keeps each mode's last frame, to see what Chrome sent.
+            if let Some(dir) = std::env::var_os("KB_BENCH_DUMP") {
+                let name = format!("{}-{step}.png", mode.name.replace(' ', "-"));
+                let _ = std::fs::write(
+                    std::path::Path::new(&dir).join(name),
+                    crate::base64::decode(&data).unwrap_or_default(),
+                );
+            }
 
             let mut out = b"\x1b[2;1H".to_vec();
             match mode.transfer {
                 Transfer::Pty => graphics::put_png(&mut out, &data, cols, rows),
+                Transfer::Delta => {
+                    if delta.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2).is_none() {
+                        // A frame that doesn't line up with the cells goes whole.
+                        delta.forget();
+                        out.extend_from_slice(graphics::DELETE);
+                        graphics::put_png(&mut out, &data, cols, rows);
+                        odd.push(graphics::png_size(&data));
+                    }
+                }
+                Transfer::Layers => {
+                    match layers.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2) {
+                        Some(what) => sent.push(what),
+                        None => {
+                            // What the app would do: the frame as it came.
+                            layers.forget();
+                            out.extend_from_slice(graphics::DELETE);
+                            graphics::put_png(&mut out, &data, cols, rows);
+                            odd.push(graphics::png_size(&data));
+                        }
+                    }
+                }
                 Transfer::Tiles => {
                     let bytes = crate::base64::decode(&data).ok_or("Chrome sent a damaged frame")?;
                     let pixels = graphics::decode_png(&bytes).ok_or("couldn't decode a frame")?;
@@ -256,9 +339,12 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
                     graphics::put_file(&mut out, &path, &pixels, cols, rows);
                 }
             }
+            let wire = out.len();
             out.extend_from_slice(b"\x1b[5n");
             let ready = Instant::now();
             term::write(&out);
+            // While the terminal reads it, finish decoding a page sent whole.
+            delta.finish();
             bench.answered(Duration::from_secs(10))?;
             let done = Instant::now();
 
@@ -268,9 +354,20 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
                 prepare: ms(got, ready),
                 terminal: ms(ready, done),
                 bytes: data.len() * 3 / 4,
+                wire,
             });
             // A step can animate over several frames; let the rest pass.
             bench.settle(Duration::from_millis(80))?;
+            last = Some(data);
+        }
+        // To check what the terminal shows: the last frame drawn, saved
+        // as Chrome sent it, and held on screen for a screenshot.
+        if let (Some(secs), Some(data)) = (std::env::var("KB_BENCH_HOLD").ok().and_then(|s| s.parse().ok()), &last) {
+            let name = mode.name.replace([' ', ',', '(', ')'], "_");
+            let _ = std::fs::write(format!("/tmp/kbhold-{name}.png"), crate::base64::decode(data).unwrap_or_default());
+            let _ = std::fs::write("/tmp/kbhold-ready", &name);
+            std::thread::sleep(Duration::from_secs(secs));
+            let _ = std::fs::remove_file("/tmp/kbhold-ready");
         }
 
         if samples.is_empty() {
@@ -282,21 +379,42 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
         let terminal = median(samples.iter().map(|s| s.terminal));
         let total = median(samples.iter().map(|s| s.chrome + s.prepare + s.terminal));
         let size = median(samples.iter().map(|s| s.bytes as f64)) / 1024.0;
+        let wire = median(samples.iter().map(|s| s.wire as f64)) / 1024.0;
         report.push_str(&format!(
-            "{:<26} {chrome:>7.1} {prepare:>8.1} {terminal:>9.1} {total:>7.1} {:>6.0} {size:>9.0}",
+            "{:<26} {chrome:>7.1} {prepare:>8.1} {terminal:>9.1} {total:>7.1} {:>6.0} {size:>9.0} {wire:>8.0}",
             mode.name,
             1000.0 / total
         ));
+        if bench.errors > 0 {
+            report.push_str(&format!("   ({} graphics errors from the terminal)", bench.errors));
+        }
+        if !odd.is_empty() {
+            report.push_str(&format!("   ({} frames didn't fit the cells: {:?})", odd.len(), &odd[..odd.len().min(3)]));
+        }
         if missed > 0 {
             report.push_str(&format!("   ({missed} steps gave no frame)"));
         }
         report.push('\n');
+        if !sent.is_empty() {
+            use crate::term::layers::Sent;
+            let whole = sent.iter().filter(|s| matches!(s, Sent::Whole(_))).count();
+            let shifts: Vec<String> = sent
+                .iter()
+                .map(|s| match s {
+                    Sent::Whole(why) => format!("W:{why:?}"),
+                    Sent::Strips { shift, strips } => format!("{shift}/{strips}"),
+                })
+                .collect();
+            report.push_str(&format!("    {whole} whole; shift/strips: {}\n", shifts.join(" ")));
+        }
     }
     report.push_str(
-        "\nchrome: from the scroll to the frame arriving. prepare: decoding and writing the file.\n\
-         terminal: from sending the frame to the terminal having read it.\n",
+        "\nchrome: from the change to the frame arriving. prepare: decoding and writing the file.\n\
+         terminal: from sending the frame to the terminal having read it. wire: bytes sent to\n\
+         the terminal, which is what crosses the network over ssh.\n",
     );
     bench.chrome.close();
+    let _ = std::fs::remove_dir_all(&profile);
     Ok(report)
 }
 
@@ -306,6 +424,8 @@ pub fn run(words: &[String]) -> i32 {
     let mut steps = 30;
     let mut out = None;
     let mut scale = if cfg!(target_os = "macos") { 2.0 } else { 1.0 };
+    let mut scene = Scene::Scroll;
+    let mut modes = None;
     let mut args = words.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -324,6 +444,21 @@ pub fn run(words: &[String]) -> i32 {
                 Some(n) => scale = n,
                 None => {
                     eprintln!("kb bench: --scale needs a positive number\n{USAGE}");
+                    return 2;
+                }
+            },
+            "--scene" => match args.next().map(String::as_str) {
+                Some("scroll") => scene = Scene::Scroll,
+                Some("type") => scene = Scene::Type,
+                _ => {
+                    eprintln!("kb bench: --scene is scroll or type\n{USAGE}");
+                    return 2;
+                }
+            },
+            "--modes" => match args.next() {
+                Some(word) => modes = Some(word.clone()),
+                None => {
+                    eprintln!("kb bench: --modes needs a word\n{USAGE}");
                     return 2;
                 }
             },
@@ -348,7 +483,7 @@ pub fn run(words: &[String]) -> i32 {
         eprintln!("kb bench: {error}");
         return 1;
     }
-    let result = measure(&url, steps, scale);
+    let result = measure(&url, steps, scale, scene, modes.as_deref());
     term::leave();
     match result {
         Ok(report) => {

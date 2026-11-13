@@ -60,6 +60,7 @@ name = "kittybrowser"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "miniz_oxide 0.8.9",
  "png",
  "serde_json",
  "zune-jpeg",

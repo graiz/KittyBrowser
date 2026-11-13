@@ -87,6 +87,26 @@ pub struct Chrome {
     profile: PathBuf,
     /// Whether Chrome also listens on a local port for DevTools.
     devtools: bool,
+    window: Option<Window>,
+    /// The viewport asked for, in CSS pixels.
+    viewport: Option<(u32, u32)>,
+}
+
+/// Chrome's headless window. Frames are usually the size of the viewport
+/// set by `resize`, but some Chromes (seen on a Mac whose display was
+/// asleep) crop them to this window instead, which can be far smaller, so
+/// it is sized to fit.
+struct Window {
+    id: u64,
+    /// Its size as last set, in CSS pixels.
+    width: i64,
+    height: i64,
+    /// Whether it has been resized to fit frames, after which it follows
+    /// the viewport.
+    steered: bool,
+    /// The size, in CSS pixels, of frames from before the last change,
+    /// which are no measure of the window.
+    stale: Option<(i64, i64)>,
 }
 
 /// Whether `url` is a file or a server on this machine or network: a page
@@ -265,6 +285,19 @@ impl Chrome {
             call(&mut tx, &mut rx, "Target.attachToTarget", json!({"targetId": target, "flatten": true}), None)?;
         let session = attached["sessionId"].as_str().ok_or("Chrome gave no session")?.to_owned();
         let s = Some(session.as_str());
+        // The window holding the page, and its size, for `fit_window`.
+        let window = call(&mut tx, &mut rx, "Browser.getWindowForTarget", json!({"targetId": target}), None)
+            .ok()
+            .and_then(|reply| {
+                let bounds = &reply["bounds"];
+                Some(Window {
+                    id: reply["windowId"].as_u64()?,
+                    width: bounds["width"].as_u64()? as i64,
+                    height: bounds["height"].as_u64()? as i64,
+                    steered: false,
+                    stale: None,
+                })
+            });
 
         call(&mut tx, &mut rx, "Page.enable", json!({}), s)?;
         // Console, log and network events feed `kb ctl console` and `network`.
@@ -298,6 +331,8 @@ impl Chrome {
             binary,
             profile: profile.to_owned(),
             devtools,
+            window,
+            viewport: None,
         };
         Ok((chrome, rx))
     }
@@ -342,6 +377,7 @@ impl Chrome {
             }
             "Page.screencastFrame" => {
                 // Chrome stops sending frames until each one is acknowledged.
+                self.check_frame_size(&params["metadata"]);
                 let ack = json!({"sessionId": params["sessionId"]});
                 let data = params["data"].take();
                 if self.hold_acks {
@@ -434,6 +470,46 @@ impl Chrome {
             "Emulation.setDeviceMetricsOverride",
             json!({"width": width, "height": height, "deviceScaleFactor": scale, "mobile": false}),
         );
+        let (Some(window), Some((old_width, old_height))) = (&mut self.window, self.viewport.replace((width, height)))
+        else {
+            return;
+        };
+        // Frames still coming at the old size say nothing about the window.
+        window.stale = Some((old_width as i64, old_height as i64));
+        // A window already fitted keeps what it learnt of its edges.
+        if window.steered {
+            self.fit_window(width as i64 - old_width as i64, height as i64 - old_height as i64, None);
+        }
+    }
+
+    /// Grow or shrink the window by this many CSS pixels. `stale` is the
+    /// size of frames that are from before.
+    fn fit_window(&mut self, dw: i64, dh: i64, stale: Option<(i64, i64)>) {
+        let Some(window) = &mut self.window else { return };
+        if dw == 0 && dh == 0 {
+            return;
+        }
+        window.width = (window.width + dw).max(100);
+        window.height = (window.height + dh).max(100);
+        window.steered = true;
+        window.stale = stale.or(window.stale);
+        let bounds = json!({"windowId": window.id, "bounds": {"width": window.width, "height": window.height}});
+        self.send_browser("Browser.setWindowBounds", bounds);
+    }
+
+    /// When a frame isn't the size of the viewport, the window is cropping
+    /// it: make the window larger or smaller by the difference.
+    fn check_frame_size(&mut self, metadata: &Value) {
+        let (Some((width, height)), Some(got_width), Some(got_height)) =
+            (self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
+        else {
+            return;
+        };
+        let got = (got_width.round() as i64, got_height.round() as i64);
+        if self.window.as_ref().is_none_or(|window| window.stale == Some(got)) {
+            return;
+        }
+        self.fit_window(width as i64 - got.0, height as i64 - got.1, Some(got));
     }
 
     /// Evaluate JavaScript in the page and have its value in the reply to

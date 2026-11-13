@@ -209,6 +209,10 @@ struct App {
     last_file: Option<std::path::PathBuf>,
     /// The page as tiles, when it is drawn that way.
     tiles: graphics::Tiles,
+    /// The page through the pty, moved as it scrolls and only what changed
+    /// sent, when it is drawn that way (the terminal can't read files, as
+    /// over ssh).
+    layers: crate::term::layers::Layers,
     /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
     /// so the page reflows as in a desktop browser and stays sharp.
     zoom: f64,
@@ -340,6 +344,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         by_file: false,
         last_file: None,
         tiles: graphics::Tiles::default(),
+        layers: Default::default(),
         zoom: 1.0,
         fit_request: None,
         help: false,
@@ -465,6 +470,12 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 }
                 Msg::Term(Event::Graphics { id, ok }) => {
                     log(format_args!("graphics reply for image {id}: {ok}"));
+                    if !ok && app.layers.lost(id) {
+                        // The terminal dropped an image the page was drawn
+                        // with: start again from the whole page.
+                        term::write(graphics::DELETE);
+                        new_frame = true;
+                    }
                     if id == graphics::FILE_QUERY_ID {
                         app.by_file = ok;
                         // If it said no, it didn't delete the file either.
@@ -655,6 +666,7 @@ impl App {
         term::write(b"\x1b[2J");
         term::write(graphics::DELETE);
         self.tiles.forget();
+        self.layers.forget();
         self.help_rect = None;
     }
 
@@ -938,6 +950,23 @@ impl App {
                 }
                 other => other,
             };
+            // Through the pty, only what changed, when the frame lines up.
+            if pixels.is_none() && !self.by_file && self.fixed.is_none() {
+                match self.layers.draw(&mut out, png, cols, rows, cell, 2) {
+                    Some(sent) => {
+                        log(format_args!("drew {sent:?}"));
+                        drawn = true;
+                    }
+                    None if self.layers.active() => {
+                        out.extend_from_slice(graphics::DELETE);
+                        self.layers.forget();
+                    }
+                    None => {}
+                }
+            } else if self.layers.active() {
+                out.extend_from_slice(graphics::DELETE);
+                self.layers.forget();
+            }
             if !drawn {
                 if self.tiles.active() {
                     out.extend_from_slice(graphics::DELETE);

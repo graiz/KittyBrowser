@@ -260,7 +260,7 @@ impl Tiles {
 
 /// Cut a frame down to `width` x `height`, dropping the right and bottom
 /// edges. `None` if it is smaller than that.
-fn crop(mut pixels: Pixels, width: u32, height: u32, bytes: usize) -> Option<Pixels> {
+pub(super) fn crop(mut pixels: Pixels, width: u32, height: u32, bytes: usize) -> Option<Pixels> {
     if pixels.width < width
         || pixels.height < height
         || pixels.data.len() != pixels.width as usize * pixels.height as usize * bytes
