@@ -855,6 +855,12 @@ fn parse_key(name: &str) -> Option<Key> {
             "pageup" => KeyCode::PageUp,
             "pagedown" => KeyCode::PageDown,
             "space" => KeyCode::Char(' '),
+            name if name.len() > 1
+                && name.starts_with('f')
+                && name[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)) =>
+            {
+                KeyCode::F(name[1..].parse().unwrap_or(1))
+            }
             _ => {
                 let mut chars = part.chars();
                 match (chars.next(), chars.next()) {

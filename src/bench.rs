@@ -177,7 +177,7 @@ fn measure(url: &str, steps: usize, scale: f64) -> Result<String, String> {
 
     let profile = crate::data_dir()?.join("profile-bench");
     std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
-    let (chrome, mut receiver) = Chrome::launch(&profile, scale)?;
+    let (chrome, mut receiver) = Chrome::launch(&profile, scale, false)?;
     let (tx, rx) = mpsc::channel();
     let from_chrome = tx.clone();
     std::thread::spawn(move || {

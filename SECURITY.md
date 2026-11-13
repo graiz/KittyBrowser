@@ -20,8 +20,12 @@ release, with credit if you'd like it.
 - **Profiles.** Cookies and site data are kept in `~/.kittybrowser/profile`
   (and `profile-N` for further kbs), separate from your everyday Chrome. kb
   turns off Chrome's password manager and autofill in them.
-- **Web content** is handled by Chrome, with Chrome's sandbox. kb doesn't
-  open any network port.
+- **DevTools.** Started with `--devtools`, Chrome also listens on a port of
+  127.0.0.1 so F12 can open DevTools. Any program on this machine, run by any
+  user, can connect to that port and control the browser, so it is off
+  unless asked for. Inspect mode (Ctrl+Shift+C) needs no port.
+- **Web content** is handled by Chrome, with Chrome's sandbox. Without
+  `--devtools`, kb doesn't open any network port.
 
 Reports about any of these are in scope, as are ways for a web page to reach
 the control socket or the terminal.

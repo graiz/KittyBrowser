@@ -23,7 +23,43 @@ pub enum PageEvent {
     Frame(String),
     Url(String),
     Loading(bool),
+    /// The page copied this text (the selection, or a copy button's).
+    Copy(String),
 }
+
+/// Run in every page before its own scripts: report what the page copies
+/// through the `__kbCopy` binding, so kb can put it on the terminal's
+/// clipboard. Headless Chrome's own clipboard goes nowhere.
+const COPY_HOOK: &str = r#"(() => {
+  if (window.__kbCopyHooked) return;
+  window.__kbCopyHooked = true;
+  const send = text => { try { if (typeof text === 'string' && text) __kbCopy(text); } catch (e) {} };
+  const selected = () => {
+    const el = document.activeElement;
+    const field = el && (el.localName === 'textarea' ||
+      (el.localName === 'input' && /^(text|search|url|tel|email|number|)$/.test(el.type)));
+    if (field && el.selectionStart !== el.selectionEnd) return el.value.slice(el.selectionStart, el.selectionEnd);
+    return String(getSelection());
+  };
+  // A page that sets the clipboard's text in its copy handler wins over the selection.
+  let pending = null;
+  const setData = DataTransfer.prototype.setData;
+  DataTransfer.prototype.setData = function (type, value) {
+    if (pending && /^text(\/plain)?$/i.test(type)) pending.text = String(value);
+    return setData.call(this, type, value);
+  };
+  for (const type of ['copy', 'cut']) {
+    addEventListener(type, () => {
+      const mine = pending = {text: null, selection: selected()};
+      setTimeout(() => { if (pending === mine) pending = null; send(mine.text ?? mine.selection); });
+    }, true);
+  }
+  // Copy buttons write with the Clipboard API, which headless Chrome may refuse.
+  if (navigator.clipboard) {
+    const write = navigator.clipboard.writeText.bind(navigator.clipboard);
+    navigator.clipboard.writeText = text => { send(String(text)); return write(text).catch(() => {}); };
+  }
+})()"#;
 
 /// Modifier bits as the DevTools protocol defines them.
 pub const ALT: u32 = 1;
@@ -47,6 +83,10 @@ pub struct Chrome {
     /// never acknowledged would stop the frames for good.
     hold_acks: bool,
     unacked: std::collections::VecDeque<Value>,
+    binary: PathBuf,
+    profile: PathBuf,
+    /// Whether Chrome also listens on a local port for DevTools.
+    devtools: bool,
 }
 
 /// Whether `url` is a file or a server on this machine or network: a page
@@ -165,7 +205,9 @@ fn call(
 impl Chrome {
     /// Start Chrome on `profile` and attach to its page. The receiver is
     /// returned separately so a thread can block on it.
-    pub fn launch(profile: &Path, scale: f64) -> Result<(Chrome, Receiver), String> {
+    /// Start Chrome. With `devtools`, it also serves DevTools on a port of
+    /// 127.0.0.1, which any program on this machine can reach.
+    pub fn launch(profile: &Path, scale: f64, devtools: bool) -> Result<(Chrome, Receiver), String> {
         let binary =
             find_binary().ok_or("can't find Chrome; install it or set KB_CHROME to a Chromium-based browser")?;
         let pipe_error = |e| format!("creating a pipe: {e}");
@@ -182,6 +224,11 @@ impl Chrome {
             .arg(format!("--force-device-scale-factor={scale}"))
             .args(["--hide-scrollbars", "--no-first-run", "--no-default-browser-check"])
             .arg("--disable-features=PasswordManagerOnboarding,AutofillServerCommunication")
+            .args(if devtools {
+                &["--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1"][..]
+            } else {
+                &[]
+            })
             // Extra flags to try, separated by spaces.
             .args(std::env::var("KB_CHROME_ARGS").unwrap_or_default().split_whitespace())
             .arg("about:blank")
@@ -235,6 +282,8 @@ impl Chrome {
         // Without this the page believes it is in the background: no caret, no focus styles.
         call(&mut tx, &mut rx, "Emulation.setFocusEmulationEnabled", json!({"enabled": true}), s)?;
         call(&mut tx, &mut rx, "Target.setDiscoverTargets", json!({"discover": true}), None)?;
+        call(&mut tx, &mut rx, "Runtime.addBinding", json!({"name": "__kbCopy"}), s)?;
+        call(&mut tx, &mut rx, "Page.addScriptToEvaluateOnNewDocument", json!({"source": COPY_HOOK}), s)?;
 
         let chrome = Chrome {
             child,
@@ -246,6 +295,9 @@ impl Chrome {
             cache_off: false,
             hold_acks: false,
             unacked: Default::default(),
+            binary,
+            profile: profile.to_owned(),
+            devtools,
         };
         Ok((chrome, rx))
     }
@@ -285,6 +337,9 @@ impl Chrome {
         let method = message["method"].as_str()?.to_owned();
         let params = &mut message["params"];
         match method.as_str() {
+            "Runtime.bindingCalled" if params["name"] == "__kbCopy" => {
+                Some(PageEvent::Copy(params["payload"].as_str()?.to_owned()))
+            }
             "Page.screencastFrame" => {
                 // Chrome stops sending frames until each one is acknowledged.
                 let ack = json!({"sessionId": params["sessionId"]});
@@ -383,6 +438,57 @@ impl Chrome {
 
     /// Evaluate JavaScript in the page and have its value in the reply to
     /// the id returned.
+    /// Tell pages the user prefers a dark or light colour scheme, or with
+    /// `None`, nothing (Chrome's default, light).
+    pub fn color_scheme(&mut self, dark: Option<bool>) {
+        let value = match dark {
+            Some(true) => "dark",
+            Some(false) => "light",
+            None => "",
+        };
+        self.send(
+            "Emulation.setEmulatedMedia",
+            json!({"features": [{"name": "prefers-color-scheme", "value": value}]}),
+        );
+    }
+
+    /// Open Chrome DevTools for this page in the desktop browser. Needs kb
+    /// started with `--devtools`.
+    pub fn open_devtools(&self) -> Result<(), String> {
+        if !self.devtools {
+            return Err("DevTools needs kb started with --devtools".to_owned());
+        }
+        let ports = std::fs::read_to_string(self.profile.join("DevToolsActivePort"))
+            .map_err(|_| "Chrome hasn't opened its DevTools port yet".to_owned())?;
+        let port = ports.lines().next().unwrap_or("").trim();
+        let url = format!(
+            "http://127.0.0.1:{port}/devtools/inspector.html?ws=127.0.0.1:{port}/devtools/page/{}",
+            self.target
+        );
+        // The same browser kb runs, as a desktop app: DevTools is Chrome's.
+        let bundle = self.binary.ancestors().find(|path| path.extension().is_some_and(|e| e == "app"));
+        let mut command = match bundle {
+            Some(app) => {
+                let mut open = Command::new("open");
+                open.arg("-a").arg(app).arg(&url);
+                open
+            }
+            None => {
+                let mut browser = Command::new(&self.binary);
+                browser.arg("--new-window").arg(&url);
+                browser
+            }
+        };
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("opening DevTools: {e}"))?;
+        std::thread::spawn(move || child.wait());
+        Ok(())
+    }
+
     pub fn evaluate_value(&mut self, expression: &str) -> u64 {
         self.request("Runtime.evaluate", json!({"expression": expression, "returnByValue": true}))
     }
@@ -496,6 +602,7 @@ impl Chrome {
             KeyCode::End => ("End".into(), "End".into(), 35, None),
             KeyCode::PageUp => ("PageUp".into(), "PageUp".into(), 33, None),
             KeyCode::PageDown => ("PageDown".into(), "PageDown".into(), 34, None),
+            KeyCode::F(n) => (format!("F{n}"), format!("F{n}"), 111 + n as u32, None),
         };
         let mut down = json!({
             "type": if text.is_some() { "keyDown" } else { "rawKeyDown" },
@@ -505,9 +612,15 @@ impl Chrome {
             down["text"] = json!(text);
             down["unmodifiedText"] = json!(text);
         }
-        // The terminal can't send Cmd, so Ctrl+A stands in for select all.
-        if key.ctrl && key.code == KeyCode::Char('a') {
-            down["commands"] = json!(["selectAll"]);
+        // Editing keys need their command named, as a browser's menu would.
+        let command = match key.code {
+            KeyCode::Char('a') if key.ctrl => Some("selectAll"),
+            KeyCode::Char('c') if key.ctrl => Some("copy"),
+            KeyCode::Char('x') if key.ctrl => Some("cut"),
+            _ => None,
+        };
+        if let Some(command) = command {
+            down["commands"] = json!([command]);
         }
         self.send("Input.dispatchKeyEvent", down);
         self.send(

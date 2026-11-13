@@ -18,6 +18,8 @@ pub enum KeyCode {
     End,
     PageUp,
     PageDown,
+    /// A function key, F1 to F12.
+    F(u8),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -31,6 +33,12 @@ pub struct Key {
     pub cmd: bool,
 }
 
+impl Default for Key {
+    fn default() -> Key {
+        Key::plain(KeyCode::Esc)
+    }
+}
+
 impl Key {
     fn plain(code: KeyCode) -> Key {
         Key { code, ctrl: false, alt: false, shift: false, cmd: false }
@@ -42,6 +50,10 @@ pub enum Button {
     Left,
     Middle,
     Right,
+    /// The extra buttons many mice have, which browsers use to go back and
+    /// forward.
+    Back,
+    Forward,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,6 +97,12 @@ pub enum Event {
     Graphics {
         id: u32,
         ok: bool,
+    },
+    /// Reply to an OSC 10 or 11 query: the terminal's text (10) or
+    /// background (11) colour.
+    Color {
+        slot: u8,
+        rgb: (u8, u8, u8),
     },
 }
 
@@ -152,6 +170,10 @@ impl Parser {
                     b'D' => Some(KeyCode::Left),
                     b'H' => Some(KeyCode::Home),
                     b'F' => Some(KeyCode::End),
+                    b'P' => Some(KeyCode::F(1)),
+                    b'Q' => Some(KeyCode::F(2)),
+                    b'R' => Some(KeyCode::F(3)),
+                    b'S' => Some(KeyCode::F(4)),
                     _ => None,
                 };
                 events.extend(code.map(|code| Event::Key(Key::plain(code))));
@@ -166,6 +188,20 @@ impl Parser {
                     events.extend(id.map(|id| Event::Graphics { id, ok: message == "OK" }));
                 }
                 Some(end + 2)
+            }
+            // A reply to a colour query: ESC ] 11 ; rgb:RRRR/GGGG/BBBB, ended
+            // by BEL or ESC \. Replies start with a digit; anything else is
+            // Alt+] followed by a key.
+            Some(b']') if rest.get(2).is_some_and(u8::is_ascii_digit) || rest.len() == 2 => {
+                let body_end = rest[2..].iter().position(|b| *b == 0x07 || *b == 0x1b)? + 2;
+                let used = match rest[body_end] {
+                    0x07 => body_end + 1,
+                    _ if rest.get(body_end + 1) == Some(&b'\\') => body_end + 2,
+                    _ if rest.len() == body_end + 1 => return None,
+                    _ => body_end + 1,
+                };
+                events.extend(color_reply(std::str::from_utf8(&rest[2..body_end]).unwrap_or("")));
+                Some(used)
             }
             // Esc then a key is how terminals send Alt. Option+arrows often
             // arrive as Esc b / Esc f, the readline word moves.
@@ -214,6 +250,19 @@ fn plain_key(bytes: &[u8]) -> Option<(Option<Key>, usize)> {
     Some((key, 1))
 }
 
+/// Decode `11;rgb:RRRR/GGGG/BBBB`, with one to four hex digits a channel.
+fn color_reply(body: &str) -> Option<Event> {
+    let (slot, value) = body.split_once(';')?;
+    let slot: u8 = slot.parse().ok().filter(|slot| matches!(slot, 10 | 11))?;
+    let mut channels = value.strip_prefix("rgb:")?.split('/').map(|hex| {
+        let max = 16u32.checked_pow(hex.len() as u32)?.checked_sub(1)?;
+        let value = u32::from_str_radix(hex, 16).ok()?;
+        (!hex.is_empty() && hex.len() <= 4).then(|| (value * 255 + max / 2) / max)
+    });
+    let mut next = || channels.next().flatten().map(|c| c as u8);
+    Some(Event::Color { slot, rgb: (next()?, next()?, next()?) })
+}
+
 /// Decode a CSI sequence given what lies between `ESC [` and the final byte.
 fn csi(body: &str, last: u8) -> Option<Event> {
     if let Some(report) = body.strip_prefix('<') {
@@ -258,12 +307,20 @@ fn csi(body: &str, last: u8) -> Option<Event> {
         b'H' => KeyCode::Home,
         b'F' => KeyCode::End,
         b'Z' => KeyCode::BackTab,
+        // F1 to F4 with modifiers, as CSI 1;5P.
+        b'P' => KeyCode::F(1),
+        b'Q' => KeyCode::F(2),
+        b'R' => KeyCode::F(3),
+        b'S' => KeyCode::F(4),
         b'~' => match first {
             1 | 7 => KeyCode::Home,
             4 | 8 => KeyCode::End,
             3 => KeyCode::Delete,
             5 => KeyCode::PageUp,
             6 => KeyCode::PageDown,
+            11..=15 => KeyCode::F(first as u8 - 10),
+            17..=21 => KeyCode::F(first as u8 - 11),
+            23 | 24 => KeyCode::F(first as u8 - 12),
             _ => return None,
         },
         _ => return None,
@@ -277,11 +334,14 @@ fn mouse(report: &str, pressed: bool) -> Option<Event> {
     let bits = numbers.next()??;
     let x = numbers.next()??;
     let y = numbers.next()??;
-    let button = match bits & 3 {
-        0 => Some(Button::Left),
-        1 => Some(Button::Middle),
-        2 => Some(Button::Right),
-        _ => None,
+    let button = match (bits & 128 != 0, bits & 3) {
+        (true, 0) => Some(Button::Back),
+        (true, 1) => Some(Button::Forward),
+        (true, _) => None,
+        (false, 0) => Some(Button::Left),
+        (false, 1) => Some(Button::Middle),
+        (false, 2) => Some(Button::Right),
+        (false, _) => None,
     };
     let (kind, button) = if bits & 64 != 0 {
         let ticks = match bits & 3 {
@@ -340,6 +400,30 @@ mod tests {
     }
 
     #[test]
+    fn function_keys() {
+        assert_eq!(parse(b"\x1bOP\x1b[24~\x1b[15~"), [key(KeyCode::F(1)), key(KeyCode::F(12)), key(KeyCode::F(5))]);
+        let shift_f12 = Key { shift: true, ..Key::plain(KeyCode::F(12)) };
+        assert_eq!(parse(b"\x1b[24;2~"), [Event::Key(shift_f12)]);
+        assert_eq!(parse(b"\x1b[1;5P"), [Event::Key(Key { ctrl: true, ..Key::plain(KeyCode::F(1)) })]);
+    }
+
+    #[test]
+    fn colour_replies() {
+        let reply = |bytes: &[u8]| Parser::default().feed(bytes);
+        assert_eq!(reply(b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\"), [Event::Color { slot: 11, rgb: (30, 30, 46) }]);
+        assert_eq!(reply(b"\x1b]10;rgb:ff/80/00\x07"), [Event::Color { slot: 10, rgb: (255, 128, 0) }]);
+        // Split across reads, then a key.
+        let mut parser = Parser::default();
+        assert_eq!(parser.feed(b"\x1b]11;rgb:00"), []);
+        assert_eq!(
+            parser.feed(b"00/0000/0000\x07x"),
+            [Event::Color { slot: 11, rgb: (0, 0, 0) }, key(KeyCode::Char('x'))]
+        );
+        // Alt+] is still a key.
+        assert_eq!(reply(b"\x1b]a").len(), 2);
+    }
+
+    #[test]
     fn lone_escape_is_the_esc_key() {
         assert_eq!(parse(b"\x1b"), [key(KeyCode::Esc)]);
     }
@@ -359,6 +443,9 @@ mod tests {
         assert_eq!(parse(b"\x1b[<0;12;3m"), [Event::Mouse(Mouse { kind: MouseKind::Release, ..base })]);
         assert_eq!(parse(b"\x1b[<35;12;3M"), [Event::Mouse(Mouse { kind: MouseKind::Move, button: None, ..base })]);
         assert_eq!(parse(b"\x1b[<32;12;3M"), [Event::Mouse(Mouse { kind: MouseKind::Move, ..base })]);
+        assert_eq!(parse(b"\x1b[<128;12;3M"), [Event::Mouse(Mouse { button: Some(Button::Back), ..base })]);
+        let forward_up = Mouse { kind: MouseKind::Release, button: Some(Button::Forward), ..base };
+        assert_eq!(parse(b"\x1b[<129;12;3m"), [Event::Mouse(forward_up)]);
         assert_eq!(
             parse(b"\x1b[<65;12;3M"),
             [Event::Mouse(Mouse { kind: MouseKind::Wheel(0, 1), button: None, ..base })]

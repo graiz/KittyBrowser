@@ -102,12 +102,19 @@ click the address to edit it, and click, drag and scroll the page.
 | Cmd+F or Ctrl+F | Find on the page. Enter and Shift+Enter (or Cmd+G, Shift+Cmd+G) go to the next and previous match; Esc closes |
 | Ctrl+[ and Ctrl+], or Alt+Left and Alt+Right | Back, forward |
 | Cmd+R or Ctrl+R | Reload |
+| Cmd+C or Ctrl+C | Copy the selection (or the address while editing it) to the system clipboard |
+| Ctrl+Shift+C or Cmd+Shift+C | Inspect: hover to outline elements, click one for its selector, size and styles |
+| F12, Ctrl+Shift+I or Cmd+Alt+I | Open Chrome DevTools for the page (start kb with `--devtools`) |
 | Ctrl+= and Ctrl+- | Zoom in and out; the zoom shows at the right of the bar |
 | Ctrl+0 | Zoom to 100%, or out until a page too wide for the pane fits |
 | Ctrl+/ | Help: the keys, and the page, zoom, viewport and pane sizes |
 | Ctrl+Q | Quit |
 
-Every other key goes to the page.
+Every other key goes to the page. The mouse's back and forward buttons go
+back and forward. `kb keys` lists the bindings; change them in
+`~/.kittybrowser/keys`, one per line (`ctrl+shift+i devtools`, or
+`alt+left none` to let the page have a key), and running kbs pick up the
+change at once.
 
 - **Command keys** need a terminal with the kitty keyboard protocol that
   doesn't keep them for itself. In Rex, Cmd+F, Cmd+G and Cmd+R are Rex's own,
@@ -121,6 +128,14 @@ Every other key goes to the page.
 - **Several kbs** can run at once, one per pane, and `kb list` numbers them.
   Chrome won't share a profile, so the second and later ones have their own
   cookies (`profile-2`, ...); history is shared.
+- **Copying** goes through the terminal (OSC 52), so it reaches your
+  clipboard even over SSH. It catches what pages copy themselves, such as a
+  code block's copy button.
+- **Colours:** the bar takes the terminal's colours, and pages are told you
+  prefer dark mode when the terminal's background is dark. `--dark` or
+  `--light` overrides that.
+- **The mouse pointer** changes over links, text and controls, in terminals
+  that support it (kitty, Ghostty).
 - **Zoom** reflows the page as in a desktop browser. Zoomed in, text is a
   little soft, because Chrome renders at 100% and the image is enlarged.
 
@@ -155,7 +170,7 @@ one:
   `--section HEADING`), find, links, tables, images, html, screenshot
   (`--size small|normal|sharp|WIDTH`).
 - **Acting:** click (`--double`, `--at X,Y`), hover, type, select, press,
-  scroll, wait, dialog, throttle.
+  scroll, wait, dialog, throttle, scheme (dark or light mode).
 - **Debugging:** console, network, eval, style (`--why` explains which CSS
   rule won), box, listeners, storage.
 
@@ -178,6 +193,9 @@ it's worth knowing before you turn on the MCP server. See
 | Setting | Does |
 | --- | --- |
 | `--scale N` | Device pixels per CSS pixel: 2 by default on macOS, 1 elsewhere |
+| `--dark`, `--light` | The colour scheme pages are told you prefer; by default, the terminal's |
+| `--devtools` | Serve Chrome DevTools on a port of 127.0.0.1, for F12 (any program on this machine can then reach the browser) |
+| `~/.kittybrowser/keys` | Key bindings; `kb keys` shows the format and what's bound |
 | `KB_CHROME` | The browser to run, if kb doesn't find one |
 | `KB_CHROME_ARGS` | Extra flags for Chrome, separated by spaces |
 | `KB_TRANSFER=pty` | Always send frames through the terminal, never by file |

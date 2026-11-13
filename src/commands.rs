@@ -147,6 +147,11 @@ pub const COMMANDS: &[Command] = &[
         params: &[required("text", "the words to look for"), option("limit", "N", "show at most this many places (default 10)")],
     },
     Command {
+        name: "scheme",
+        help: "Set the colour scheme pages are told the user prefers (prefers-color-scheme), to test a dark mode: dark, light, or auto to follow the terminal's background.",
+        params: &[required("scheme", "dark, light or auto")],
+    },
+    Command {
         name: "throttle",
         help: "Slow the network to test loading states, spinners and timeouts: slow (400 ms round trips, 400 kbit/s), fast (150 ms, 1.6 Mbit/s), offline, or off. Stays until turned off; status shows it.",
         params: &[required("speed", "off, slow, fast or offline")],
@@ -218,7 +223,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "press",
-        help: "Press a key. It goes to whatever has focus (click or type into an element first). Keys: Enter, Tab, Escape, Backspace, Delete, Space, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Home, End, PageUp, PageDown, or one character. Modifiers: Ctrl+, Alt+, Shift+, as in Ctrl+a or Shift+Tab. There is no Cmd or Meta; Ctrl+a selects all. PageDown, PageUp, Home and End scroll the page when no field has focus; arrow keys don't change a <select> (use select).",
+        help: "Press a key. It goes to whatever has focus (click or type into an element first). Keys: Enter, Tab, Escape, Backspace, Delete, Space, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Home, End, PageUp, PageDown, F1 to F12, or one character. Modifiers: Ctrl+, Alt+, Shift+, as in Ctrl+a or Shift+Tab. There is no Cmd or Meta; Ctrl+a selects all. PageDown, PageUp, Home and End scroll the page when no field has focus; arrow keys don't change a <select> (use select).",
         params: &[required("key", "key name")],
     },
     Command {

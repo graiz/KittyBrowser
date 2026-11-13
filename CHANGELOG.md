@@ -6,6 +6,20 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- Copy: Cmd+C or Ctrl+C copies the selection, or the address while editing
+  it, to the system clipboard through the terminal; what pages copy
+  themselves (copy buttons) goes there too.
+- The bar follows the terminal's colours, and pages are told you prefer
+  dark mode when the terminal is dark (`--dark`, `--light`, and
+  `kb ctl scheme` override it).
+- The mouse pointer changes shape over links, text and controls.
+- The mouse's back and forward buttons go back and forward.
+- Key bindings can be changed in `~/.kittybrowser/keys`; `kb keys` lists them.
+- Inspect mode (Ctrl+Shift+C): outline elements under the mouse, click one
+  for its selector, size and styles; the selector is copied.
+- Chrome DevTools on F12, with `kb --devtools`.
+- Function keys reach the page, and `kb ctl press F5` works.
+
 ## 0.1.0
 
 The first version.

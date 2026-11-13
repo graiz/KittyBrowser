@@ -7,6 +7,7 @@ use crate::control::{self, Output, Request};
 use crate::devtools::{Devtools, Page};
 use crate::engine::chrome::{self, Chrome, PageEvent};
 use crate::history::History;
+use crate::keys::{Action, Bindings};
 use crate::term::input::{Button, Event, Key, KeyCode, Mouse, MouseKind, Parser};
 use crate::term::size::{self, Window};
 use crate::term::{self, graphics};
@@ -21,7 +22,123 @@ pub struct Options {
     pub url: Option<String>,
     /// Device pixels per CSS pixel.
     pub scale: f64,
+    /// Serve Chrome DevTools on a local port, for `devtools` (F12).
+    pub devtools: bool,
+    /// Tell pages to use a dark (true) or light colour scheme, rather than
+    /// following the terminal's background.
+    pub dark: Option<bool>,
 }
+
+/// How long a note in the bar stays.
+const NOTICE: Duration = Duration::from_millis(2500);
+
+/// Find the element under a point and the pointer it calls for, as CSS
+/// names it: what the page asks for, or where it says `auto`, a text cursor
+/// over text and fields and an arrow elsewhere.
+const POINTER: &str = "((x, y) => { let e = document.elementFromPoint(x, y); \
+  while (e && e.shadowRoot) { const i = e.shadowRoot.elementFromPoint(x, y); if (!i || i === e) break; e = i; } \
+  if (!e) return 'default'; \
+  const c = getComputedStyle(e).cursor.split(',').pop().trim(); \
+  if (c !== 'auto') return c; \
+  if (e.isContentEditable || e.matches('textarea, input:not([type=button], [type=submit], [type=reset], \
+    [type=checkbox], [type=radio], [type=range], [type=color], [type=file], [type=image])')) return 'text'; \
+  const r = document.caretRangeFromPoint && document.caretRangeFromPoint(x, y); \
+  if (r && r.startContainer.nodeType === 3) { const t = document.createRange(); t.selectNodeContents(r.startContainer); \
+    for (const b of t.getClientRects()) if (x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) return 'text'; } \
+  return 'default'; })";
+
+/// The pointer shapes terminals know, by their CSS names.
+const POINTERS: &[&str] = &[
+    "default",
+    "context-menu",
+    "help",
+    "pointer",
+    "progress",
+    "wait",
+    "cell",
+    "crosshair",
+    "text",
+    "vertical-text",
+    "alias",
+    "copy",
+    "move",
+    "no-drop",
+    "not-allowed",
+    "grab",
+    "grabbing",
+    "e-resize",
+    "n-resize",
+    "ne-resize",
+    "nw-resize",
+    "s-resize",
+    "se-resize",
+    "sw-resize",
+    "w-resize",
+    "ew-resize",
+    "ns-resize",
+    "nesw-resize",
+    "nwse-resize",
+    "col-resize",
+    "row-resize",
+    "all-scroll",
+    "zoom-in",
+    "zoom-out",
+];
+
+/// Inspect mode: outline the element under a point the way Chrome's
+/// inspector does (margin, border, padding and content, with a label), and
+/// remember it as the one a click would pick. Drawn into the page, in a
+/// layer that ignores the mouse.
+const HOVER: &str = "((x, y) => { let e = document.elementFromPoint(x, y); \
+  while (e && e.shadowRoot) { const i = e.shadowRoot.elementFromPoint(x, y); if (!i || i === e) break; e = i; } \
+  let root = document.getElementById('__kb_inspect'); \
+  if (!root) { root = document.createElement('div'); root.id = '__kb_inspect'; \
+    root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647'; \
+    for (let i = 0; i < 5; i++) root.appendChild(document.createElement('div')); \
+    document.documentElement.appendChild(root); } \
+  if (!e || root.contains(e)) return; \
+  globalThis.__kbInspected = e; \
+  const r = e.getBoundingClientRect(), s = getComputedStyle(e), n = v => Math.max(0, parseFloat(v) || 0); \
+  const sides = what => ['Top', 'Right', 'Bottom', 'Left'].map(k => n(s[what.replace('*', k)])); \
+  const m = sides('margin*'), b = sides('border*Width'), p = sides('padding*'); \
+  const [margin, border, padding, content, label] = root.children; \
+  const layer = (el, left, top, w, h, edge, color) => { el.style.cssText = 'position:fixed;box-sizing:content-box;' + \
+    'left:' + left + 'px;top:' + top + 'px;width:' + Math.max(0, w) + 'px;height:' + Math.max(0, h) + 'px;' + \
+    'border-style:solid;border-color:' + color + ';border-width:' + edge.map(v => v + 'px').join(' '); }; \
+  layer(margin, r.left - m[3], r.top - m[0], r.width, r.height, m, 'rgba(246,178,107,.66)'); \
+  layer(border, r.left, r.top, r.width - b[1] - b[3], r.height - b[0] - b[2], b, 'rgba(255,229,153,.66)'); \
+  layer(padding, r.left + b[3], r.top + b[0], r.width - b[1] - b[3] - p[1] - p[3], r.height - b[0] - b[2] - p[0] - p[2], p, 'rgba(147,196,125,.55)'); \
+  layer(content, r.left + b[3] + p[3], r.top + b[0] + p[0], r.width - b[1] - b[3] - p[1] - p[3], r.height - b[0] - b[2] - p[0] - p[2], [0, 0, 0, 0], 'transparent'); \
+  content.style.background = 'rgba(111,168,220,.66)'; \
+  const name = e.localName + (e.id ? '#' + e.id : '') + [...e.classList].slice(0, 3).map(c => '.' + c).join(''); \
+  label.textContent = name + '  ' + Math.round(r.width) + ' × ' + Math.round(r.height); \
+  const top = r.top - m[0] > 24 ? r.top - m[0] - 22 : Math.min(innerHeight - 22, r.bottom + m[2] + 4); \
+  label.style.cssText = 'position:fixed;left:' + Math.max(0, Math.min(r.left, innerWidth - 200)) + 'px;top:' + top + 'px;' + \
+    'background:#202124;color:#e8eaed;font:12px/20px ui-monospace,Menlo,monospace;padding:0 6px;border-radius:3px;' + \
+    'white-space:nowrap;max-width:90vw;overflow:hidden;text-overflow:ellipsis'; })";
+
+/// Take inspect mode's outline off the page.
+const UNHOVER: &str = "document.getElementById('__kb_inspect')?.remove(); delete globalThis.__kbInspected;";
+
+/// Describe the element inspected, as lines for a box: what it is, a
+/// selector for it, its box and its main styles.
+const DESCRIBE: &str = "(function() { const el = this, s = getComputedStyle(el), r = el.getBoundingClientRect(), n = Math.round; \
+  const name = el.localName + (el.id ? '#' + el.id : '') + [...el.classList].map(c => '.' + c).join(''); \
+  const path = []; \
+  for (let e = el; e && e.nodeType === 1; e = e.parentElement) { \
+    if (e.id && document.querySelectorAll('#' + CSS.escape(e.id)).length === 1) { path.unshift('#' + CSS.escape(e.id)); break; } \
+    const same = e.parentElement ? [...e.parentElement.children].filter(c => c.localName === e.localName) : []; \
+    path.unshift(e.localName + (same.length > 1 ? ':nth-of-type(' + (same.indexOf(e) + 1) + ')' : '')); \
+    if (e.localName === 'body') break; } \
+  const text = (el.innerText || el.value || '').replace(/\\s+/g, ' ').trim(); \
+  const lines = ['\\u0002' + name, 'selector  ' + path.join(' > '), \
+    'size      ' + n(r.width) + 'x' + n(r.height) + ' at ' + n(r.left + scrollX) + ',' + n(r.top + scrollY), \
+    'display   ' + s.display + (s.position !== 'static' ? ', position ' + s.position : ''), \
+    'font      ' + s.fontSize + ' ' + s.fontWeight + ' ' + s.fontFamily.split(',')[0], \
+    'color     ' + s.color + ' on ' + s.backgroundColor, \
+    'margin    ' + s.margin, 'padding   ' + s.padding]; \
+  if (text) lines.push('text      ' + (text.length > 60 ? text.slice(0, 60) + '…' : text)); \
+  return {lines, selector: path.join(' > ')}; }).call(globalThis.__kbInspected)";
 
 enum Msg {
     Term(Event),
@@ -118,6 +235,26 @@ struct App {
     /// Mouse buttons held, as a DevTools mask.
     buttons: u32,
     last_press: Option<(Instant, f64, f64, u32)>,
+    bindings: Bindings,
+    /// A note shown at the right of the bar for a moment: "Copied", ...
+    notice: Option<(String, Instant)>,
+    /// The request for the pointer shape under the mouse, and where to ask
+    /// next once it is answered.
+    pointer_request: Option<u64>,
+    pointer_next: Option<(f64, f64)>,
+    pointer: String,
+    /// The terminal's text and background colours, once it has said.
+    term_fg: Option<ui::Rgb>,
+    term_bg: Option<ui::Rgb>,
+    /// The colour scheme pages are told: set with --dark or --light or by
+    /// an agent, or else following the terminal.
+    dark: Option<bool>,
+    /// Whether inspect mode is on, and the request describing the element
+    /// picked.
+    inspecting: bool,
+    describe_request: Option<u64>,
+    /// Lines for the box, in place of the help: an element's details.
+    panel: Option<Vec<String>>,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -173,7 +310,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         }
     });
 
-    let (chrome, mut receiver) = Chrome::launch(profile, options.scale)?;
+    let (chrome, mut receiver) = Chrome::launch(profile, options.scale, options.devtools)?;
     std::thread::spawn(move || {
         while let Ok(Some(message)) = receiver.recv() {
             if tx.send(Msg::Chrome(message)).is_err() {
@@ -216,7 +353,24 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         last_ack: Instant::now(),
         buttons: 0,
         last_press: None,
+        bindings: Bindings::load(crate::data_dir().ok().map(|dir| dir.join("keys"))),
+        notice: None,
+        pointer_request: None,
+        pointer_next: None,
+        pointer: "default".to_owned(),
+        term_fg: None,
+        term_bg: None,
+        dark: options.dark,
+        inspecting: false,
+        describe_request: None,
+        panel: None,
     };
+    if let Some(dark) = options.dark {
+        app.chrome.color_scheme(Some(dark));
+    }
+    if let Some(error) = app.bindings.errors.first() {
+        app.note(&format!("~/.kittybrowser/keys {error}"));
+    }
     app.layout();
     // KB_TRANSFER=pty keeps frames on the pty, should files misbehave.
     if std::env::var("KB_TRANSFER").as_deref() != Ok("pty") {
@@ -270,16 +424,24 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     }
                 }
                 Msg::Term(Event::Key(key)) => {
-                    if key.ctrl && key.code == KeyCode::Char('q') {
-                        quit = Some(Ok(()));
-                        break;
-                    }
                     // Any key closes the help, and does nothing else.
-                    if app.help {
+                    if app.help && app.bindings.action(&key, false) != Some(Action::Quit) {
                         app.close_help();
                         continue;
                     }
-                    app.on_key(key);
+                    if app.on_key(key) {
+                        quit = Some(Ok(()));
+                        break;
+                    }
+                    redraw = true;
+                }
+                Msg::Term(Event::Color { slot, rgb }) => {
+                    log(format_args!("terminal colour {slot}: {rgb:?}"));
+                    match slot {
+                        10 => app.term_fg = Some(rgb),
+                        _ => app.term_bg = Some(rgb),
+                    }
+                    app.follow_terminal_colors();
                     redraw = true;
                 }
                 Msg::Term(Event::Paste(text)) => {
@@ -319,6 +481,10 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 }
                 Msg::Control(request) => {
                     log(format_args!("control: {} {}", request.command, request.args));
+                    if request.command == "scheme" {
+                        let _ = request.reply.send(app.set_scheme(request.args["scheme"].as_str().unwrap_or("")));
+                        continue;
+                    }
                     if request.command == "viewport" {
                         // The one command about the pane rather than the page.
                         let _ = request.reply.send(app.set_viewport(request.args["size"].as_str().unwrap_or("")));
@@ -341,6 +507,12 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         app.fit(message["result"]["result"]["value"].as_f64());
                         new_frame = true;
                         continue;
+                    }
+                    if let Some(id) = message["id"].as_u64() {
+                        if app.reply(id, &message) {
+                            redraw = true;
+                            continue;
+                        }
                     }
                     app.devtools.observe(&message, &mut app.chrome);
                     match app.chrome.handle(message) {
@@ -367,13 +539,21 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                             app.committed |= url != "about:blank";
                             app.history.record(&url);
                             app.url = if url == "about:blank" { String::new() } else { url };
-                            if !app.bar.focused() {
+                            // An empty field waiting for an address gives way to
+                            // a page opened some other way (by an agent, a link).
+                            if app.bar.focused() && app.bar.text().is_empty() && !app.url.is_empty() {
+                                app.bar.blur(&app.url);
+                            } else if !app.bar.focused() {
                                 app.bar.set_text(&app.url);
                             }
                             redraw = true;
                         }
                         Some(PageEvent::Loading(loading)) => {
                             app.loading = loading;
+                            redraw = true;
+                        }
+                        Some(PageEvent::Copy(text)) => {
+                            app.copy(&text);
                             redraw = true;
                         }
                         None => {}
@@ -399,6 +579,18 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             redraw |= app.loading;
             app.history.save_if_due();
             app.devtools.tick(&mut app.chrome);
+            if app.bindings.reload_if_changed() {
+                let note = match app.bindings.errors.first() {
+                    Some(error) => format!("keys {error}"),
+                    None => "Key bindings reloaded".to_owned(),
+                };
+                app.note(&note);
+                redraw = true;
+            }
+            if app.notice.as_ref().is_some_and(|(_, at)| at.elapsed() >= NOTICE) {
+                app.notice = None;
+                redraw = true;
+            }
             if let Some(window) = size::window().filter(|w| *w != app.window) {
                 app.window = window;
                 if window.width_px == 0 {
@@ -554,19 +746,33 @@ impl App {
         let mut lines = Vec::new();
         lines.push(format!("{}kb {}: a browser in your terminal", ui::TITLE_LINE, env!("CARGO_PKG_VERSION")));
         lines.push(String::new());
-        for (keys, does) in [
-            ("Ctrl+L, Cmd+L", "edit the address"),
-            ("Ctrl+F", "find on the page; Enter, Shift+Enter: next, previous"),
-            ("Ctrl+G", "find the next match again"),
-            ("Ctrl+[  Ctrl+]", "back, forward (also Alt+Left, Alt+Right)"),
-            ("Ctrl+R", "reload"),
-            ("Ctrl+=  Ctrl+-", "zoom in, out"),
-            ("Ctrl+0", "zoom to 100%, or out until the page fits"),
-            ("Ctrl+/", "this help"),
-            ("Ctrl+Q", "quit"),
+        // The keys as bound now, the first two of each.
+        let keys = |action: Action| {
+            let all = self.bindings.keys_for(action);
+            all.iter().take(2).cloned().collect::<Vec<_>>().join(", ")
+        };
+        for (action, does) in [
+            (Action::Address, "edit the address"),
+            (Action::Find, "find on the page; Enter, Shift+Enter: next, previous"),
+            (Action::Back, "back (or the mouse's back button)"),
+            (Action::Forward, "forward"),
+            (Action::Reload, "reload"),
+            (Action::Copy, "copy the selection, or the address"),
+            (Action::ZoomIn, "zoom in"),
+            (Action::ZoomOut, "zoom out"),
+            (Action::ZoomReset, "zoom to 100%, or out until the page fits"),
+            (Action::Inspect, "inspect an element"),
+            (Action::Devtools, "Chrome DevTools (start kb with --devtools)"),
+            (Action::Help, "this help"),
+            (Action::Quit, "quit"),
         ] {
-            lines.push(format!("{keys:<17}{does}"));
+            let keys = keys(action);
+            if !keys.is_empty() {
+                lines.push(format!("{keys:<26}{does}"));
+            }
         }
+        lines.push(String::new());
+        lines.push("\tChange keys in ~/.kittybrowser/keys; kb keys lists them.".to_owned());
         let mut info = vec![String::new()];
         let (cell_w, cell_h) = self.cell();
         for (name, value) in [
@@ -623,7 +829,7 @@ impl App {
         if !self.help {
             return;
         }
-        let lines = self.help_lines();
+        let lines = self.panel.clone().unwrap_or_else(|| self.help_lines());
         if let Some(old) = self.help_rect.take() {
             ui::blank(out, old);
         }
@@ -634,6 +840,9 @@ impl App {
 
     fn close_help(&mut self) {
         self.help = false;
+        if self.panel.take().is_some() {
+            self.chrome.evaluate(UNHOVER);
+        }
         if let Some(rect) = self.help_rect.take() {
             let mut out = Vec::new();
             ui::blank(&mut out, rect);
@@ -751,6 +960,12 @@ impl App {
         }
         let cols = self.window.cols as usize;
         let mut badge = String::new();
+        if let Some((note, _)) = &self.notice {
+            badge.push_str(note);
+            badge.push(' ');
+        } else if self.inspecting {
+            badge.push_str("Inspect: click an element, Esc to stop ");
+        }
         if self.loading {
             const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
@@ -762,7 +977,8 @@ impl App {
             }
             badge.push_str(&format!("{:.0}%", self.zoom * 100.0));
         }
-        let badge = (!badge.is_empty()).then_some(badge.as_str());
+        let badge = badge.trim_end();
+        let badge = (!badge.is_empty()).then_some(badge);
         match &mut self.find {
             Some(field) => ui::render_bar(&mut out, field, cols, self.loading, Some("Find"), badge),
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge),
@@ -814,32 +1030,23 @@ impl App {
         }
     }
 
-    fn on_key(&mut self, key: Key) {
+    /// Handle a key. Returns whether to quit.
+    fn on_key(&mut self, key: Key) -> bool {
         let focused = self.bar.focused();
-        // Command where the terminal reports it, Ctrl where it doesn't.
-        let chord = key.ctrl || key.cmd;
+        if self.inspecting && key.code == KeyCode::Esc {
+            self.stop_inspecting();
+            return false;
+        }
+        match self.bindings.action(&key, focused || self.find.is_some()) {
+            Some(Action::Quit) => return true,
+            Some(action) if self.perform(action, &key) => return false,
+            _ => {}
+        }
         match key.code {
-            KeyCode::Char('l') if chord => {
-                self.find = None;
-                self.bar.focus();
-            }
-            KeyCode::Char('f') if chord => self.open_find(),
-            KeyCode::Char('=' | '+') if key.ctrl => self.step_zoom(true),
-            KeyCode::Char('-' | '_') if key.ctrl => self.step_zoom(false),
-            KeyCode::Char('0') if key.ctrl => self.zoom_to_fit(),
-            KeyCode::Char('/' | '?') if key.ctrl => self.help = true,
-            KeyCode::Char('g') if chord && !self.find_text.is_empty() => self.find_in_page(key.shift, false),
-            KeyCode::Char('r') if chord => self.chrome.reload(),
-            // Only with the kitty keyboard protocol; in the legacy
-            // encoding Ctrl+[ is Esc.
-            KeyCode::Char('[') if key.ctrl => self.chrome.back(),
-            KeyCode::Char(']') if key.ctrl => self.chrome.forward(),
             _ if self.find.is_some() => self.find_key(&key),
-            KeyCode::Left if (key.alt || key.cmd) && !focused => self.chrome.back(),
-            KeyCode::Right if (key.alt || key.cmd) && !focused => self.chrome.forward(),
-            // The page hears Command+A as select all; other Command keys
-            // have no meaning there.
-            KeyCode::Char('a') if key.cmd && !focused => self.chrome.key(&Key { ctrl: true, cmd: false, ..key }),
+            // The page hears Command+A and Command+X as select all and cut;
+            // other Command keys have no meaning there.
+            KeyCode::Char('a' | 'x') if key.cmd && !focused => self.chrome.key(&Key { ctrl: true, cmd: false, ..key }),
             _ if key.cmd => {}
             _ if focused => match self.bar.key(&key) {
                 Edit::Changed => {}
@@ -855,6 +1062,159 @@ impl App {
             },
             _ => self.chrome.key(&key),
         }
+        false
+    }
+
+    /// Carry out a bound action. Returns false if it doesn't apply now, so
+    /// the key goes on as if unbound.
+    fn perform(&mut self, action: Action, key: &Key) -> bool {
+        match action {
+            Action::Address => {
+                self.find = None;
+                self.bar.focus();
+            }
+            Action::Find => self.open_find(),
+            Action::FindNext | Action::FindPrevious if self.find_text.is_empty() => return false,
+            Action::FindNext => self.find_in_page(false, false),
+            Action::FindPrevious => self.find_in_page(true, false),
+            Action::Back => self.chrome.back(),
+            Action::Forward => self.chrome.forward(),
+            Action::Reload => self.chrome.reload(),
+            Action::ZoomIn => self.step_zoom(true),
+            Action::ZoomOut => self.step_zoom(false),
+            Action::ZoomReset => self.zoom_to_fit(),
+            Action::Help => self.help = true,
+            Action::Copy => {
+                // The field being edited, or the page: the page reports what
+                // it copies, and kb passes it to the clipboard.
+                let field = match &self.find {
+                    Some(field) => Some(field.text()),
+                    None => self.bar.focused().then(|| self.bar.text()),
+                };
+                match field {
+                    Some(text) => self.copy(&text),
+                    None => self.chrome.key(&Key { code: KeyCode::Char('c'), ctrl: true, cmd: false, ..*key }),
+                }
+            }
+            Action::Inspect if self.inspecting => self.stop_inspecting(),
+            Action::Inspect => {
+                self.close_help();
+                self.inspecting = true;
+            }
+            Action::Devtools => {
+                if let Err(error) = self.chrome.open_devtools() {
+                    self.note(&format!("{error} (Ctrl+Shift+C inspects without it)"));
+                } else {
+                    self.note("DevTools opened in Chrome");
+                }
+            }
+            Action::Quit | Action::None => return false,
+        }
+        true
+    }
+
+    /// Show a short note at the right of the bar.
+    fn note(&mut self, text: &str) {
+        self.notice = Some((text.to_owned(), Instant::now()));
+    }
+
+    /// Put text on the system clipboard, through the terminal.
+    fn copy(&mut self, text: &str) {
+        log(format_args!("copy {} characters", text.chars().count()));
+        if text.is_empty() {
+            self.note("Nothing to copy");
+            return;
+        }
+        term::copy(text);
+        let count = text.chars().count();
+        self.note(&format!("Copied {count} character{}", if count == 1 { "" } else { "s" }));
+    }
+
+    fn stop_inspecting(&mut self) {
+        self.inspecting = false;
+        self.chrome.evaluate(UNHOVER);
+    }
+
+    /// Handle Chrome's reply to a request the app made. Returns whether it
+    /// was one.
+    fn reply(&mut self, id: u64, message: &serde_json::Value) -> bool {
+        if self.pointer_request == Some(id) {
+            self.pointer_request = None;
+            let shape = message["result"]["result"]["value"].as_str().unwrap_or("default");
+            let shape = if POINTERS.contains(&shape) { shape } else { "default" };
+            self.set_pointer(shape);
+            if let Some((x, y)) = self.pointer_next.take() {
+                self.ask_pointer(x, y);
+            }
+            return true;
+        }
+        if self.describe_request == Some(id) {
+            self.describe_request = None;
+            let value = &message["result"]["result"]["value"];
+            let mut lines: Vec<String> =
+                value["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(str::to_owned)).collect();
+            if lines.is_empty() {
+                return true;
+            }
+            if let Some(selector) = value["selector"].as_str() {
+                term::copy(selector);
+            }
+            let again = self.bindings.keys_for(Action::Inspect).into_iter().next().unwrap_or_default();
+            lines.push(String::new());
+            lines.push(format!("\tThe selector is copied. {again} inspects another; any key closes this."));
+            self.panel = Some(lines);
+            self.help = true;
+            return true;
+        }
+        false
+    }
+
+    /// Ask which pointer the page wants at a point, one question at a time.
+    fn ask_pointer(&mut self, x: f64, y: f64) {
+        if self.pointer_request.is_some() {
+            self.pointer_next = Some((x, y));
+            return;
+        }
+        self.pointer_request = Some(self.chrome.evaluate_value(&format!("{POINTER}({x}, {y})")));
+    }
+
+    fn set_pointer(&mut self, shape: &str) {
+        if self.pointer != shape {
+            log(format_args!("pointer {shape}"));
+            self.pointer = shape.to_owned();
+            term::pointer(shape);
+        }
+    }
+
+    /// Match the bar to the terminal, and pages' colour scheme to its
+    /// background, unless one was chosen.
+    fn follow_terminal_colors(&mut self) {
+        let (Some(fg), Some(bg)) = (self.term_fg, self.term_bg) else { return };
+        ui::use_terminal_colors(fg, bg);
+        if self.dark.is_none() {
+            self.chrome.color_scheme(Some(ui::is_dark(bg)));
+        }
+    }
+
+    /// Carry out `kb ctl scheme`: dark, light, or auto (follow the terminal).
+    fn set_scheme(&mut self, scheme: &str) -> Result<Output, String> {
+        self.dark = match scheme {
+            "dark" => Some(true),
+            "light" => Some(false),
+            "auto" => None,
+            other => return Err(format!("scheme takes dark, light or auto, not {other:?}")),
+        };
+        let effective = self.dark.or(self.term_bg.map(ui::is_dark));
+        self.chrome.color_scheme(effective);
+        let said = match (self.dark, effective) {
+            (Some(true), _) => "pages are told the user prefers dark".to_owned(),
+            (Some(false), _) => "pages are told the user prefers light".to_owned(),
+            (None, Some(dark)) => {
+                format!("following the terminal: {}", if dark { "dark" } else { "light" })
+            }
+            (None, None) => "following the terminal, which hasn't said its colours: pages get their default".to_owned(),
+        };
+        Ok(Output::Text(said))
     }
 
     /// Returns whether the top bar needs redrawing.
@@ -875,12 +1235,31 @@ impl App {
         } else {
             ((mouse.x as f64 - 0.5) * cell_w, (mouse.y as f64 - 0.5) * cell_h)
         };
+        // The mouse's back and forward buttons, as in any browser.
+        if mouse.kind == MouseKind::Press {
+            match mouse.button {
+                Some(Button::Back) => return self.perform(Action::Back, &Key::default()),
+                Some(Button::Forward) => return self.perform(Action::Forward, &Key::default()),
+                _ => {}
+            }
+        }
+        if matches!(mouse.button, Some(Button::Back | Button::Forward)) {
+            return false;
+        }
         // A drag that began on the page stays with the page.
         if py < cell_h && self.buttons == 0 {
+            let col = (px / cell_w) as usize + 1;
+            if mouse.kind == MouseKind::Move {
+                let shape = match ui::hit(col, self.window.cols as usize) {
+                    Hit::Address(_) => "text",
+                    Hit::Back | Hit::Forward | Hit::Reload => "pointer",
+                    Hit::Nothing => "default",
+                };
+                self.set_pointer(shape);
+            }
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
                 return false;
             }
-            let col = (px / cell_w) as usize + 1;
             if let Some(field) = &mut self.find {
                 if let Hit::Address(offset) = ui::hit(col, self.window.cols as usize) {
                     field.click(offset);
@@ -916,10 +1295,27 @@ impl App {
             Some(Button::Left) => ("left", 1),
             Some(Button::Right) => ("right", 2),
             Some(Button::Middle) => ("middle", 4),
-            None => ("none", 0),
+            Some(Button::Back | Button::Forward) | None => ("none", 0),
         };
         if mouse.kind != MouseKind::Move {
             log(format_args!("{:?} {name} at page {x:.0},{y:.0}", mouse.kind));
+        }
+        // Inspect mode: the mouse points elements out, and a click picks one
+        // rather than reaching the page. The wheel still scrolls.
+        if self.inspecting && !matches!(mouse.kind, MouseKind::Wheel(..)) {
+            match mouse.kind {
+                MouseKind::Move => {
+                    self.set_pointer("crosshair");
+                    self.chrome.evaluate(&format!("{HOVER}({x}, {y})"));
+                }
+                MouseKind::Press if mouse.button == Some(Button::Left) => {
+                    self.chrome.evaluate(&format!("{HOVER}({x}, {y})"));
+                    self.inspecting = false;
+                    self.describe_request = Some(self.chrome.evaluate_value(DESCRIBE));
+                }
+                _ => {}
+            }
+            return true;
         }
         match mouse.kind {
             MouseKind::Press => {
@@ -945,7 +1341,12 @@ impl App {
                 let clicks = self.last_press.map_or(1, |press| press.3);
                 self.chrome.mouse("mouseReleased", x, y, name, self.buttons, clicks, modifiers);
             }
-            MouseKind::Move => self.chrome.mouse("mouseMoved", x, y, name, self.buttons, 0, modifiers),
+            MouseKind::Move => {
+                self.chrome.mouse("mouseMoved", x, y, name, self.buttons, 0, modifiers);
+                if self.buttons == 0 {
+                    self.ask_pointer(x, y);
+                }
+            }
             MouseKind::Wheel(dx, dy) => {
                 self.chrome.wheel(x, y, dx as f64 * WHEEL_STEP, dy as f64 * WHEEL_STEP, modifiers)
             }

@@ -12,6 +12,7 @@ mod control;
 mod devtools;
 mod engine;
 mod history;
+mod keys;
 mod mcp;
 mod skill;
 mod splash;
@@ -19,22 +20,27 @@ mod term;
 mod ui;
 
 const USAGE: &str = "\
-usage: kb [--scale N] [URL]
+usage: kb [--scale N] [--dark | --light] [--devtools] [URL]
        kb list             the kbs running now, numbered
+       kb keys             the key bindings, and how to change them
        kb ctl <command>    control a running kb; see kb ctl --help
        kb mcp <command>    the MCP server for agents; see kb mcp --help
        kb skill install    teach coding agents to preview their work in kb
        kb bench [URL]      time each way of getting frames to this terminal
 
-  --scale N   device pixels per CSS pixel (default 2 on macOS, 1 elsewhere)
+  --scale N        device pixels per CSS pixel (default 2 on macOS, 1 elsewhere)
+  --dark, --light  tell pages which colour scheme you prefer (default: follow
+                   the terminal's background)
+  --devtools       serve Chrome DevTools on a local port, so F12 can open it;
+                   any program on this machine can then reach the browser
 
-keys:
+keys (kb keys lists them all; Ctrl+/ in kb shows them):
   Cmd+L or Ctrl+L   edit the address
-  Enter / Esc       go to the address / cancel the edit
-  Right / End       accept the suggested completion (Backspace rejects it)
-  Cmd+F or Ctrl+F   find on the page; Enter and Shift+Enter move between matches
-  Ctrl+[ / Ctrl+]   back / forward (also Alt+Left / Alt+Right)
+  Cmd+F or Ctrl+F   find on the page
+  Cmd+C or Ctrl+C   copy the selection
+  Ctrl+[ / Ctrl+]   back / forward (also Alt+Left / Alt+Right, the mouse's buttons)
   Cmd+R or Ctrl+R   reload
+  Ctrl+Shift+C      inspect an element
   Ctrl+Q            quit
 Everything else, and the mouse, goes to the page.";
 
@@ -59,10 +65,19 @@ fn main() {
         Some("list") => std::process::exit(cli::list()),
         Some("bench") => std::process::exit(bench::run(&words[1..])),
         Some("skill") => std::process::exit(skill::run(&words[1..])),
+        Some("keys") => {
+            keys::print(data_dir().ok().map(|dir| dir.join("keys")));
+            return;
+        }
         _ => {}
     }
 
-    let mut options = app::Options { url: None, scale: if cfg!(target_os = "macos") { 2.0 } else { 1.0 } };
+    let mut options = app::Options {
+        url: None,
+        scale: if cfg!(target_os = "macos") { 2.0 } else { 1.0 },
+        devtools: false,
+        dark: None,
+    };
     let mut address = Vec::new();
     let mut args = words.into_iter();
     while let Some(arg) = args.next() {
@@ -75,6 +90,9 @@ fn main() {
                 println!("kb {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
+            "--devtools" => options.devtools = true,
+            "--dark" => options.dark = Some(true),
+            "--light" => options.dark = Some(false),
             "--scale" => {
                 let scale = args.next().and_then(|s| s.parse::<f64>().ok());
                 match scale.filter(|s| s.is_finite() && *s > 0.0) {

@@ -224,9 +224,68 @@ impl AddressBar {
     }
 }
 
-const BAR_STYLE: &str = "\x1b[0;48;5;236;38;5;252m";
-const FIELD_STYLE: &str = "\x1b[0;48;5;238;38;5;250m";
-const FOCUSED_STYLE: &str = "\x1b[0;48;5;240;38;5;231m";
+/// The colours of the bar and of boxes, as escapes. They start as greys from
+/// the 256-colour palette and follow the terminal's own colours once it
+/// says what they are.
+#[derive(Clone)]
+struct Palette {
+    bar: String,
+    field: String,
+    focused: String,
+    box_art: String,
+    box_style: String,
+    box_title: String,
+    box_dim: String,
+}
+
+static PALETTE: std::sync::RwLock<Option<Palette>> = std::sync::RwLock::new(None);
+
+fn palette() -> Palette {
+    PALETTE.read().ok().and_then(|p| p.clone()).unwrap_or_else(|| Palette {
+        bar: "\x1b[0;48;5;236;38;5;252m".into(),
+        field: "\x1b[0;48;5;238;38;5;250m".into(),
+        focused: "\x1b[0;48;5;240;38;5;231m".into(),
+        box_art: "\x1b[0;48;5;236;38;5;141m".into(),
+        box_style: "\x1b[0;48;5;236;38;5;252m".into(),
+        box_title: "\x1b[0;48;5;236;38;5;231;1m".into(),
+        box_dim: "\x1b[0;48;5;236;38;5;245m".into(),
+    })
+}
+
+pub type Rgb = (u8, u8, u8);
+
+/// `t` of the way from `a` to `b`.
+fn mix(a: Rgb, b: Rgb, t: f64) -> Rgb {
+    let channel = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
+    (channel(a.0, b.0), channel(a.1, b.1), channel(a.2, b.2))
+}
+
+/// Whether a background is dark: its relative luminance is under half.
+pub fn is_dark(bg: Rgb) -> bool {
+    (0.2126 * bg.0 as f64 + 0.7152 * bg.1 as f64 + 0.0722 * bg.2 as f64) / 255.0 < 0.5
+}
+
+/// Draw the bar and boxes in the terminal's colours: shades between its
+/// background and its text, so kb looks like part of the terminal.
+pub fn use_terminal_colors(fg: Rgb, bg: Rgb) {
+    let style = |back: Rgb, fore: Rgb, extra: &str| {
+        format!("\x1b[0;48;2;{};{};{};38;2;{};{};{}{extra}m", back.0, back.1, back.2, fore.0, fore.1, fore.2)
+    };
+    let bar = mix(bg, fg, 0.10);
+    let art = if is_dark(bg) { (175, 135, 255) } else { (110, 60, 200) };
+    let palette = Palette {
+        bar: style(bar, mix(bg, fg, 0.85), ""),
+        field: style(mix(bg, fg, 0.18), mix(bg, fg, 0.80), ""),
+        focused: style(mix(bg, fg, 0.27), fg, ""),
+        box_art: style(bar, art, ""),
+        box_style: style(bar, mix(bg, fg, 0.85), ""),
+        box_title: style(bar, fg, ";1"),
+        box_dim: style(bar, mix(bg, fg, 0.55), ""),
+    };
+    if let Ok(mut current) = PALETTE.write() {
+        *current = Some(palette);
+    }
+}
 
 /// Append the escapes that draw the top bar on row 1 and leave the cursor
 /// in the address field (or hidden, if the field isn't focused).
@@ -238,11 +297,6 @@ pub const ART: [&str; 5] = [
     r"         |_|\_\_|\__|\__|\_, |___/_| \___/\_/\_//__/\___|_|",
     r"                         |__/",
 ];
-
-const BOX_ART: &str = "\x1b[0;48;5;236;38;5;141m";
-const BOX_STYLE: &str = "\x1b[0;48;5;236;38;5;252m";
-const BOX_TITLE: &str = "\x1b[0;48;5;236;38;5;231;1m";
-const BOX_DIM: &str = "\x1b[0;48;5;236;38;5;245m";
 
 /// A box of text in the middle of the cells from `top` down: its column,
 /// row, width and height, all in cells and 1-based.
@@ -268,19 +322,21 @@ pub fn render_box(out: &mut Vec<u8>, lines: &[String], cols: u16, rows: u16) -> 
     let text_width = width.saturating_sub(4) as usize;
     let mut s = String::new();
     let rule = "─".repeat(width.saturating_sub(2) as usize);
-    let _ = write!(s, "\x1b[{row};{col}H{BOX_STYLE}╭{rule}╮");
+    let colors = palette();
+    let box_style = colors.box_style.as_str();
+    let _ = write!(s, "\x1b[{row};{col}H{box_style}╭{rule}╮");
     for (n, line) in lines.iter().take(height.saturating_sub(2) as usize).enumerate() {
         let style = match line.chars().next() {
-            Some(ART_LINE) => BOX_ART,
-            Some(TITLE_LINE) => BOX_TITLE,
-            Some('\t') => BOX_DIM,
-            _ => BOX_STYLE,
+            Some(ART_LINE) => colors.box_art.as_str(),
+            Some(TITLE_LINE) => colors.box_title.as_str(),
+            Some('\t') => colors.box_dim.as_str(),
+            _ => box_style,
         };
         let text: String = unmark(line).chars().take(text_width).collect();
         let pad = text_width - text.chars().count();
-        let _ = write!(s, "\x1b[{};{col}H{BOX_STYLE}│ {style}{text}{:pad$}{BOX_STYLE} │", row + 1 + n as u16, "");
+        let _ = write!(s, "\x1b[{};{col}H{box_style}│ {style}{text}{:pad$}{box_style} │", row + 1 + n as u16, "");
     }
-    let _ = write!(s, "\x1b[{};{col}H{BOX_STYLE}╰{rule}╯\x1b[0m", row + height - 1);
+    let _ = write!(s, "\x1b[{};{col}H{box_style}╰{rule}╯\x1b[0m", row + height - 1);
     out.extend_from_slice(s.as_bytes());
     Rect { col, row, width, height }
 }
@@ -314,7 +370,8 @@ pub fn render_bar(
     badge: Option<&str>,
 ) {
     let mut s = String::from("\x1b[1;1H");
-    s.push_str(BAR_STYLE);
+    let colors = palette();
+    s.push_str(&colors.bar);
     if cols < MIN_COLS {
         s.push_str("\x1b[2K\x1b[0m\x1b[?25l");
         out.extend_from_slice(s.as_bytes());
@@ -338,7 +395,7 @@ pub fn render_bar(
     let typed_end = bar.text.len().clamp(window.start, window.end);
     let visible: String = shown[window.start..typed_end].iter().collect();
     let completion: String = shown[typed_end..window.end].iter().collect();
-    s.push_str(if bar.focused { FOCUSED_STYLE } else { FIELD_STYLE });
+    s.push_str(if bar.focused { &colors.focused } else { &colors.field });
     s.push(' ');
     if bar.selected {
         let _ = write!(s, "\x1b[7m{visible}\x1b[27m");
@@ -349,7 +406,7 @@ pub fn render_bar(
         }
     }
     let _ = write!(s, "{:pad$}", "", pad = width - window.len() + 1);
-    s.push_str(BAR_STYLE);
+    s.push_str(&colors.bar);
     s.push(' ');
     if let Some(badge) = badge {
         let _ = write!(s, "{badge} ");

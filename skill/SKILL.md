@@ -90,6 +90,8 @@ When something looks wrong or does nothing:
   --clear` then `k reload` tests a first visit.
 - `k html SELECTOR`, `k eval 'JS'` (wrap declarations in `(() => { ... })()`).
 
+Dark mode: `k scheme dark` (or `light`, or `auto` to follow the terminal).
+
 Slow network (loading states, spinners): `k throttle slow` (or `fast`,
 `offline`), then `k throttle off`.
 
