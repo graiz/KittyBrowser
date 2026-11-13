@@ -42,9 +42,6 @@ enum Transfer {
     /// Decoded here, and only what changed left in files: what kb
     /// itself does when the terminal reads files.
     Tiles,
-    /// Decoded here, and only the rectangles that changed sent through
-    /// the pty, or Chrome's PNG when nearly all of the page did.
-    Delta,
     /// Decoded here; what the terminal already has is moved where the
     /// page scrolled it, and only the rest sent through the pty.
     Layers,
@@ -58,8 +55,7 @@ struct Mode {
 
 const MODES: &[Mode] = &[
     Mode { name: "png through the pty", source: Source::Png, transfer: Transfer::Pty },
-    Mode { name: "png, changed rects (ptyA)", source: Source::Png, transfer: Transfer::Delta },
-    Mode { name: "png, moved layers, ptyB", source: Source::Png, transfer: Transfer::Layers },
+    Mode { name: "png, moved layers through the pty", source: Source::Png, transfer: Transfer::Layers },
     Mode { name: "png, pixels by file", source: Source::Png, transfer: Transfer::File },
     Mode { name: "png, changed tiles by file", source: Source::Png, transfer: Transfer::Tiles },
     Mode { name: "jpeg 100, pixels by file", source: Source::Jpeg(100), transfer: Transfer::File },
@@ -192,20 +188,16 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
 }
 
 fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>) -> Result<String, String> {
-    let window = settled_window()?;
-    let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
-        ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)
-    } else {
-        size::rex_cell().unwrap_or((16, 34))
-    };
-    let (cols, rows) = (window.cols, window.rows.saturating_sub(1).max(1));
-    let (width_px, height_px) = (cols as u32 * cell_w, rows as u32 * cell_h);
-    let viewport = ((width_px as f64 / scale).ceil() as u32, (height_px as f64 / scale).ceil() as u32);
-
     // Its own profile, so that benches can run side by side.
     let profile = crate::data_dir()?.join(format!("profile-bench-{}", std::process::id()));
     std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
-    let (chrome, mut receiver) = Chrome::launch(&profile, scale, false)?;
+    let (chrome, mut receiver) = match Chrome::launch(&profile, scale, false) {
+        Ok(launched) => launched,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&profile);
+            return Err(error);
+        }
+    };
     let (tx, rx) = mpsc::channel();
     let from_chrome = tx.clone();
     std::thread::spawn(move || {
@@ -227,6 +219,32 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
     });
 
     let mut bench = Bench { chrome, rx, replies: Vec::new(), errors: 0 };
+    // Chrome is closed and its profile removed however this ends.
+    let report = run_modes(&mut bench, url, steps, scale, scene, modes);
+    bench.chrome.close();
+    let _ = std::fs::remove_dir_all(&profile);
+    report
+}
+
+/// Load `url`, then change it `steps` times for each mode, and return the
+/// table.
+fn run_modes(
+    bench: &mut Bench,
+    url: &str,
+    steps: usize,
+    scale: f64,
+    scene: Scene,
+    modes: Option<&str>,
+) -> Result<String, String> {
+    let window = settled_window()?;
+    let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
+        ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)
+    } else {
+        size::rex_cell().unwrap_or((16, 34))
+    };
+    let (cols, rows) = (window.cols, window.rows.saturating_sub(1).max(1));
+    let (width_px, height_px) = (cols as u32 * cell_w, rows as u32 * cell_h);
+    let viewport = ((width_px as f64 / scale).ceil() as u32, (height_px as f64 / scale).ceil() as u32);
     bench.chrome.resize(viewport.0, viewport.1, scale);
     bench.chrome.navigate(url);
     bench.loaded(Duration::from_secs(30))?;
@@ -236,7 +254,7 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
 
     let mut report = format!(
         "kb bench: {url}\npane {}x{} cells, frames {width_px}x{height_px} pixels, {steps} {} steps each, times in ms (median)\n\n\
-         {:<26} {:>7} {:>8} {:>9} {:>7} {:>6} {:>9} {:>8}\n",
+         {:<34} {:>7} {:>8} {:>9} {:>7} {:>6} {:>9} {:>8}\n",
         window.cols,
         window.rows,
         if scene == Scene::Type { "typing" } else { "scroll" },
@@ -263,14 +281,11 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
 
         term::write(graphics::DELETE);
         let mut tiles = graphics::Tiles::default();
-        let mut delta = term::delta::Delta::default();
         let mut layers = crate::term::layers::Layers::default();
-        let mut sent = Vec::new();
         let mut samples = Vec::new();
         bench.errors = 0;
         let mut missed = 0;
         let mut odd = Vec::new();
-        let mut last = None;
         for step in 0..steps {
             let start = Instant::now();
             match scene {
@@ -286,37 +301,17 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
                 continue;
             };
             let got = Instant::now();
-            // KB_BENCH_DUMP=DIR keeps each mode's last frame, to see what Chrome sent.
-            if let Some(dir) = std::env::var_os("KB_BENCH_DUMP") {
-                let name = format!("{}-{step}.png", mode.name.replace(' ', "-"));
-                let _ = std::fs::write(
-                    std::path::Path::new(&dir).join(name),
-                    crate::base64::decode(&data).unwrap_or_default(),
-                );
-            }
 
             let mut out = b"\x1b[2;1H".to_vec();
             match mode.transfer {
                 Transfer::Pty => graphics::put_png(&mut out, &data, cols, rows),
-                Transfer::Delta => {
-                    if delta.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2).is_none() {
-                        // A frame that doesn't line up with the cells goes whole.
-                        delta.forget();
+                Transfer::Layers => {
+                    if layers.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2).is_none() {
+                        // What the app would do: the frame as it came.
+                        layers.forget();
                         out.extend_from_slice(graphics::DELETE);
                         graphics::put_png(&mut out, &data, cols, rows);
                         odd.push(graphics::png_size(&data));
-                    }
-                }
-                Transfer::Layers => {
-                    match layers.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2) {
-                        Some(what) => sent.push(what),
-                        None => {
-                            // What the app would do: the frame as it came.
-                            layers.forget();
-                            out.extend_from_slice(graphics::DELETE);
-                            graphics::put_png(&mut out, &data, cols, rows);
-                            odd.push(graphics::png_size(&data));
-                        }
                     }
                 }
                 Transfer::Tiles => {
@@ -343,8 +338,6 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
             out.extend_from_slice(b"\x1b[5n");
             let ready = Instant::now();
             term::write(&out);
-            // While the terminal reads it, finish decoding a page sent whole.
-            delta.finish();
             bench.answered(Duration::from_secs(10))?;
             let done = Instant::now();
 
@@ -358,20 +351,10 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
             });
             // A step can animate over several frames; let the rest pass.
             bench.settle(Duration::from_millis(80))?;
-            last = Some(data);
-        }
-        // To check what the terminal shows: the last frame drawn, saved
-        // as Chrome sent it, and held on screen for a screenshot.
-        if let (Some(secs), Some(data)) = (std::env::var("KB_BENCH_HOLD").ok().and_then(|s| s.parse().ok()), &last) {
-            let name = mode.name.replace([' ', ',', '(', ')'], "_");
-            let _ = std::fs::write(format!("/tmp/kbhold-{name}.png"), crate::base64::decode(data).unwrap_or_default());
-            let _ = std::fs::write("/tmp/kbhold-ready", &name);
-            std::thread::sleep(Duration::from_secs(secs));
-            let _ = std::fs::remove_file("/tmp/kbhold-ready");
         }
 
         if samples.is_empty() {
-            report.push_str(&format!("{:<26} no frames; is the page tall enough to scroll?\n", mode.name));
+            report.push_str(&format!("{:<34} no frames; is the page tall enough to scroll?\n", mode.name));
             continue;
         }
         let chrome = median(samples.iter().map(|s| s.chrome));
@@ -381,7 +364,7 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
         let size = median(samples.iter().map(|s| s.bytes as f64)) / 1024.0;
         let wire = median(samples.iter().map(|s| s.wire as f64)) / 1024.0;
         report.push_str(&format!(
-            "{:<26} {chrome:>7.1} {prepare:>8.1} {terminal:>9.1} {total:>7.1} {:>6.0} {size:>9.0} {wire:>8.0}",
+            "{:<34} {chrome:>7.1} {prepare:>8.1} {terminal:>9.1} {total:>7.1} {:>6.0} {size:>9.0} {wire:>8.0}",
             mode.name,
             1000.0 / total
         ));
@@ -395,26 +378,12 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
             report.push_str(&format!("   ({missed} steps gave no frame)"));
         }
         report.push('\n');
-        if !sent.is_empty() {
-            use crate::term::layers::Sent;
-            let whole = sent.iter().filter(|s| matches!(s, Sent::Whole(_))).count();
-            let shifts: Vec<String> = sent
-                .iter()
-                .map(|s| match s {
-                    Sent::Whole(why) => format!("W:{why:?}"),
-                    Sent::Strips { shift, strips } => format!("{shift}/{strips}"),
-                })
-                .collect();
-            report.push_str(&format!("    {whole} whole; shift/strips: {}\n", shifts.join(" ")));
-        }
     }
     report.push_str(
         "\nchrome: from the change to the frame arriving. prepare: decoding and writing the file.\n\
          terminal: from sending the frame to the terminal having read it. wire: bytes sent to\n\
          the terminal, which is what crosses the network over ssh.\n",
     );
-    bench.chrome.close();
-    let _ = std::fs::remove_dir_all(&profile);
     Ok(report)
 }
 
