@@ -25,7 +25,7 @@ then `kb URL`. A kb that is already running keeps its old code; quit it
 ## Where things are
 
 ```
-src/main.rs            arguments; dispatches kb, kb ctl, kb mcp, kb list, kb skill, kb bench
+src/main.rs            arguments; dispatches kb, kb ctl, kb mcp, kb list, kb skill, kb doctor, kb bench
 src/app.rs             the event loop: terminal input, Chrome's messages, drawing
 src/ui.rs              the top bar: buttons, address field, completion, find
 src/history.rs         visited pages, for address completion
@@ -37,6 +37,7 @@ src/control.rs         the socket that kb ctl and the MCP server talk to; instan
 src/commands.rs        the agent commands: one table drives kb ctl, its help and MCP
 src/devtools.rs        carries the agent commands out, and the page-side scripts
 src/cli.rs             kb ctl and kb list
+src/doctor.rs          kb doctor, and what kb says in a terminal it can't draw in
 src/mcp.rs             kb mcp
 src/skill.rs           kb skill; the skill's text is skill/SKILL.md
 src/bench.rs           kb bench
@@ -76,6 +77,15 @@ src/bench.rs           kb bench
 
 The skill is compiled into the binary; after changing `skill/SKILL.md`, run
 `cargo install --path .` and `kb skill install` to use it.
+
+## Releasing
+
+Bump `version` in Cargo.toml, move the CHANGELOG's Unreleased entries under
+the new version, then tag it: `git tag v0.2.0 && git push --tags`.
+`.github/workflows/release.yml` builds kb for macOS and Linux and attaches
+the archives to a GitHub release, which `install.sh` downloads from. After
+the first release, README.md's Quick start and Install can lead with
+`install.sh` instead of `cargo install`.
 
 ## Safety
 

@@ -1,0 +1,69 @@
+name: Release
+
+# Builds kb for macOS and Linux when a version tag is pushed (git tag v0.2.0
+# && git push --tags), so people can install it without Rust. install.sh
+# downloads from here. Run by hand, it only builds, to check the builds work.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Read-only by default; only publish, which runs no build, can write.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          # The oldest runners, so the binaries need only an older glibc and
+          # run on more distributions.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # No build cache: a release is built from nothing, so a cache written
+      # by another workflow can't end up in it.
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name=kb-${{ matrix.target }}
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/kb README.md LICENSE "$name"/
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kb-${{ matrix.target }}
+          path: kb-${{ matrix.target }}.tar.gz*
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      # Pinned: it runs with write access to the repository.
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: kb-*.tar.gz*
+          generate_release_notes: true

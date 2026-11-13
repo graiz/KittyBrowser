@@ -25,7 +25,7 @@ fn switch() -> Result<PathBuf, String> {
     Ok(crate::data_dir()?.join("mcp-enabled"))
 }
 
-fn enabled() -> bool {
+pub fn enabled() -> bool {
     switch().is_ok_and(|path| path.exists())
 }
 

@@ -86,13 +86,18 @@ pub fn leave() {
 }
 
 /// Whether the terminal draws kitty graphics: `Some(false)` when it answered
-/// without them, `None` when it didn't answer in time (a slow link, or a
-/// terminal that ignores the question), so the caller can go ahead. It asks
-/// about a one-pixel image and then for the terminal's attributes (DA1),
-/// which every terminal answers, in that order: a reply to the first that
-/// hasn't come by the second never will. Run it before `enter`, so the
+/// without them, `None` when it didn't answer within `limit` (a slow link,
+/// or a terminal that ignores the question), so the caller can go ahead. It
+/// asks about a one-pixel image and then for the terminal's attributes
+/// (DA1), which every terminal answers, in that order: a reply to the first
+/// that hasn't come by the second never will. Run it before `enter`, so the
 /// replies it reads aren't ones the app is waiting for.
-pub fn draws_graphics() -> Option<bool> {
+///
+/// Replies that come after `limit` wait for whatever reads the terminal
+/// next. In kb that is its own input reader, which ignores them, as long
+/// as nothing fails between this and `enter`; otherwise it is the shell,
+/// which reads them as typed text.
+pub fn draws_graphics(limit: std::time::Duration) -> Option<bool> {
     const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
     let mut answer = Vec::new();
     unsafe {
@@ -107,7 +112,7 @@ pub fn draws_graphics() -> Option<bool> {
         libc::cfmakeraw(&mut raw);
         libc::tcsetattr(0, libc::TCSANOW, &raw);
         write(QUERY);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        let deadline = std::time::Instant::now() + limit;
         while graphics_answer(&answer).is_none() {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             let mut poll = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
@@ -123,15 +128,27 @@ pub fn draws_graphics() -> Option<bool> {
         }
         libc::tcsetattr(0, libc::TCSANOW, &original);
     }
-    graphics_answer(&answer)
+    let draws = graphics_answer(&answer);
+    if draws == Some(false) {
+        // Such a terminal shows the question as text: wipe its line.
+        write(b"\r\x1b[2K");
+    }
+    draws
 }
 
 /// What the replies to `draws_graphics`'s questions say, once the answer to
-/// the second (`ESC [ ? ... c`) is in.
+/// the second is in: an `ESC [ ?` whose digits and semicolons end in `c`.
+/// Other reports, such as a mode's state still queued from before, also
+/// start `ESC [ ?` but end otherwise.
 fn graphics_answer(replies: &[u8]) -> Option<bool> {
-    let attributes = replies.windows(3).position(|w| w == b"\x1b[?")?;
-    replies[attributes..].iter().position(|&b| b == b'c')?;
-    Some(replies[..attributes].windows(8).any(|w| w == b"\x1b_Gi=31;"))
+    let attributes = (0..replies.len()).any(|start| {
+        let Some(rest) = replies[start..].strip_prefix(b"\x1b[?") else {
+            return false;
+        };
+        let parameters = rest.iter().take_while(|b| b.is_ascii_digit() || **b == b';').count();
+        rest.get(parameters) == Some(&b'c')
+    });
+    attributes.then(|| replies.windows(8).any(|w| w == b"\x1b_Gi=31;"))
 }
 
 #[cfg(test)]
@@ -148,5 +165,11 @@ mod tests {
         assert_eq!(graphics_answer(b""), None);
         // An error about the image still means the protocol is there.
         assert_eq!(graphics_answer(b"\x1b_Gi=31;EINVAL:bad\x1b\\\x1b[?62c"), Some(true));
+        // A report still queued from before isn't the attributes.
+        assert_eq!(graphics_answer(b"\x1b[?2026;2$y\x1b_Gi=31;OK\x1b\\\x1b[?62;22c"), Some(true));
+        assert_eq!(graphics_answer(b"\x1b[?2026;2$y\x1b[?1;2c"), Some(false));
+        assert_eq!(graphics_answer(b"\x1b[?2026;2$y\x1b_Gi=31;OK\x1b\\"), None);
+        // A key typed meanwhile, c included, doesn't end it either.
+        assert_eq!(graphics_answer(b"\x1b[?62;2$yc"), None);
     }
 }

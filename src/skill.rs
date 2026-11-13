@@ -22,6 +22,16 @@ fn path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".claude/skills/kb/SKILL.md"))
 }
 
+/// Whether the skill is installed, and whether it is this kb's version.
+pub fn status() -> Result<String, String> {
+    let path = path()?;
+    Ok(match std::fs::read_to_string(&path) {
+        Ok(text) if text == SKILL => format!("is installed: {}", path.display()),
+        Ok(_) => "is installed but out of date: kb skill install updates it".to_owned(),
+        Err(_) => "isn't installed: kb skill install".to_owned(),
+    })
+}
+
 /// Run `kb skill` with the words after it. Returns the exit status.
 pub fn run(words: &[String]) -> i32 {
     let result = match words.first().map(String::as_str) {
@@ -48,11 +58,7 @@ pub fn run(words: &[String]) -> i32 {
             }
             Err(_) => println!("kb skill isn't installed."),
         }),
-        Some("status") => path().map(|path| match std::fs::read_to_string(&path) {
-            Ok(text) if text == SKILL => println!("kb skill is installed: {}", path.display()),
-            Ok(_) => println!("kb skill is installed but out of date: kb skill install updates it"),
-            Err(_) => println!("kb skill isn't installed: kb skill install"),
-        }),
+        Some("status") => status().map(|status| println!("kb skill {status}")),
         Some("show") => {
             print!("{SKILL}");
             Ok(())

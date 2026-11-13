@@ -244,9 +244,15 @@ fn is_local(url: &str) -> bool {
     }
 }
 
-fn find_binary() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("KB_CHROME") {
-        return Some(path.into());
+/// The browser kb starts: KB_CHROME if set, else the first Chromium-based
+/// browser installed in the usual places. When there is none, the error
+/// says what to do.
+pub fn find_binary() -> Result<PathBuf, String> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(chrome) = std::env::var_os("KB_CHROME") {
+        return named(Path::new(&chrome), &path).ok_or_else(|| {
+            format!("KB_CHROME is {}, which isn't a program kb can find", Path::new(&chrome).display())
+        });
     }
     const APPS: &[&str] = &[
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -257,11 +263,23 @@ fn find_binary() -> Option<PathBuf> {
     ];
     const NAMES: &[&str] =
         &["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"];
-    let on_path = std::env::var_os("PATH").into_iter().flat_map(|path| {
-        let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
-        dirs.into_iter().flat_map(|dir| NAMES.iter().map(move |name| dir.join(name)))
-    });
-    APPS.iter().map(PathBuf::from).chain(on_path).find(|path| path.is_file())
+    APPS.iter().map(PathBuf::from).find(|path| path.is_file()).or_else(|| search(&path, NAMES)).ok_or_else(|| {
+        "no Chrome, Chromium, Edge or Brave found; install one, or set KB_CHROME=/path/to/browser".to_owned()
+    })
+}
+
+/// The browser KB_CHROME names: a path, or a bare name looked up on PATH as
+/// a shell would.
+fn named(chrome: &Path, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    if chrome.components().count() > 1 {
+        return chrome.is_file().then(|| chrome.to_owned());
+    }
+    search(path, &[chrome])
+}
+
+/// The first of `names` found in the directories of `path`, a PATH value.
+fn search(path: &std::ffi::OsStr, names: &[impl AsRef<Path>]) -> Option<PathBuf> {
+    std::env::split_paths(path).flat_map(|dir| names.iter().map(move |name| dir.join(name))).find(|path| path.is_file())
 }
 
 /// Turn off the password manager and autofill in the profile before Chrome
@@ -406,8 +424,7 @@ impl Chrome {
     /// Start Chrome. With `devtools`, it also serves DevTools on a port of
     /// 127.0.0.1, which any program on this machine can reach.
     pub fn launch(profile: &Path, scale: f64, devtools: bool) -> Result<(Chrome, Receiver), String> {
-        let binary =
-            find_binary().ok_or("can't find Chrome; install it or set KB_CHROME to a Chromium-based browser")?;
+        let binary = find_binary()?;
         let pipe_error = |e| format!("creating a pipe: {e}");
         let (child_in, to_chrome) = pipe().map_err(pipe_error)?;
         let (from_chrome, child_out) = pipe().map_err(pipe_error)?;
@@ -953,6 +970,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn browsers_named_by_the_user() {
+        let path = std::ffi::OsString::from("/no/such/dir:/bin");
+        assert_eq!(named(Path::new("sh"), &path), Some(PathBuf::from("/bin/sh")));
+        assert_eq!(named(Path::new("/bin/sh"), &path), Some(PathBuf::from("/bin/sh")));
+        assert_eq!(named(Path::new("/no/such/browser"), &path), None);
+        assert_eq!(named(Path::new("no-such-browser-kb"), &path), None);
+        assert_eq!(named(Path::new(""), &path), None);
+        assert_eq!(search(&path, &["no-such-browser-kb", "sh"]), Some(PathBuf::from("/bin/sh")));
+    }
 
     #[test]
     fn local_addresses() {
