@@ -20,7 +20,7 @@ Security problems go privately instead; see [SECURITY.md](SECURITY.md).
 For anything bigger than a fix (a new command, a new dependency, a change of
 behaviour) open an issue first and describe the problem it solves. It is
 much easier to agree on the problem before the code exists, and some ideas
-are out of scope (see "Not goals" in [docs/ROADMAP.md](docs/ROADMAP.md)).
+are out of scope (see "Not goals" in [docs/ROADMAP.md](../docs/ROADMAP.md)).
 
 ## Pull requests
 
@@ -36,7 +36,7 @@ A pull request is likely to be merged quickly when it:
   agents, docs/ARCHITECTURE.md for design decisions, and CHANGELOG.md under
   "Unreleased";
 - **matches the code around it** and adds no dependency without a reason
-  (see [AGENTS.md](AGENTS.md), which applies to people too).
+  (see [AGENTS.md](../AGENTS.md), which applies to people too).
 
 It is likely to be declined, or to need a discussion first, when it adds a
 dependency the standard library could replace, adds an async runtime, opens
