@@ -72,6 +72,15 @@ Windows). This is untested.
 Pull and run `cargo install --path .` again. If you use the agent skill, run
 `kb skill install` afterwards so it matches the new version.
 
+### Uninstalling
+
+```sh
+kb skill remove                 # if you installed the agent skill
+kb mcp off                      # if you turned on the MCP server
+cargo uninstall kittybrowser
+rm -rf ~/.kittybrowser          # history, profiles and cookies
+```
+
 ## Using kb
 
 ```sh

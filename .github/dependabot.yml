@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Grouped and monthly: a stream of one-dependency pull requests is noise.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
