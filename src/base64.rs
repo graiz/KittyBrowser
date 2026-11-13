@@ -23,8 +23,8 @@ pub fn decode(text: &str) -> Option<Vec<u8>> {
     // A frame is a megabyte of this, so whole groups go through the table
     // with one check for a bad digit each.
     let whole = text.len() / 4 * 4;
-    for quad in text[..whole].chunks_exact(4) {
-        let [a, b, c, d] = [quad[0], quad[1], quad[2], quad[3]].map(|c| VALUES[c as usize]);
+    for quad in text[..whole].as_chunks::<4>().0 {
+        let [a, b, c, d] = quad.map(|c| VALUES[c as usize]);
         if (a | b | c | d) & 0x80 != 0 {
             return None;
         }

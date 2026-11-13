@@ -683,12 +683,12 @@ fn line(pixels: &Pixels, x: u32, y: u32, width: u32) -> &[u8] {
 
 /// A hash of a row of pixels.
 fn row_hash(row: &[u8]) -> u64 {
-    let mut words = row.chunks_exact(8);
+    let (words, rest) = row.as_chunks::<8>();
     let mut hash = row.len() as u64;
-    for word in &mut words {
-        hash = mix(hash, u64::from_le_bytes(word.try_into().unwrap()));
+    for word in words {
+        hash = mix(hash, u64::from_le_bytes(*word));
     }
-    for &byte in words.remainder() {
+    for &byte in rest {
         hash = mix(hash, byte as u64);
     }
     hash
@@ -729,12 +729,12 @@ fn column_hashes(pixels: &Pixels, width: u32) -> Vec<u64> {
     let mut hashes = vec![0; columns * height];
     for (y, row) in pixels.data.chunks_exact(stride).enumerate() {
         for (c, part) in row.chunks(column).enumerate() {
-            let mut words = part.chunks_exact(8);
+            let (words, rest) = part.as_chunks::<8>();
             let mut hash = part.len() as u64;
-            for word in &mut words {
-                hash = mix(hash, u64::from_le_bytes(word.try_into().unwrap()));
+            for word in words {
+                hash = mix(hash, u64::from_le_bytes(*word));
             }
-            for &byte in words.remainder() {
+            for &byte in rest {
                 hash = mix(hash, byte as u64);
             }
             hashes[c * height + y] = hash;
