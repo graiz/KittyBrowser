@@ -189,7 +189,14 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     values.get(values.len() / 2).copied().unwrap_or(f64::NAN)
 }
 
-fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>, hold: u64) -> Result<String, String> {
+fn measure(
+    url: &str,
+    steps: usize,
+    scale: f64,
+    scene: Scene,
+    modes: Option<&str>,
+    hold: u64,
+) -> Result<String, String> {
     let window = settled_window()?;
     let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
         ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)

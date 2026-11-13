@@ -181,6 +181,11 @@ struct Held {
 type Rows = HashMap<u64, Option<u32>, BuildHasherDefault<Identity>>;
 
 impl Layers {
+    /// Whether the screen holds a page this drew.
+    pub fn active(&self) -> bool {
+        self.shown.is_some()
+    }
+
     /// The screen was cleared of images: the next draw sends the whole frame.
     pub fn forget(&mut self) {
         self.shown = None;
@@ -224,13 +229,12 @@ impl Layers {
                     strips.extend(changed(&old.pixels, &new, region));
                 }
                 let strips = merge(strips);
-                if area(&strips) * 2 >= new.width as u64 * new.height as u64 {
-                    Sent::Whole(Why::Changed)
-                } else if self.patch(out, &new, &regions, &strips, page).is_none() {
-                    Sent::Whole(Why::Placements)
-                } else {
-                    let shift = regions.iter().map(|r| r.shift).max_by_key(|s| s.abs()).unwrap_or(0);
-                    Sent::Strips { shift, strips: strips.len() }
+                match self.patch(out, &new, &regions, &strips, page) {
+                    Err(why) => Sent::Whole(why),
+                    Ok(()) => {
+                        let shift = regions.iter().map(|r| r.shift).max_by_key(|s| s.abs()).unwrap_or(0);
+                        Sent::Strips { shift, strips: strips.len() }
+                    }
                 }
             }
         };
@@ -265,8 +269,9 @@ impl Layers {
     }
 
     /// Move the placements as `regions` say and lay `strips` of `new` over
-    /// them. `None`, having appended nothing, if that would leave too many
-    /// placements.
+    /// them. Fails, having appended nothing, if what held images don't have
+    /// is too much of the page to be worth sending in strips, or it would
+    /// leave too many placements.
     fn patch(
         &mut self,
         out: &mut Vec<u8>,
@@ -274,7 +279,7 @@ impl Layers {
         regions: &[Region],
         strips: &[Rect],
         page: Page,
-    ) -> Option<()> {
+    ) -> Result<(), Why> {
         // Each placement becomes its part in each region, if any shows and
         // no strip covers it; the first part keeps the placement's id.
         let mut moved: Vec<(Placement, Vec<Placement>)> = Vec::with_capacity(self.placements.len());
@@ -297,8 +302,11 @@ impl Layers {
             count += parts.len();
             moved.push((*placement, parts));
         }
+        if area(&send) * 2 >= new.width as u64 * new.height as u64 {
+            return Err(Why::Changed);
+        }
         if count > MAX_PLACEMENTS {
-            return None;
+            return Err(Why::Placements);
         }
 
         let mut placements = Vec::with_capacity(count);
@@ -353,7 +361,7 @@ impl Layers {
         }
         self.placements = placements;
         self.tidy(out, new.width as u64 * new.height as u64);
-        Some(())
+        Ok(())
     }
 
     /// Note which images show, and delete those that haven't for longest
@@ -388,7 +396,8 @@ impl Layers {
         let mut done = vec![false; strip.height as usize];
         let hashes: Vec<u64> = (0..strip.height).map(|y| row_hash(line(new, strip.x, strip.y + y))).collect();
         for held in self.held.iter_mut().rev() {
-            if held.pixels.alpha != new.alpha || strip.x < held.x || strip.x + strip.width > held.x + held.pixels.width {
+            if held.pixels.alpha != new.alpha || strip.x < held.x || strip.x + strip.width > held.x + held.pixels.width
+            {
                 continue;
             }
             if done.iter().all(|&d| d) {
@@ -598,7 +607,9 @@ fn cut(pixels: &Pixels, rect: Rect) -> Pixels {
     let stride = pixels.width as usize * bytes;
     let mut data = Vec::with_capacity(rect.width as usize * rect.height as usize * bytes);
     for y in rect.y..rect.y + rect.height {
-        data.extend_from_slice(&pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes]);
+        data.extend_from_slice(
+            &pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes],
+        );
     }
     Pixels { width: rect.width, height: rect.height, alpha: pixels.alpha, data }
 }
@@ -743,7 +754,8 @@ fn changed(old: &Pixels, new: &Pixels, region: &Region) -> Vec<Rect> {
             let before = &old.data[from as usize * stride..][left..right];
             // Most rows are the same, and comparing them whole is quickest.
             (row != before).then(|| row.iter().zip(before).position(|(a, b)| a != b).unwrap_or(0)).map(|first| {
-                let last = row.len() - 1 - row.iter().rev().zip(before.iter().rev()).position(|(a, b)| a != b).unwrap_or(0);
+                let last =
+                    row.len() - 1 - row.iter().rev().zip(before.iter().rev()).position(|(a, b)| a != b).unwrap_or(0);
                 region.x.start + (first / bytes) as u32..region.x.start + (last / bytes) as u32 + 1
             })
         } else {
@@ -751,7 +763,9 @@ fn changed(old: &Pixels, new: &Pixels, region: &Region) -> Vec<Rect> {
         };
         let Some(span) = span else { continue };
         open = match open {
-            Some((start, end, left, right)) if y - end <= GAP => Some((start, y, left.min(span.start), right.max(span.end))),
+            Some((start, end, left, right)) if y - end <= GAP => {
+                Some((start, y, left.min(span.start), right.max(span.end)))
+            }
             other => {
                 if let Some((start, end, left, right)) = other {
                     strips.push(Rect { x: left, y: start, width: right - left, height: end + 1 - start });
@@ -808,7 +822,9 @@ mod tests {
         let stride = pixels.width as usize * bytes;
         let mut data = Vec::with_capacity(rect.width as usize * rect.height as usize * bytes);
         for y in rect.y..rect.y + rect.height {
-            data.extend_from_slice(&pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes]);
+            data.extend_from_slice(
+                &pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes],
+            );
         }
         let mut png = Vec::new();
         let mut encoder = png::Encoder::new(&mut png, rect.width, rect.height);
@@ -858,7 +874,10 @@ mod tests {
         // that scrolls 5 pixels, 12 wide, with an edge of 2 that is a
         // column of its own.
         let at = |scrolled| {
-            column_hashes(&frame(18, 40, |x, y| if x < 4 { y as u8 } else { ((y + scrolled) * 7 % 251) as u8 + x as u8 }), 4)
+            column_hashes(
+                &frame(18, 40, |x, y| if x < 4 { y as u8 } else { ((y + scrolled) * 7 % 251) as u8 + x as u8 }),
+                4,
+            )
         };
         assert_eq!(
             find_regions(&at(3), &at(8), 40, 4, 18),
@@ -894,14 +913,8 @@ mod tests {
 
     #[test]
     fn placements_move_and_are_cut() {
-        let placement = Placement {
-            image: 1,
-            id: 1,
-            z: 0,
-            from: Rect { x: 2, y: 4, width: 6, height: 30 },
-            x: 2,
-            y: 10,
-        };
+        let placement =
+            Placement { image: 1, id: 1, z: 0, from: Rect { x: 2, y: 4, width: 6, height: 30 }, x: 2, y: 10 };
         let moved = |x: std::ops::Range<u32>, shift| placement.moved(&Region { x, shift }, 40);
         assert_eq!(moved(0..8, 0), Some(placement));
         // Up 15: its top 5 rows go off the page.
@@ -921,7 +934,9 @@ mod tests {
     #[test]
     fn draws_whole_then_strips() {
         let encode = |pixels: &Pixels| {
-            crate::base64::encode(&encode_png(pixels, Rect { x: 0, y: 0, width: pixels.width, height: pixels.height }).unwrap())
+            crate::base64::encode(
+                &encode_png(pixels, Rect { x: 0, y: 0, width: pixels.width, height: pixels.height }).unwrap(),
+            )
         };
         // 2 columns, 10 rows of 4x4 pixel cells.
         let (cols, rows, cell) = (2, 10, (4, 4));
@@ -929,7 +944,10 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(layers.draw(&mut out, &encode(&page(10)), cols, rows, cell, 2), Some(Sent::Whole(Why::First)));
         let text = String::from_utf8(std::mem::take(&mut out)).unwrap();
-        assert!(text.starts_with("\x1b[2;1H\x1b_Ga=T,f=100,i=1000,p=1,w=8,h=40,z=-1999999999,C=1,q=2,m=0;"), "{text:?}");
+        assert!(
+            text.starts_with("\x1b[2;1H\x1b_Ga=T,f=100,i=1000,p=1,w=8,h=40,z=-1999999999,C=1,q=2,m=0;"),
+            "{text:?}"
+        );
 
         // Scrolled 6 pixels: the frame moves up a cell and a half, and the
         // last 6 rows come in from row 34, which is row 8 of the cells and 2
@@ -943,7 +961,10 @@ mod tests {
             text.starts_with("\x1b[2;1H\x1b_Ga=p,i=1000,p=1,x=0,y=6,w=8,h=34,X=0,Y=0,z=-1999999999,C=1,q=2\x1b\\"),
             "{text:?}"
         );
-        assert!(text.contains("\x1b[10;1H\x1b_Ga=T,f=24,s=8,v=6,o=z,i=1001,p=2,X=0,Y=2,z=-1999999998,C=1,q=2,"), "{text:?}");
+        assert!(
+            text.contains("\x1b[10;1H\x1b_Ga=T,f=24,s=8,v=6,o=z,i=1001,p=2,X=0,Y=2,z=-1999999998,C=1,q=2,"),
+            "{text:?}"
+        );
 
         // Back up 3: the first image moves down 3, the strip too, losing
         // its last 3 rows off the bottom, and the top 3 rows are sent.
@@ -962,6 +983,149 @@ mod tests {
             Some(Sent::Strips { shift: 0, strips: 0 })
         );
         assert!(out.is_empty());
+    }
+
+    /// Just enough of a kitty-graphics terminal to see what `Layers` puts
+    /// on the screen: images, placements of parts of them at pixels within
+    /// cells, stacked by z, and deletions.
+    #[derive(Default)]
+    struct Screen {
+        cursor: (u32, u32),
+        images: HashMap<u32, Pixels>,
+        /// Image, placement id, z, order placed, part of the image, and its
+        /// top left on the screen in pixels.
+        placements: Vec<(u32, u32, i64, usize, Rect, u32, u32)>,
+        partial: Option<(HashMap<String, String>, String)>,
+        placed: usize,
+    }
+
+    impl Screen {
+        fn feed(&mut self, mut bytes: &[u8], cell: (u32, u32)) {
+            while !bytes.is_empty() {
+                if let Some(rest) = bytes.strip_prefix(b"\x1b[") {
+                    let end = rest.iter().position(|&b| b == b'H').unwrap();
+                    let (row, col) = std::str::from_utf8(&rest[..end]).unwrap().split_once(';').unwrap();
+                    self.cursor = (row.parse().unwrap(), col.parse().unwrap());
+                    bytes = &rest[end + 1..];
+                } else {
+                    let rest = bytes.strip_prefix(b"\x1b_G").expect("only cursor moves and graphics");
+                    let end = rest.windows(2).position(|w| w == b"\x1b\\").unwrap();
+                    self.escape(std::str::from_utf8(&rest[..end]).unwrap(), cell);
+                    bytes = &rest[end + 2..];
+                }
+            }
+        }
+
+        fn escape(&mut self, text: &str, cell: (u32, u32)) {
+            let (keys, payload) = text.split_once(';').unwrap_or((text, ""));
+            let keys: HashMap<String, String> =
+                keys.split(',').filter_map(|pair| pair.split_once('=')).map(|(k, v)| (k.into(), v.into())).collect();
+            let (mut keys, mut data) = self.partial.take().unwrap_or_else(|| (keys.clone(), String::new()));
+            data.push_str(payload);
+            if text.contains("m=1") {
+                self.partial = Some((keys, data));
+                return;
+            }
+            keys.remove("m");
+            let number = |key: &str| keys.get(key).map(|v| v.parse::<i64>().unwrap());
+            let id = number("i").unwrap() as u32;
+            match keys["a"].as_str() {
+                "d" => {
+                    match number("p") {
+                        Some(p) => self.placements.retain(|q| (q.0, q.1) != (id, p as u32)),
+                        None => self.placements.retain(|q| q.0 != id),
+                    }
+                    if keys["d"] == "I" {
+                        assert!(self.images.remove(&id).is_some(), "deleted image {id}, which isn't there");
+                    }
+                }
+                action => {
+                    if action == "T" {
+                        let bytes = crate::base64::decode(&data).unwrap();
+                        let pixels = match number("f") {
+                            Some(100) => decode(&bytes, Vec::new()).unwrap(),
+                            Some(24) => Pixels {
+                                width: number("s").unwrap() as u32,
+                                height: number("v").unwrap() as u32,
+                                alpha: false,
+                                data: miniz_oxide::inflate::decompress_to_vec_zlib(&bytes).unwrap(),
+                            },
+                            other => panic!("format {other:?}"),
+                        };
+                        self.images.insert(id, pixels);
+                    }
+                    let image = self.images.get(&id).unwrap_or_else(|| panic!("placed image {id}, which isn't there"));
+                    let p = number("p").unwrap() as u32;
+                    let (x, y) = (number("x").unwrap_or(0) as u32, number("y").unwrap_or(0) as u32);
+                    let width = number("w").map_or(image.width - x, |w| w as u32);
+                    let height = number("h").map_or(image.height - y, |h| h as u32);
+                    let (dx, dy) = (number("X").unwrap_or(0) as u32, number("Y").unwrap_or(0) as u32);
+                    assert!(dx < cell.0 && dy < cell.1, "an offset outside its cell");
+                    self.placements.retain(|q| (q.0, q.1) != (id, p));
+                    self.placed += 1;
+                    let at = ((self.cursor.1 - 1) * cell.0 + dx, (self.cursor.0 - 1) * cell.1 + dy);
+                    let from = Rect { x, y, width, height };
+                    self.placements.push((id, p, number("z").unwrap(), self.placed, from, at.0, at.1));
+                }
+            }
+        }
+
+        /// The pixels of the screen from row `top`, `width` by `height`.
+        fn page(&self, top: u32, cell: (u32, u32), width: u32, height: u32) -> Vec<u8> {
+            let mut page = vec![0; width as usize * height as usize * 3];
+            let mut order: Vec<_> = self.placements.iter().collect();
+            order.sort_by_key(|q| (q.2, q.3));
+            for &&(id, _, _, _, from, x, y) in &order {
+                let image = &self.images[&id];
+                for row in 0..from.height {
+                    let Some(to) = (y + row).checked_sub((top - 1) * cell.1).filter(|&to| to < height) else {
+                        continue;
+                    };
+                    let source = line(image, from.x, from.y + row, from.width);
+                    let at = (to as usize * width as usize + x as usize) * 3;
+                    let fits = (width - x).min(from.width) as usize * 3;
+                    page[at..at + fits].copy_from_slice(&source[..fits]);
+                }
+            }
+            page
+        }
+    }
+
+    #[test]
+    fn the_screen_ends_as_the_frame() {
+        // 4 columns and 30 rows of 4x4 cells: a sidebar a cell wide that
+        // stays put, and a page beside it that scrolls under a sticky
+        // header 6 pixels tall.
+        let (cols, rows, cell) = (4u16, 30u16, (4u32, 4u32));
+        let (width, height) = (16, 120);
+        let frame = |scrolled: u32, caret: bool| {
+            frame(width, height, |x, y| match (x, y) {
+                (0..4, _) => (y * 5 % 256) as u8,
+                (_, 0..6) => 200 + x as u8,
+                (10, 50..54) if caret => 0,
+                _ => ((y + scrolled) * 13 % 256 + x * 3) as u8,
+            })
+        };
+        let encode =
+            |pixels: &Pixels| crate::base64::encode(&encode_png(pixels, Rect { x: 0, y: 0, width, height }).unwrap());
+        let mut layers = Layers::default();
+        let mut screen = Screen::default();
+        let mut scrolled = 0;
+        // Down by more than a run of held rows, back up over what was seen,
+        // a caret on and off, and a jump too far for anything to be kept.
+        let steps = [(0, false), (40, false), (40, false), (7, false), (-47, false), (-40, true), (0, false)];
+        for (n, (step, caret)) in steps.into_iter().chain([(5, false), (200, false), (-3, true)]).enumerate() {
+            scrolled = (scrolled as i64 + step) as u32;
+            let new = frame(scrolled, caret);
+            let mut out = Vec::new();
+            let sent = layers.draw(&mut out, &encode(&new), cols, rows, cell, 2).unwrap();
+            screen.feed(&out, cell);
+            assert!(screen.page(2, cell, width, height) == new.data, "scrolled to {scrolled} and sent {sent:?}");
+            if n == 4 {
+                // Back up over rows seen before: placed again, not sent.
+                assert!(!String::from_utf8_lossy(&out).contains("a=T"), "sent rows the terminal had: {sent:?}");
+            }
+        }
     }
 }
 
@@ -995,6 +1159,23 @@ mod profile {
             crate::base64::encode(&out)
         };
         let (a, b) = (crate::base64::encode(&png), encode(&second));
+        if std::env::var_os("KB_TYPING").is_some() {
+            // A caret's worth changes, and back.
+            let mut typed = Pixels { data: first.data.clone(), ..first };
+            for y in 100..140 {
+                typed.data[y * stride + 300 * bytes..y * stride + 330 * bytes].fill(0);
+            }
+            let (a, b) = (a.clone(), encode(&typed));
+            let mut layers = Layers::default();
+            let mut out = Vec::new();
+            for i in 0..8 {
+                out.clear();
+                let t = std::time::Instant::now();
+                let sent = layers.draw(&mut out, if i % 2 == 0 { &a } else { &b }, 171, 49, (16, 34), 2);
+                println!("{sent:?} {} KB in {:?}", out.len() / 1024, t.elapsed());
+            }
+            return;
+        }
         let mut layers = Layers::default();
         let mut out = Vec::new();
         for i in 0..6 {
