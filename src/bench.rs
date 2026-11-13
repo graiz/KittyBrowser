@@ -99,6 +99,8 @@ struct Bench {
     rx: mpsc::Receiver<Msg>,
     /// What the terminal has sent that hasn't been looked at.
     replies: Vec<u8>,
+    /// Errors the terminal reported for images.
+    errors: usize,
 }
 
 impl Bench {
@@ -156,7 +158,8 @@ impl Bench {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(at) = self.replies.windows(REPLY.len()).position(|w| w == REPLY) {
-                self.replies.drain(..at + REPLY.len());
+                let read: Vec<u8> = self.replies.drain(..at + REPLY.len()).collect();
+                self.errors += read.windows(3).filter(|w| w == b"\x1b_G").count();
                 return Ok(());
             }
             match self.next(deadline) {
@@ -231,7 +234,7 @@ fn measure(
         }
     });
 
-    let mut bench = Bench { chrome, rx, replies: Vec::new() };
+    let mut bench = Bench { chrome, rx, replies: Vec::new(), errors: 0 };
     bench.chrome.resize(viewport.0, viewport.1, scale);
     bench.chrome.navigate(url);
     bench.loaded(Duration::from_secs(30))?;
@@ -274,6 +277,7 @@ fn measure(
         let mut layers = crate::term::layers::Layers::default();
         let mut sent = Vec::new();
         let mut samples = Vec::new();
+        bench.errors = 0;
         let mut missed = 0;
         let mut odd = Vec::new();
         let mut last = None;
@@ -398,6 +402,9 @@ fn measure(
             mode.name,
             1000.0 / total
         ));
+        if bench.errors > 0 {
+            report.push_str(&format!("   ({} graphics errors from the terminal)", bench.errors));
+        }
         if !odd.is_empty() {
             report.push_str(&format!("   ({} frames didn't fit the cells: {:?})", odd.len(), &odd[..odd.len().min(3)]));
         }

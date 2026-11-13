@@ -470,6 +470,12 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 }
                 Msg::Term(Event::Graphics { id, ok }) => {
                     log(format_args!("graphics reply for image {id}: {ok}"));
+                    if !ok && app.layers.lost(id) {
+                        // The terminal dropped an image the page was drawn
+                        // with: start again from the whole page.
+                        term::write(graphics::DELETE);
+                        new_frame = true;
+                    }
                     if id == graphics::FILE_QUERY_ID {
                         app.by_file = ok;
                         // If it said no, it didn't delete the file either.

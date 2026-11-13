@@ -189,6 +189,18 @@ impl Layers {
         self.shown.is_some()
     }
 
+    /// The terminal reported an error for image `id`. If it is one of
+    /// these, it was most likely dropped, and the screen is in no known
+    /// state: this forgets it all and returns true, and the caller should
+    /// clear the screen of images and draw the frame again.
+    pub fn lost(&mut self, id: u32) -> bool {
+        let ours = self.held.iter().any(|held| held.id == id);
+        if ours {
+            self.forget();
+        }
+        ours
+    }
+
     /// The screen was cleared of images: the next draw sends the whole frame.
     pub fn forget(&mut self) {
         self.shown = None;
@@ -551,13 +563,16 @@ impl Page {
         out.extend_from_slice(format!("\x1b[{line};{column}H").as_bytes());
     }
 
-    /// Place an image the terminal has, or move a placement of it.
+    /// Place an image the terminal has, or move a placement of it. An
+    /// image that has been gone a while may have been dropped (a terminal
+    /// keeps only so much), so the terminal is asked to say if it has: see
+    /// `Layers::lost`.
     fn place(&self, out: &mut Vec<u8>, placement: &Placement) {
         self.cursor(out, placement);
         let from = placement.from;
         out.extend_from_slice(
             format!(
-                "\x1b_Ga=p,i={},p={},x={},y={},w={},h={},X={},Y={},z={},C=1,q=2\x1b\\",
+                "\x1b_Ga=p,i={},p={},x={},y={},w={},h={},X={},Y={},z={},C=1,q=1\x1b\\",
                 placement.image,
                 placement.id,
                 from.x,
@@ -1006,7 +1021,7 @@ mod tests {
         );
         let text = String::from_utf8(std::mem::take(&mut out)).unwrap();
         assert!(
-            text.starts_with("\x1b[2;1H\x1b_Ga=p,i=1000,p=1,x=0,y=6,w=8,h=34,X=0,Y=0,z=-1999999999,C=1,q=2\x1b\\"),
+            text.starts_with("\x1b[2;1H\x1b_Ga=p,i=1000,p=1,x=0,y=6,w=8,h=34,X=0,Y=0,z=-1999999999,C=1,q=1\x1b\\"),
             "{text:?}"
         );
         assert!(
