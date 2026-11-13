@@ -186,11 +186,6 @@ struct Held {
 type Rows = HashMap<u64, Option<u32>, BuildHasherDefault<Identity>>;
 
 impl Layers {
-    /// Whether the screen holds a page this drew.
-    pub fn active(&self) -> bool {
-        self.shown.is_some()
-    }
-
     /// The terminal reported an error for image `id`. If it is one of
     /// these, it was most likely dropped, and the screen is in no known
     /// state: this forgets it all and returns true, and the caller should
@@ -842,11 +837,11 @@ fn area(rects: &[Rect]) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// `pixels` as a base64 PNG, as Chrome sends frames.
-    fn encode(pixels: &Pixels) -> String {
+    pub(crate) fn encode(pixels: &Pixels) -> String {
         let mut png = Vec::new();
         let mut encoder = png::Encoder::new(&mut png, pixels.width, pixels.height);
         encoder.set_color(if pixels.alpha { png::ColorType::Rgba } else { png::ColorType::Rgb });
@@ -859,7 +854,7 @@ mod tests {
     }
 
     /// A frame `width` pixels wide whose pixel at `x`, `y` is `at(x, y)`.
-    fn frame(width: u32, height: u32, at: impl Fn(u32, u32) -> u8) -> Pixels {
+    pub(crate) fn frame(width: u32, height: u32, at: impl Fn(u32, u32) -> u8) -> Pixels {
         let mut data = Vec::new();
         for y in 0..height {
             for x in 0..width {
@@ -1005,11 +1000,12 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// Just enough of a kitty-graphics terminal to see what `Layers` puts
-    /// on the screen: images, placements of parts of them at pixels within
-    /// cells, stacked by z, and deletions.
+    /// Just enough of a kitty-graphics terminal to see what `Layers` (and
+    /// `page::PageImage`) puts on the screen: images, from the pty or from
+    /// files, placements of parts of them at pixels within cells, stacked by
+    /// z, and deletions.
     #[derive(Default)]
-    struct Screen {
+    pub(crate) struct Screen {
         cursor: (u32, u32),
         images: HashMap<u32, Pixels>,
         /// Image, placement id, z, order placed, part of the image, and its
@@ -1020,7 +1016,7 @@ mod tests {
     }
 
     impl Screen {
-        fn feed(&mut self, mut bytes: &[u8], cell: (u32, u32)) {
+        pub(crate) fn feed(&mut self, mut bytes: &[u8], cell: (u32, u32)) {
             while !bytes.is_empty() {
                 if let Some(rest) = bytes.strip_prefix(b"\x1b[") {
                     let end = rest.iter().position(|&b| b == b'H').unwrap();
@@ -1048,6 +1044,11 @@ mod tests {
             }
             keys.remove("m");
             let number = |key: &str| keys.get(key).map(|v| v.parse::<i64>().unwrap());
+            if keys["a"] == "d" && keys["d"] == "A" {
+                self.placements.clear();
+                self.images.clear();
+                return;
+            }
             let id = number("i").unwrap() as u32;
             match keys["a"].as_str() {
                 "d" => {
@@ -1061,14 +1062,25 @@ mod tests {
                 }
                 action => {
                     if action == "T" {
-                        let bytes = crate::base64::decode(&data).unwrap();
+                        let mut bytes = crate::base64::decode(&data).unwrap();
+                        if keys.get("t").is_some_and(|t| t == "t") {
+                            // A file's name: read it, and delete it.
+                            let path = String::from_utf8(bytes).unwrap();
+                            bytes = std::fs::read(&path).unwrap();
+                            std::fs::remove_file(&path).unwrap();
+                        }
+                        if keys.get("o").is_some_and(|o| o == "z") {
+                            bytes = miniz_oxide::inflate::decompress_to_vec_zlib(&bytes).unwrap();
+                        }
+                        // An image scaled to cells (`c`, `r`) is drawn at
+                        // its own size: the frames here fill their cells.
                         let pixels = match number("f") {
                             Some(100) => decode_png(&bytes, Vec::new()).unwrap(),
                             Some(24) => Pixels {
                                 width: number("s").unwrap() as u32,
                                 height: number("v").unwrap() as u32,
                                 alpha: false,
-                                data: miniz_oxide::inflate::decompress_to_vec_zlib(&bytes).unwrap(),
+                                data: bytes,
                             },
                             other => panic!("format {other:?}"),
                         };
@@ -1091,7 +1103,7 @@ mod tests {
         }
 
         /// The pixels of the screen from row `top`, `width` by `height`.
-        fn page(&self, top: u32, cell: (u32, u32), width: u32, height: u32) -> Vec<u8> {
+        pub(crate) fn page(&self, top: u32, cell: (u32, u32), width: u32, height: u32) -> Vec<u8> {
             let mut page = vec![0; width as usize * height as usize * 3];
             let mut order: Vec<_> = self.placements.iter().collect();
             order.sort_by_key(|q| (q.2, q.3));

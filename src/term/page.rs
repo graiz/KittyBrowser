@@ -14,6 +14,17 @@ pub struct PageImage {
     layers: Layers,
     /// The last frame written whole to a file.
     last_file: Option<std::path::PathBuf>,
+    /// Which drew the images on screen, if any.
+    on_screen: Option<Drawer>,
+}
+
+/// The ways of drawing the page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Drawer {
+    Tiles,
+    Layers,
+    /// One image, scaled to fit the cells.
+    Whole,
 }
 
 impl PageImage {
@@ -21,13 +32,29 @@ impl PageImage {
     pub fn forget(&mut self) {
         self.tiles.forget();
         self.layers.forget();
+        self.on_screen = None;
     }
 
     /// The terminal reported an error for image `id`. True if the page was
     /// drawn with it, and has been forgotten: the caller should clear the
     /// screen of images and draw the frame again.
     pub fn lost(&mut self, id: u32) -> bool {
-        self.layers.lost(id)
+        let lost = self.layers.lost(id);
+        if lost {
+            self.forget();
+        }
+        lost
+    }
+
+    /// Hand the screen to `drawer`. Each knows only its own images, so when
+    /// another drew what is there, all of it goes first: left, it could
+    /// cover what the new one draws.
+    fn hand_to(&mut self, out: &mut Vec<u8>, drawer: Drawer) {
+        if self.on_screen != Some(drawer) {
+            out.extend_from_slice(graphics::DELETE);
+            self.forget();
+            self.on_screen = Some(drawer);
+        }
     }
 
     /// Remove the last frame's file, should the terminal not have.
@@ -53,48 +80,34 @@ impl PageImage {
         cell: (u32, u32),
         top: u16,
     ) -> String {
-        let pixels = match by_file {
+        let mut pixels = match by_file {
             true => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes, Vec::new())),
             false => None,
         };
-        // Only what changed, when the frame lines up with the cells;
-        // otherwise (a fixed viewport, or a terminal that won't read
-        // files) one image scaled to fit.
-        let mut drawn = None;
-        let pixels = match pixels {
-            Some(pixels) if !scaled && graphics::fits((pixels.width, pixels.height), cols, rows, cell) => {
-                if !self.tiles.active() {
-                    out.extend_from_slice(graphics::DELETE);
-                }
-                match self.tiles.draw(out, pixels, cols, rows, cell, top) {
-                    Some(sent) => drawn = Some(format!("{sent:?}")),
-                    None => out.extend_from_slice(graphics::DELETE),
-                }
-                None
-            }
-            other => other,
+        // Only what changed, when the frame lines up with the cells: tiles
+        // by file, or layers through the pty. Otherwise (a fixed viewport,
+        // a frame from before a resize) one image scaled to fit.
+        let lined_up = !scaled && graphics::png_size(png).is_some_and(|size| graphics::fits(size, cols, rows, cell));
+        let drawer = match &pixels {
+            Some(_) if lined_up => Drawer::Tiles,
+            None if lined_up && !by_file => Drawer::Layers,
+            _ => Drawer::Whole,
         };
-        // Through the pty, only what changed, when the frame lines up.
-        if pixels.is_none() && !by_file && !scaled {
-            match self.layers.draw(out, png, cols, rows, cell, top) {
-                Some(sent) => drawn = Some(format!("{sent:?}")),
-                None if self.layers.active() => {
-                    out.extend_from_slice(graphics::DELETE);
-                    self.layers.forget();
-                }
-                None => {}
-            }
-        } else if self.layers.active() {
-            out.extend_from_slice(graphics::DELETE);
-            self.layers.forget();
-        }
+        self.hand_to(out, drawer);
+        let drawn = match drawer {
+            Drawer::Tiles => pixels
+                .take()
+                .and_then(|pixels| self.tiles.draw(out, pixels, cols, rows, cell, top))
+                .map(|sent| format!("{sent:?}")),
+            Drawer::Layers => self.layers.draw(out, png, cols, rows, cell, top).map(|sent| format!("{sent:?}")),
+            Drawer::Whole => None,
+        };
         if let Some(drawn) = drawn {
             return drawn;
         }
-        if self.tiles.active() {
-            out.extend_from_slice(graphics::DELETE);
-            self.tiles.forget();
-        }
+        // Tiles couldn't write a file, or layers decode the frame: the
+        // screen is in no known state, so it is cleared for the frame whole.
+        self.hand_to(out, Drawer::Whole);
         out.extend_from_slice(format!("\x1b[{top};1H").as_bytes());
         let path = graphics::next_path();
         match pixels.filter(|pixels| std::fs::write(&path, &pixels.data).is_ok()) {
@@ -112,5 +125,51 @@ impl PageImage {
                 "the whole frame, through the pty".to_owned()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::term::layers::tests::{encode, frame, Screen};
+
+    // 4 columns and 10 rows of 4x4 pixel cells, from screen row 2.
+    const COLS: u16 = 4;
+    const ROWS: u16 = 10;
+    const CELL: (u32, u32) = (4, 4);
+
+    /// A frame `width` pixels wide whose rows differ, `scrolled` down.
+    fn page(width: u32, scrolled: u32) -> graphics::Pixels {
+        frame(width, 40, |x, y| ((y + scrolled) * 7 % 251 + x) as u8)
+    }
+
+    /// Draw `new` and check the screen then shows it, and only it.
+    fn shows(image: &mut PageImage, screen: &mut Screen, new: &graphics::Pixels, by_file: bool) {
+        let mut out = Vec::new();
+        let drawn = image.draw(&mut out, &encode(new), by_file, false, COLS, ROWS, CELL, 2);
+        screen.feed(&out, CELL);
+        assert!(screen.page(2, CELL, 16, 40) == new.data, "after {drawn}");
+    }
+
+    #[test]
+    fn a_frame_drawn_whole_goes_when_layers_take_over() {
+        // A frame a column narrow, as one rendered before a resize, goes
+        // whole between two that layers draw.
+        let (mut image, mut screen) = (PageImage::default(), Screen::default());
+        shows(&mut image, &mut screen, &page(16, 0), false);
+        let mut out = Vec::new();
+        image.draw(&mut out, &encode(&page(12, 5)), false, false, COLS, ROWS, CELL, 2);
+        screen.feed(&out, CELL);
+        shows(&mut image, &mut screen, &page(16, 10), false);
+    }
+
+    #[test]
+    fn tiles_take_over_from_layers() {
+        // The terminal's answer that it reads files comes after layers
+        // drew the first frame.
+        let (mut image, mut screen) = (PageImage::default(), Screen::default());
+        shows(&mut image, &mut screen, &page(16, 0), false);
+        shows(&mut image, &mut screen, &page(16, 3), true);
+        shows(&mut image, &mut screen, &page(16, 6), true);
     }
 }
