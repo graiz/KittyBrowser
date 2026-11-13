@@ -59,6 +59,12 @@ pub fn data_dir() -> Result<std::path::PathBuf, String> {
 
 fn main() {
     let words: Vec<String> = std::env::args().skip(1).collect();
+    // The subcommands print and exit, so a reader that stops early (kb list
+    // | head) should end them quietly, as it would any Unix tool. Not the
+    // browser: it writes to Chrome's pipe, and must outlive Chrome closing it.
+    if matches!(words.first().map(String::as_str), Some("ctl" | "list" | "keys" | "skill" | "mcp")) {
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     match words.first().map(String::as_str) {
         Some("ctl") => std::process::exit(cli::run(&words[1..])),
         Some("mcp") => std::process::exit(mcp::run(&words[1..])),

@@ -1,10 +1,25 @@
+<p align="center">
+  <img src="assets/social.png" alt="KittyBrowser: a real web browser in your terminal, built to work beside coding agents" width="820">
+</p>
+
+<p align="center">
+  <a href="https://github.com/graiz/kittybrowser/actions/workflows/ci.yml"><img src="https://github.com/graiz/kittybrowser/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="macOS and Linux">
+  <img src="https://img.shields.io/badge/written%20in-Rust-orange" alt="Written in Rust">
+</p>
+
 # KittyBrowser (`kb`)
 
 A real web browser in a terminal pane. kb drives headless Chrome and draws
 each page as pixels with the
 [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/),
 so you see the actual layout, fonts and images, not a text approximation, and
-you can click, scroll and type in it.
+you can click, scroll, type, find, zoom and copy in it.
+
+<p align="center">
+  <img src="assets/demo.gif" alt="In Ghostty, typing kb https://news.ycombinator.com/ opens Hacker News in the pane; splitting the window opens the kittybrowser GitHub page and a Wikipedia article beside it" width="800">
+</p>
 
 It is built for working beside a coding agent. The agent opens kb in the pane
 next to its own, and you both look at the same page while it loads your dev
@@ -14,15 +29,28 @@ width, or reads documentation, all through `kb ctl`.
 ```sh
 kb http://localhost:3000        # open a page in this pane
 kb ctl check                    # from another pane: is the page healthy?
+kb skill install                # teach Claude Code (or any agent with skills) to use it
 ```
 
-**Status:** early but usable, version 0.1. Used daily on macOS in Rex; it
-should work in kitty, Ghostty and WezTerm, and it builds on Linux, but those
-haven't been tested yet. Reports are welcome.
+**Status:** early but usable, version 0.1. Used daily on macOS in Rex and
+Ghostty; it should work in kitty and WezTerm, and it builds on Linux, but
+those haven't been tested yet. Reports are welcome, and if kb is useful to
+you, a star helps other people find it.
+
+## Quick start
+
+With [Rust](https://rustup.rs) and Chrome installed:
+
+```sh
+cargo install --git https://github.com/graiz/kittybrowser
+kb news.ycombinator.com
+```
+
+Ctrl+/ shows the keys, Ctrl+Q quits.
 
 ## Requirements
 
-- **A terminal with the kitty graphics protocol:** kitty, Ghostty, WezTerm
+- **A terminal with the kitty graphics protocol:** Ghostty, kitty, WezTerm
   or Rex. Terminal.app and iTerm2 don't support it, and kb doesn't work
   inside tmux or screen.
 - **Chrome, Chromium, Edge or Brave**, installed where kb can find it, or
@@ -34,10 +62,8 @@ haven't been tested yet. Reports are welcome.
 ### macOS
 
 ```sh
-brew install --cask google-chrome   # if you don't have Chrome
-git clone https://github.com/graiz/kittybrowser
-cd kittybrowser
-cargo install --path .              # puts kb in ~/.cargo/bin
+brew install --cask google-chrome                     # if you don't have Chrome
+cargo install --git https://github.com/graiz/kittybrowser   # puts kb in ~/.cargo/bin
 kb https://example.com
 ```
 
@@ -45,13 +71,10 @@ On a non-retina display, start it with `kb --scale 1`.
 
 ### Linux
 
-Install Chrome or Chromium from your distribution or google.com/chrome, then
-build the same way:
+Install Chrome or Chromium from your distribution or google.com/chrome, then:
 
 ```sh
-git clone https://github.com/graiz/kittybrowser
-cd kittybrowser
-cargo install --path .
+cargo install --git https://github.com/graiz/kittybrowser
 kb --scale 2 https://example.com    # --scale 2 on a HiDPI screen; the default is 1
 ```
 
@@ -59,6 +82,14 @@ kb looks for `google-chrome`, `google-chrome-stable`, `chromium`,
 `chromium-browser`, `microsoft-edge` and `brave-browser` on your `PATH`; set
 `KB_CHROME=/path/to/browser` for anything else. Linux builds cleanly but is
 untested, so please open an issue with what you find.
+
+### From a clone
+
+```sh
+git clone https://github.com/graiz/kittybrowser
+cd kittybrowser
+cargo install --path .
+```
 
 ### Windows
 
@@ -69,8 +100,9 @@ Windows). This is untested.
 
 ### Updating
 
-Pull and run `cargo install --path .` again. If you use the agent skill, run
-`kb skill install` afterwards so it matches the new version.
+Run the same `cargo install` again (add `--force` if it says kb is already
+installed). If you use the agent skill, run `kb skill install` afterwards so
+it matches the new version.
 
 ### Uninstalling
 

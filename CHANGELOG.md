@@ -19,6 +19,8 @@ Notable changes to kb. The format follows
   for its selector, size and styles; the selector is copied.
 - Chrome DevTools on F12, with `kb --devtools`.
 - Function keys reach the page, and `kb ctl press F5` works.
+- `kb list`, `kb ctl` and the other subcommands exit quietly when their
+  output is cut short (`kb list | head`), rather than panicking.
 
 ## 0.1.0
 
