@@ -6,6 +6,9 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- Fewer captchas: navigator.webdriver is false, the client hints
+  (Sec-CH-UA) name the browser and system, and pages see a real screen
+  and a window bigger than themselves.
 - A ✕ at the right of the bar quits, after asking "Quit KittyBrowser?"
   (Yes or Enter, No or Esc).
 - Copy: Cmd+C or Ctrl+C copies the selection, or the address while editing
