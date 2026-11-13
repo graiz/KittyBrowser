@@ -46,9 +46,9 @@ src/bench.rs           kb bench
 
 - **Match the code around you.** Comments explain why, not what, in full
   sentences; names are plain words. Keep the comment density you find.
-- **Few dependencies.** kb depends on `libc` and `serde_json` only. Adding a
-  crate needs a reason the standard library can't meet, stated in the pull
-  request.
+- **Few dependencies.** kb depends on `libc`, `serde_json`, and `png` and
+  `zune-jpeg` to decode frames for drawing them by file. Adding a crate needs
+  a reason the standard library can't meet, stated in the pull request.
 - **No async runtime.** Threads and channels; the app thread never blocks on
   Chrome. See "Agent tools" in docs/ARCHITECTURE.md for how commands wait.
 - **Unix only.** macOS and Linux; don't add code that breaks either.
