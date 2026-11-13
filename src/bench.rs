@@ -316,7 +316,7 @@ fn run_modes(
                 }
                 Transfer::Tiles => {
                     let bytes = crate::base64::decode(&data).ok_or("Chrome sent a damaged frame")?;
-                    let pixels = graphics::decode_png(&bytes).ok_or("couldn't decode a frame")?;
+                    let pixels = graphics::decode_png(&bytes, Vec::new()).ok_or("couldn't decode a frame")?;
                     if !graphics::Tiles::fits(&pixels, cols, rows, (cell_w, cell_h)) {
                         return Err("frames don't line up with the cells, so they can't be tiled".into());
                     }
@@ -325,7 +325,7 @@ fn run_modes(
                 Transfer::File => {
                     let bytes = crate::base64::decode(&data).ok_or("Chrome sent a damaged frame")?;
                     let pixels = match mode.source {
-                        Source::Png => graphics::decode_png(&bytes),
+                        Source::Png => graphics::decode_png(&bytes, Vec::new()),
                         Source::Jpeg(_) => graphics::decode_jpeg(&bytes),
                     }
                     .ok_or("couldn't decode a frame")?;

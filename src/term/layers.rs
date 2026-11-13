@@ -24,7 +24,7 @@
 //! screen always ends exactly at Chrome's frame: whatever isn't known to be
 //! on screen already, pixel for pixel, is sent.
 
-use super::graphics::{crop, Pixels};
+use super::graphics::{crop, cut, decode_png, transmit, Pixels};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -50,8 +50,6 @@ const RETAIN: u64 = 2;
 /// Rows of a held image are placed again only this many at a time or
 /// more; fewer cost about as much to place as to send.
 const MIN_RUN: u32 = 32;
-/// The protocol's limit on the payload of one escape.
-const CHUNK: usize = 4096;
 
 /// A rectangle, in pixels.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -159,8 +157,7 @@ pub struct Layers {
     next_image: u32,
     next_placement: u32,
     next_z: i64,
-    /// A frame's worth of memory to decode the next frame into: a new one
-    /// costs a page fault every 16 KB, a millisecond or two a frame.
+    /// A frame's worth of memory to decode the next frame into.
     spare: Vec<u8>,
     /// The images the terminal holds, oldest first, with their pixels.
     held: Vec<Held>,
@@ -226,7 +223,7 @@ impl Layers {
         cell: (u32, u32),
         top: u16,
     ) -> Option<Sent> {
-        let new = decode(&crate::base64::decode(png_base64)?, std::mem::take(&mut self.spare))?;
+        let new = decode_png(&crate::base64::decode(png_base64)?, std::mem::take(&mut self.spare))?;
         if !super::graphics::Tiles::fits(&new, cols, rows, cell) {
             return None;
         }
@@ -360,7 +357,8 @@ impl Layers {
             }
         }
 
-        let cuts: Vec<Pixels> = pieces.iter().map(|piece| cut(new, *piece)).collect();
+        let cuts: Vec<Pixels> =
+            pieces.iter().map(|piece| cut(new, piece.x, piece.y, piece.width, piece.height)).collect();
         let compressed: Vec<Vec<u8>> = std::thread::scope(|scope| {
             let work: Vec<_> = cuts.iter().map(|cut| scope.spawn(move || compress(&cut.data))).collect();
             work.into_iter().map(|done| done.join().unwrap_or_default()).collect()
@@ -595,47 +593,10 @@ fn delete_image(out: &mut Vec<u8>, id: u32) {
     out.extend_from_slice(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes());
 }
 
-/// Append `base64` as an image, in escapes of at most `CHUNK` bytes, the
-/// first carrying `keys`.
-fn transmit(out: &mut Vec<u8>, keys: &str, base64: &str) {
-    let mut chunks = base64.as_bytes().chunks(CHUNK).peekable();
-    let mut first = true;
-    while let Some(chunk) = chunks.next() {
-        let more = u8::from(chunks.peek().is_some());
-        if first {
-            out.extend_from_slice(format!("\x1b_G{keys},m={more}").as_bytes());
-            first = false;
-        } else {
-            out.extend_from_slice(format!("\x1b_Gm={more}").as_bytes());
-        }
-        out.push(b';');
-        out.extend_from_slice(chunk);
-        out.extend_from_slice(b"\x1b\\");
-    }
-}
-
 /// How hard zlib works on strips: 3 makes them about as small as Chrome's
 /// own PNGs, in a third of the time 6 takes; PNG's row filters only made
 /// them larger.
 const LEVEL: u8 = 3;
-
-/// Decode a PNG into `data`, which is reused if it is large enough.
-fn decode(bytes: &[u8], mut data: Vec<u8>) -> Option<Pixels> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    // Frames come from Chrome over a pipe, not off a disk or a network:
-    // checking their checksums is a tenth of the time for nothing.
-    decoder.ignore_checksums(true);
-    let mut reader = decoder.read_info().ok()?;
-    data.resize(reader.output_buffer_size()?, 0);
-    let info = reader.next_frame(&mut data).ok()?;
-    data.truncate(info.buffer_size());
-    let alpha = match (info.color_type, info.bit_depth) {
-        (png::ColorType::Rgb, png::BitDepth::Eight) => false,
-        (png::ColorType::Rgba, png::BitDepth::Eight) => true,
-        _ => return None,
-    };
-    Some(Pixels { width: info.width, height: info.height, alpha, data })
-}
 
 /// At most this many strips are compressed at once.
 const MAX_THREADS: usize = 4;
@@ -657,22 +618,9 @@ fn split(strips: &[Rect], threads: usize) -> Vec<Rect> {
     pieces
 }
 
-/// The pixels of `rect`, zlib-compressed for the terminal.
+/// Raw pixels, zlib-compressed for the terminal (`o=z`).
 fn compress(data: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(data, LEVEL)
-}
-
-/// The pixels of `rect` of `pixels`.
-fn cut(pixels: &Pixels, rect: Rect) -> Pixels {
-    let bytes = if pixels.alpha { 4 } else { 3 };
-    let stride = pixels.width as usize * bytes;
-    let mut data = Vec::with_capacity(rect.width as usize * rect.height as usize * bytes);
-    for y in rect.y..rect.y + rect.height {
-        data.extend_from_slice(
-            &pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes],
-        );
-    }
-    Pixels { width: rect.width, height: rect.height, alpha: pixels.alpha, data }
 }
 
 /// `width` pixels of row `y` of `pixels`, from column `x`.
@@ -694,8 +642,9 @@ fn row_hash(row: &[u8]) -> u64 {
     hash
 }
 
-/// The hashes in `find_regions` are already well mixed: hashing them again
-/// would only cost time.
+/// Maps keyed by row hashes (`find_regions`, `Rows`) use them as they are:
+/// they are already well mixed, and hashing them again would only cost
+/// time.
 #[derive(Default)]
 struct Identity(u64);
 
@@ -729,15 +678,7 @@ fn column_hashes(pixels: &Pixels, width: u32) -> Vec<u64> {
     let mut hashes = vec![0; columns * height];
     for (y, row) in pixels.data.chunks_exact(stride).enumerate() {
         for (c, part) in row.chunks(column).enumerate() {
-            let (words, rest) = part.as_chunks::<8>();
-            let mut hash = part.len() as u64;
-            for word in words {
-                hash = mix(hash, u64::from_le_bytes(*word));
-            }
-            for &byte in rest {
-                hash = mix(hash, byte as u64);
-            }
-            hashes[c * height + y] = hash;
+            hashes[c * height + y] = row_hash(part);
         }
     }
     hashes
@@ -846,8 +787,8 @@ fn changed(old: &Pixels, new: &Pixels, region: &Region) -> Vec<Rect> {
     strips
 }
 
-/// What a strip costs beyond its pixels (an escape, a PNG's headers, a
-/// placement for the terminal to keep), in pixels.
+/// What a strip costs beyond its pixels (an escape and its keys, zlib's
+/// header and checksum, a placement for the terminal to keep), in pixels.
 const STRIP_COST: u64 = 4096;
 
 /// Join strips that cost less together than apart, as many small ones
@@ -883,24 +824,17 @@ fn area(rects: &[Rect]) -> u64 {
 mod tests {
     use super::*;
 
-    fn encode_png(pixels: &Pixels, rect: Rect) -> Option<Vec<u8>> {
-        let bytes = if pixels.alpha { 4 } else { 3 };
-        let stride = pixels.width as usize * bytes;
-        let mut data = Vec::with_capacity(rect.width as usize * rect.height as usize * bytes);
-        for y in rect.y..rect.y + rect.height {
-            data.extend_from_slice(
-                &pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes],
-            );
-        }
+    /// `pixels` as a base64 PNG, as Chrome sends frames.
+    fn encode(pixels: &Pixels) -> String {
         let mut png = Vec::new();
-        let mut encoder = png::Encoder::new(&mut png, rect.width, rect.height);
+        let mut encoder = png::Encoder::new(&mut png, pixels.width, pixels.height);
         encoder.set_color(if pixels.alpha { png::ColorType::Rgba } else { png::ColorType::Rgb });
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().ok()?;
-        writer.write_image_data(&data).ok()?;
-        writer.finish().ok()?;
-        Some(png)
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&pixels.data).unwrap();
+        writer.finish().unwrap();
+        crate::base64::encode(&png)
     }
 
     /// A frame `width` pixels wide whose pixel at `x`, `y` is `at(x, y)`.
@@ -1003,11 +937,6 @@ mod tests {
 
     #[test]
     fn draws_whole_then_strips() {
-        let encode = |pixels: &Pixels| {
-            crate::base64::encode(
-                &encode_png(pixels, Rect { x: 0, y: 0, width: pixels.width, height: pixels.height }).unwrap(),
-            )
-        };
         // 2 columns, 10 rows of 4x4 pixel cells.
         let (cols, rows, cell) = (2, 10, (4, 4));
         let mut layers = Layers::default();
@@ -1113,7 +1042,7 @@ mod tests {
                     if action == "T" {
                         let bytes = crate::base64::decode(&data).unwrap();
                         let pixels = match number("f") {
-                            Some(100) => decode(&bytes, Vec::new()).unwrap(),
+                            Some(100) => decode_png(&bytes, Vec::new()).unwrap(),
                             Some(24) => Pixels {
                                 width: number("s").unwrap() as u32,
                                 height: number("v").unwrap() as u32,
@@ -1176,8 +1105,6 @@ mod tests {
                 _ => ((y + scrolled) * 13 % 256 + x * 3) as u8,
             })
         };
-        let encode =
-            |pixels: &Pixels| crate::base64::encode(&encode_png(pixels, Rect { x: 0, y: 0, width, height }).unwrap());
         let mut layers = Layers::default();
         let mut screen = Screen::default();
         let mut scrolled = 0;

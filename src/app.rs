@@ -956,7 +956,7 @@ impl App {
         if let Some(png) = self.frame.as_deref().filter(|_| frame) {
             let (cols, rows) = self.shown;
             let pixels = match self.by_file {
-                true => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes)),
+                true => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes, Vec::new())),
                 false => None,
             };
             // Only what changed, when the frame lines up with the cells;
