@@ -36,6 +36,9 @@ const MAX_PLACEMENTS: usize = 96;
 /// Changed rows this close together go in one strip: a strip's own cost
 /// (headers, an escape) is worth about this many unchanged rows.
 const GAP: u32 = 16;
+/// Fewer than one in this many rows of columns changed, and nothing is
+/// taken to have moved.
+const STILL: usize = 32;
 /// One column in this many votes on how far things moved.
 const SAMPLE: usize = 4;
 /// Images that no longer show are kept, up to this many pages' worth, to
@@ -689,6 +692,11 @@ fn column_hashes(pixels: &Pixels, width: u32) -> Vec<u64> {
 /// each column takes, of the likeliest shifts and no shift, the one that
 /// leaves it the fewest rows to send.
 fn find_regions(old: &[u64], new: &[u64], height: usize, column: u32, width: u32) -> Vec<Region> {
+    // Little changed (a caret, a typed word): nothing moved worth finding,
+    // and looking costs more than the rest of a frame's work.
+    if old.iter().zip(new).filter(|(a, b)| a != b).count() * STILL < old.len() {
+        return vec![Region { x: 0..width, shift: 0 }];
+    }
     let columns = old.len() / height.max(1);
     // Where each row that occurs once in its column of the old frame was,
     // for every fourth column: enough to find a part that moved a few cells
