@@ -256,6 +256,10 @@ struct App {
     describe_request: Option<u64>,
     /// Lines for the box, in place of the help: an element's details.
     panel: Option<Vec<String>>,
+    /// Whether the bar is asking to quit, after a click on its close
+    /// button, and whether it was answered yes.
+    asking_quit: bool,
+    quit_clicked: bool,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -394,6 +398,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         inspecting: false,
         describe_request: None,
         panel: None,
+        asking_quit: false,
+        quit_clicked: false,
     };
     if let Some(dark) = options.dark {
         app.chrome.color_scheme(Some(dark));
@@ -456,6 +462,25 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     if !(mouse.kind == MouseKind::Move && next_is_move && index + 1 < count) {
                         redraw |= app.on_mouse(mouse);
                     }
+                    if app.quit_clicked {
+                        quit = Some(Ok(()));
+                        break;
+                    }
+                }
+                Msg::Term(Event::Key(key)) if app.asking_quit => {
+                    match key.code {
+                        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                            quit = Some(Ok(()));
+                            break;
+                        }
+                        _ if app.bindings.action(&key, false) == Some(Action::Quit) => {
+                            quit = Some(Ok(()));
+                            break;
+                        }
+                        KeyCode::Char('n' | 'N') | KeyCode::Esc => app.asking_quit = false,
+                        _ => {}
+                    }
+                    redraw = true;
                 }
                 Msg::Term(Event::Key(key)) => {
                     // Any key closes the help, and does nothing else.
@@ -987,6 +1012,7 @@ impl App {
         let badge = badge.trim_end();
         let badge = (!badge.is_empty()).then_some(badge);
         match &mut self.find {
+            _ if self.asking_quit => ui::render_question(&mut out, ui::QUIT_QUESTION, cols),
             Some(field) => ui::render_bar(&mut out, field, cols, self.loading, Some("Find"), badge),
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge),
         }
@@ -1253,19 +1279,37 @@ impl App {
         if matches!(mouse.button, Some(Button::Back | Button::Forward)) {
             return false;
         }
+        // While the bar asks whether to quit, only its buttons answer.
+        if self.asking_quit {
+            let answer = (py < cell_h).then(|| ui::answer((px / cell_w) as usize + 1, ui::QUIT_QUESTION)).flatten();
+            match mouse.kind {
+                MouseKind::Move => self.set_pointer(if answer.is_some() { "pointer" } else { "default" }),
+                MouseKind::Press if mouse.button == Some(Button::Left) => match answer {
+                    Some(true) => self.quit_clicked = true,
+                    Some(false) => self.asking_quit = false,
+                    None => {}
+                },
+                _ => {}
+            }
+            return true;
+        }
         // A drag that began on the page stays with the page.
         if py < cell_h && self.buttons == 0 {
             let col = (px / cell_w) as usize + 1;
             if mouse.kind == MouseKind::Move {
                 let shape = match ui::hit(col, self.window.cols as usize) {
                     Hit::Address(_) => "text",
-                    Hit::Back | Hit::Forward | Hit::Reload => "pointer",
+                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Close => "pointer",
                     Hit::Nothing => "default",
                 };
                 self.set_pointer(shape);
             }
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
                 return false;
+            }
+            if ui::hit(col, self.window.cols as usize) == Hit::Close {
+                self.asking_quit = true;
+                return true;
             }
             if let Some(field) = &mut self.find {
                 if let Hit::Address(offset) = ui::hit(col, self.window.cols as usize) {
@@ -1280,7 +1324,7 @@ impl App {
                 Hit::Reload => self.chrome.reload(),
                 Hit::Address(offset) if self.bar.focused() => self.bar.click(offset),
                 Hit::Address(_) => self.bar.focus(),
-                Hit::Nothing => {}
+                Hit::Close | Hit::Nothing => {}
             }
             return true;
         }

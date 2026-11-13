@@ -6,6 +6,8 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- A ✕ at the right of the bar quits, after asking "Quit KittyBrowser?"
+  (Yes or Enter, No or Esc).
 - Copy: Cmd+C or Ctrl+C copies the selection, or the address while editing
   it, to the system clipboard through the terminal; what pages copy
   themselves (copy buttons) goes there too.

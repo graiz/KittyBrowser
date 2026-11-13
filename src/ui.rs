@@ -8,17 +8,20 @@ use std::fmt::Write;
 const BACK: std::ops::RangeInclusive<usize> = 1..=3;
 const FORWARD: std::ops::RangeInclusive<usize> = 4..=6;
 const RELOAD: std::ops::RangeInclusive<usize> = 7..=9;
-/// The address field starts here and runs to the second-last column, with
-/// one cell of padding inside each end.
+/// The address field starts here and runs to just before the close
+/// button, with one cell of padding inside each end.
 const FIELD: usize = 11;
+/// The close button, at the right end: a space, the cross, a space.
+const CLOSE: usize = 3;
 /// Panes narrower than this get an empty bar.
-const MIN_COLS: usize = 16;
+const MIN_COLS: usize = 20;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hit {
     Back,
     Forward,
     Reload,
+    Close,
     /// A click in the address field, as an offset into the visible text.
     Address(usize),
     Nothing,
@@ -34,10 +37,40 @@ pub fn hit(col: usize, cols: usize) -> Hit {
         Hit::Forward
     } else if RELOAD.contains(&col) {
         Hit::Reload
-    } else if (FIELD..cols).contains(&col) {
+    } else if col > cols {
+        Hit::Nothing
+    } else if col > cols - CLOSE {
+        Hit::Close
+    } else if (FIELD..=cols - CLOSE).contains(&col) {
         Hit::Address(col.saturating_sub(FIELD + 1))
     } else {
         Hit::Nothing
+    }
+}
+
+/// The question the bar asks before quitting.
+pub const QUIT_QUESTION: &str = "Quit KittyBrowser?";
+
+/// Draw `question` in the top bar with Yes and No buttons after it.
+pub fn render_question(out: &mut Vec<u8>, question: &str, cols: usize) {
+    let colors = palette();
+    let mut s = format!("\x1b[1;1H{}\x1b[2K {question}  ", colors.bar);
+    let _ = write!(s, "{} Yes {} {} No {}", colors.focused, colors.bar, colors.field, colors.bar);
+    let used = question.chars().count() + 13;
+    let _ = write!(s, "{:pad$}\x1b[0m\x1b[?25l", "", pad = cols.saturating_sub(used));
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// Which button of `render_question`'s a column is on: `Some(true)` for Yes.
+pub fn answer(col: usize, question: &str) -> Option<bool> {
+    // " question  " then " Yes ", a space, " No ".
+    let yes = question.chars().count() + 4;
+    if (yes..yes + 5).contains(&col) {
+        Some(true)
+    } else if (yes + 6..yes + 10).contains(&col) {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -389,7 +422,7 @@ pub fn render_bar(
 
     let badge = badge.filter(|badge| cols > MIN_COLS + badge.chars().count());
     let badge_width = badge.map_or(0, |badge| badge.chars().count() + 1);
-    let width = cols - FIELD - 2 - badge_width;
+    let width = cols - FIELD - 2 - CLOSE - badge_width;
     let window = bar.window(width);
     let shown: Vec<char> = bar.text.iter().chain(&bar.completion).copied().collect();
     let typed_end = bar.text.len().clamp(window.start, window.end);
@@ -411,7 +444,7 @@ pub fn render_bar(
     if let Some(badge) = badge {
         let _ = write!(s, "{badge} ");
     }
-    s.push_str("\x1b[0m");
+    s.push_str(" ✕ \x1b[0m");
     if bar.focused {
         // A bar-shaped cursor at the insertion point.
         let _ = write!(s, "\x1b[1;{}H\x1b[6 q\x1b[?25h", FIELD + 1 + bar.cursor - window.start);
@@ -649,7 +682,18 @@ mod tests {
         assert_eq!(hit(10, 80), Hit::Nothing);
         assert_eq!(hit(11, 80), Hit::Address(0));
         assert_eq!(hit(14, 80), Hit::Address(2));
-        assert_eq!(hit(80, 80), Hit::Nothing);
+        assert_eq!(hit(77, 80), Hit::Address(65));
+        assert_eq!(hit(78, 80), Hit::Close);
+        assert_eq!(hit(80, 80), Hit::Close);
+        assert_eq!(hit(81, 80), Hit::Nothing);
+        // " Quit?  " puts Yes at columns 9 to 13 and No at 15 to 18.
+        assert_eq!(answer(8, "Quit?"), None);
+        assert_eq!(answer(9, "Quit?"), Some(true));
+        assert_eq!(answer(13, "Quit?"), Some(true));
+        assert_eq!(answer(14, "Quit?"), None);
+        assert_eq!(answer(15, "Quit?"), Some(false));
+        assert_eq!(answer(18, "Quit?"), Some(false));
+        assert_eq!(answer(19, "Quit?"), None);
     }
 
     #[test]
