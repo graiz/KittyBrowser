@@ -38,7 +38,7 @@ pub struct Splash {
 
 impl Splash {
     pub fn new() -> Option<Splash> {
-        let logo = graphics::decode_png(LOGO).filter(|logo| logo.alpha)?;
+        let logo = graphics::decode_png(LOGO, Vec::new()).filter(|logo| logo.alpha)?;
         let frames = (0..FRAMES).map(|n| frame(&logo, n)).collect();
         Some(Splash { frames, next: 0, started: Instant::now(), last: None })
     }

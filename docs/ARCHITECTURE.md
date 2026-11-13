@@ -43,8 +43,16 @@ Things it takes care of itself:
   So the scale is fixed per run. Resizing the viewport later needs no restart.
 - **New windows.** There are no tabs. A page opened by a link or script is
   loaded in the one page instead and its own target closed.
-- **User agent.** "HeadlessChrome" is replaced with "Chrome"; some sites
-  refuse the former.
+- **Looking like a browser.** Sites such as Google answer what looks like a
+  robot with captchas, and headless Chrome looks like one in four ways, each
+  put right: `navigator.webdriver` is true (Chrome starts with
+  `--disable-blink-features=AutomationControlled`); the user agent says
+  "HeadlessChrome" (replaced with "Chrome"); replacing it empties the client
+  hints, `Sec-CH-UA` and `navigator.userAgentData` (so kb gives them: the
+  browser it runs, its version, the system's); and the screen is 400x300 and
+  the window 500x256, smaller than the page (the screen is given as a
+  laptop's, or the page's if larger, and the window is kept a browser's frame
+  bigger than the page, below).
 - **Exit.** `Browser.close` first, so cookies reach the profile, then a kill
   if Chrome hasn't gone within two seconds.
 
@@ -125,6 +133,18 @@ with the one on screen:
   terminal to report errors (`q=1`); if it says it no longer has an image,
   everything is drawn again.
 
+This needs more of the protocol than a whole frame does: placements of
+part of an image (`x,y,w,h`), offsets within a cell (`X,Y`), stacking (`z`)
+and zlib-compressed pixels (`o=z`). For a terminal that has only the basics,
+`KB_TRANSFER=png` sends every frame whole, as a PNG scaled to the cells
+(`a=T,f=100,c,r`), as kb did before.
+
+Which of these drew what is on screen is noted (`term::page::PageImage`):
+each knows only its own images, so when another takes over, all images are
+deleted first. A frame that doesn't fit the cells (one rendered before a
+resize) goes whole, as image 1, above the layers; left there, it would hide
+every frame they draw after it.
+
 Measured with `kb bench` over ssh on a LAN (Ghostty, 171x50 cells, frames
 2736x1666, Wikipedia), median milliseconds per step:
 
@@ -143,12 +163,20 @@ ms to show, but soft text for a third of a second), JPEG from Chrome,
 `captureScreenshot`, and `--disable-frame-rate-limit` (halves Chrome's time,
 but animated pages then take three cores).
 
-**Headless window.** On a Mac whose display is asleep, Chrome crops
-screencast frames to its headless window, which can be as small as 500x256,
-whatever viewport `Emulation.setDeviceMetricsOverride` sets. kb compares
-each frame's size in its metadata with the viewport it asked for and, when
-they differ, resizes the window by the difference
-(`Browser.setWindowBounds`). Where frames already match, nothing is sent.
+**Headless window.** On a Mac, Chrome makes screencast frames the size of
+its headless window less a margin for the browser's frame, whatever
+viewport `Emulation.setDeviceMetricsOverride` sets: a 500x256 window gave
+frames of 500x113 CSS pixels, 143 short. So kb sets the window to the
+viewport plus that margin (`Browser.setWindowBounds`) on every resize, which
+also gives pages a window as big as they are. A frame of another size that
+can't be a late one (the size of an earlier viewport, or of an earlier
+window less the margin) was made in the window as it is, so corrects the
+margin. The size is absolute, so a late frame can't make it drift (`Window`
+in `engine/chrome.rs`). Two things follow on a Mac. Frames stop after the
+window changes until the screencast is started again, so kb restarts it
+when Chrome answers each change. And macOS keeps windows at least 500
+wide, so a narrower viewport comes in frames 500 wide, holding the page in
+their top left; kb cuts those to the viewport (`Window::crop`).
 
 **Pacing** (`App::frame_gap`). Chrome sends a frame, then waits for it to be
 acknowledged; kb decides when. While the page is in use (a key, the mouse,

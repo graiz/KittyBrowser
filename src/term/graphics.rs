@@ -34,14 +34,18 @@ const CHUNK: usize = 4096;
 /// Append the escapes that draw `png_base64` at the cursor, scaled to fill
 /// `cols` x `rows` cells. The cursor doesn't move.
 pub fn put_png(out: &mut Vec<u8>, png_base64: &str, cols: u16, rows: u16) {
-    let mut chunks = png_base64.as_bytes().chunks(CHUNK).peekable();
+    transmit(out, &format!("a=T,f=100,i={IMAGE_ID},p=1,z={PAGE_Z},q=2,C=1,c={cols},r={rows}"), png_base64);
+}
+
+/// Append `base64` as an image, in escapes of at most `CHUNK` bytes, the
+/// first carrying `keys`.
+pub(super) fn transmit(out: &mut Vec<u8>, keys: &str, base64: &str) {
+    let mut chunks = base64.as_bytes().chunks(CHUNK).peekable();
     let mut first = true;
     while let Some(chunk) = chunks.next() {
         let more = u8::from(chunks.peek().is_some());
         if first {
-            let keys = format!("a=T,f=100,i={IMAGE_ID},p=1,z={PAGE_Z},q=2,C=1,c={cols},r={rows},m={more}");
-            out.extend_from_slice(b"\x1b_G");
-            out.extend_from_slice(keys.as_bytes());
+            out.extend_from_slice(format!("\x1b_G{keys},m={more}").as_bytes());
             first = false;
         } else {
             out.extend_from_slice(format!("\x1b_Gm={more}").as_bytes());
@@ -60,10 +64,18 @@ pub struct Pixels {
     pub data: Vec<u8>,
 }
 
-pub fn decode_png(bytes: &[u8]) -> Option<Pixels> {
+/// Decode a PNG into `data`, which is reused if it is large enough: a new
+/// frame's worth of memory costs a page fault every 16 KB, a millisecond or
+/// two a frame.
+pub fn decode_png(bytes: &[u8], mut data: Vec<u8>) -> Option<Pixels> {
     // png 0.18 reads from anything that can seek, so a slice goes in a cursor.
-    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
-    let mut data = vec![0; reader.output_buffer_size()?];
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    // Frames come from Chrome over a pipe and the logo is built in, neither
+    // off a disk or a network: checking checksums is a tenth of the time
+    // for nothing.
+    decoder.ignore_checksums(true);
+    let mut reader = decoder.read_info().ok()?;
+    data.resize(reader.output_buffer_size()?, 0);
     let info = reader.next_frame(&mut data).ok()?;
     data.truncate(info.buffer_size());
     let alpha = match (info.color_type, info.bit_depth) {
@@ -134,6 +146,15 @@ fn put_raw_file(
     );
 }
 
+/// Whether a frame of `size` pixels lines up with `cols` x `rows` cells of
+/// `cell` pixels, as `Tiles` and `layers::Layers` need: it must cover them
+/// exactly, give or take the pixel or two of rounding a viewport picks up,
+/// which is cropped.
+pub fn fits(size: (u32, u32), cols: u16, rows: u16, cell: (u32, u32)) -> bool {
+    let covers = |have: u32, cells: u16, size: u32| (0..=2).contains(&(have as i64 - cells as i64 * size as i64));
+    covers(size.0, cols, cell.0) && covers(size.1, rows, cell.1)
+}
+
 /// What `Tiles::draw` sent.
 #[derive(PartialEq, Eq, Debug)]
 pub enum Drawn {
@@ -159,23 +180,10 @@ pub struct Tiles {
 }
 
 impl Tiles {
-    /// Whether the screen holds a page this drew.
-    pub fn active(&self) -> bool {
-        self.shown.is_some()
-    }
-
     /// The screen was cleared of images: the next draw sends the whole page.
     pub fn forget(&mut self) {
         self.shown = None;
         self.overlaid.clear();
-    }
-
-    /// Whether a frame lines up with `cols` x `rows` cells of `cell`
-    /// pixels: it must cover them exactly, give or take the pixel or two of
-    /// rounding a viewport picks up, which is cropped.
-    pub fn fits(pixels: &Pixels, cols: u16, rows: u16, cell: (u32, u32)) -> bool {
-        let covers = |have: u32, cells: u16, size: u32| (0..=2).contains(&(have as i64 - cells as i64 * size as i64));
-        covers(pixels.width, cols, cell.0) && covers(pixels.height, rows, cell.1)
     }
 
     /// Append the escapes that bring the screen to `new`, which must fit
@@ -235,16 +243,12 @@ impl Tiles {
             Drawn::Whole
         } else {
             for &(id, col, row, tile_cols, tile_rows) in &changed {
-                let (x, width) = (col as usize * cell_w * bytes, tile_cols as usize * cell_w * bytes);
-                let lines = row as usize * cell_h..(row + tile_rows) as usize * cell_h;
-                let mut data = Vec::with_capacity(width * lines.len());
-                for y in lines.clone() {
-                    data.extend_from_slice(&new.data[y * stride + x..][..width]);
-                }
+                let (x, y) = (col as u32 * cell.0, row as u32 * cell.1);
+                let tile = cut(&new, x, y, tile_cols as u32 * cell.0, tile_rows as u32 * cell.1);
                 let path = next_path();
-                std::fs::write(&path, data).ok()?;
+                std::fs::write(&path, &tile.data).ok()?;
                 out.extend_from_slice(format!("\x1b[{};{}H", top + row, col + 1).as_bytes());
-                let size = ((width / bytes) as u32, lines.len() as u32);
+                let size = (tile.width, tile.height);
                 put_raw_file(out, &path, size, new.alpha, id, TILE_Z, tile_cols, tile_rows);
                 self.last.push(path);
                 if !self.overlaid.contains(&id) {
@@ -256,6 +260,18 @@ impl Tiles {
         self.shown = Some(new);
         Some(drawn)
     }
+}
+
+/// The pixels of the `width` x `height` rectangle of `pixels` whose top
+/// left is at `x`, `y`.
+pub(super) fn cut(pixels: &Pixels, x: u32, y: u32, width: u32, height: u32) -> Pixels {
+    let bytes = if pixels.alpha { 4 } else { 3 };
+    let stride = pixels.width as usize * bytes;
+    let mut data = Vec::with_capacity(width as usize * height as usize * bytes);
+    for row in y as usize..(y + height) as usize {
+        data.extend_from_slice(&pixels.data[row * stride + x as usize * bytes..][..width as usize * bytes]);
+    }
+    Pixels { width, height, alpha: pixels.alpha, data }
 }
 
 /// Cut a frame down to `width` x `height`, dropping the right and bottom
@@ -307,7 +323,7 @@ mod tests {
 
     #[test]
     fn decodes_png_and_jpeg() {
-        let png = decode_png(include_bytes!("../../assets/logo.png")).expect("the logo decodes");
+        let png = decode_png(include_bytes!("../../assets/logo.png"), Vec::new()).expect("the logo decodes");
         assert_eq!((png.width, png.height), (570, 435));
         assert_eq!(png.data.len(), 570 * 435 * if png.alpha { 4 } else { 3 });
         if let Ok(path) = std::env::var("KB_TEST_JPEG") {
@@ -356,9 +372,9 @@ mod tests {
         let (cols, rows, cell) = (30, 14, (2, 4));
         let mut tiles = Tiles::default();
         let mut out = Vec::new();
-        assert!(Tiles::fits(&solid(60, 56, 0), cols, rows, cell));
-        assert!(Tiles::fits(&solid(61, 57, 0), cols, rows, cell));
-        assert!(!Tiles::fits(&solid(59, 56, 0), cols, rows, cell));
+        assert!(fits((60, 56), cols, rows, cell));
+        assert!(fits((61, 57), cols, rows, cell));
+        assert!(!fits((59, 56), cols, rows, cell));
         // The first frame goes whole, a pixel too wide and cropped.
         assert_eq!(tiles.draw(&mut out, solid(61, 56, 0), cols, rows, cell, 2), Some(Drawn::Whole));
         let text = String::from_utf8(std::mem::take(&mut out)).unwrap();

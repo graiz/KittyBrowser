@@ -23,13 +23,18 @@
 //! placements pile up, the whole frame goes again as Chrome sent it. The
 //! screen always ends exactly at Chrome's frame: whatever isn't known to be
 //! on screen already, pixel for pixel, is sent.
+//!
+//! Images are placed at their own size, not scaled to cells, so this relies
+//! on `cell` being the terminal's cell to the pixel (`KB_TRANSFER=png` if not).
 
-use super::graphics::{crop, Pixels};
+use super::graphics::{crop, cut, decode_png, fits, png_size, transmit, Pixels};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// Ids from here up are these images, clear of the page, tiles and queries.
 const FIRST_ID: u32 = 1000;
+/// How many image ids, and placement ids, are used before starting again.
+const IDS: u32 = 1_000_000;
 /// Images are stacked from here up, each above the last. Below
 /// -1,073,741,824 an image is drawn under text and cell backgrounds, as the
 /// page is (see graphics::PAGE_Z).
@@ -50,8 +55,6 @@ const RETAIN: u64 = 2;
 /// Rows of a held image are placed again only this many at a time or
 /// more; fewer cost about as much to place as to send.
 const MIN_RUN: u32 = 32;
-/// The protocol's limit on the payload of one escape.
-const CHUNK: usize = 4096;
 
 /// A rectangle, in pixels.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -159,8 +162,7 @@ pub struct Layers {
     next_image: u32,
     next_placement: u32,
     next_z: i64,
-    /// A frame's worth of memory to decode the next frame into: a new one
-    /// costs a page fault every 16 KB, a millisecond or two a frame.
+    /// A frame's worth of memory to decode the next frame into.
     spare: Vec<u8>,
     /// The images the terminal holds, oldest first, with their pixels.
     held: Vec<Held>,
@@ -187,11 +189,6 @@ struct Held {
 type Rows = HashMap<u64, Option<u32>, BuildHasherDefault<Identity>>;
 
 impl Layers {
-    /// Whether the screen holds a page this drew.
-    pub fn active(&self) -> bool {
-        self.shown.is_some()
-    }
-
     /// The terminal reported an error for image `id`. If it is one of
     /// these, it was most likely dropped, and the screen is in no known
     /// state: this forgets it all and returns true, and the caller should
@@ -214,9 +211,9 @@ impl Layers {
     /// Append the escapes that bring the screen to `png_base64`, one of
     /// Chrome's frames, drawn at `top` (a screen row) over `cols` x `rows`
     /// cells of `cell` pixels. `None`, having appended nothing, if the frame
-    /// can't be decoded or doesn't line up with the cells (see
-    /// `Tiles::fits`); the caller then draws it some other way, and calls
-    /// `forget` once it has cleared the screen.
+    /// doesn't line up with the cells (see `graphics::fits`) or can't be
+    /// decoded; the caller then draws it some other way, and calls `forget`
+    /// once it has cleared the screen.
     pub fn draw(
         &mut self,
         out: &mut Vec<u8>,
@@ -226,10 +223,11 @@ impl Layers {
         cell: (u32, u32),
         top: u16,
     ) -> Option<Sent> {
-        let new = decode(&crate::base64::decode(png_base64)?, std::mem::take(&mut self.spare))?;
-        if !super::graphics::Tiles::fits(&new, cols, rows, cell) {
+        // Decoding takes 10 ms or so: not for a frame that can't be used.
+        if !png_size(png_base64).is_some_and(|size| fits(size, cols, rows, cell)) {
             return None;
         }
+        let new = decode_png(&crate::base64::decode(png_base64)?, std::mem::take(&mut self.spare))?;
         let bytes = if new.alpha { 4 } else { 3 };
         let new = crop(new, cols as u32 * cell.0, rows as u32 * cell.1, bytes)?;
         let hashes = column_hashes(&new, cell.0);
@@ -273,8 +271,9 @@ impl Layers {
         for held in self.held.drain(..) {
             delete_image(out, held.id);
         }
-        self.next_z = BOTTOM_Z;
-        let placement = self.new_placement(Rect { x: 0, y: 0, width: new.width, height: new.height });
+        // Nothing is left, so ids and z start again.
+        (self.next_image, self.next_placement, self.next_z) = (0, 0, BOTTOM_Z);
+        let placement = self.new_placement(Rect { x: 0, y: 0, width: new.width, height: new.height }, &[]);
         page.cursor(out, &placement);
         let keys = format!(
             "a=T,f=100,i={},p={},w={},h={},z={},C=1,q=2",
@@ -315,27 +314,28 @@ impl Layers {
         // each region, if any shows and no strip covers it (the first part
         // keeps the placement's id), then the held images placed again,
         // then the pieces sent.
-        let mut next = Vec::with_capacity(self.placements.len() + reused.len() + pieces.len());
-        for placement in std::mem::take(&mut self.placements) {
+        let old = std::mem::take(&mut self.placements);
+        let mut next = Vec::with_capacity(old.len() + reused.len() + pieces.len());
+        for placement in &old {
             let parts = regions
                 .iter()
                 .filter_map(|region| placement.moved(region, page.height))
                 .filter(|part| !strips.iter().any(|strip| strip.contains(&part.on_page())));
             for (n, part) in parts.enumerate() {
-                next.push(if n == 0 { part } else { Placement { id: self.next_id(), ..part } });
+                next.push(if n == 0 { part } else { Placement { id: self.next_id(&old), ..part } });
             }
-            self.placements.push(placement);
         }
         for &(image, from, x, y) in &reused {
             self.next_z += 1;
-            next.push(Placement { image, id: self.next_id(), z: self.next_z, from, x, y });
+            next.push(Placement { image, id: self.next_id(&old), z: self.next_z, from, x, y });
         }
         let first_sent = next.len();
         for piece in &pieces {
-            let mut placement = self.new_placement(*piece);
+            let mut placement = self.new_placement(*piece, &old);
             (placement.x, placement.y) = (piece.x, piece.y);
             next.push(placement);
         }
+        self.placements = old;
         let shows = visible(&next, new.width, page);
         if shows.iter().filter(|&&shows| shows).count() > MAX_PLACEMENTS {
             return Err(Why::Placements);
@@ -360,12 +360,18 @@ impl Layers {
             }
         }
 
-        let cuts: Vec<Pixels> = pieces.iter().map(|piece| cut(new, *piece)).collect();
+        // A piece that something above covers isn't sent at all: its
+        // placement would be forgotten here but not by the terminal, and
+        // show its stale pixels once what covers it goes.
+        let sent: Vec<&Placement> =
+            next[first_sent..].iter().zip(&shows[first_sent..]).filter(|(_, &shows)| shows).map(|(p, _)| p).collect();
+        let cuts: Vec<Pixels> =
+            sent.iter().map(|piece| cut(new, piece.x, piece.y, piece.from.width, piece.from.height)).collect();
         let compressed: Vec<Vec<u8>> = std::thread::scope(|scope| {
             let work: Vec<_> = cuts.iter().map(|cut| scope.spawn(move || compress(&cut.data))).collect();
             work.into_iter().map(|done| done.join().unwrap_or_default()).collect()
         });
-        for ((placement, data), pixels) in next[first_sent..].iter().zip(compressed).zip(cuts) {
+        for ((placement, data), pixels) in sent.into_iter().zip(compressed).zip(cuts) {
             page.cursor(out, placement);
             let keys = format!(
                 "a=T,f={},s={},v={},o=z,i={},p={},X={},Y={},z={},C=1,q=2",
@@ -491,15 +497,21 @@ impl Layers {
     }
 
     /// A new image of `size`, all of it placed at the page's top left, on
-    /// top of everything.
-    fn new_placement(&mut self, size: Rect) -> Placement {
-        // Ids wrap long before they could reach a live image's again.
-        self.next_image =
-            if (FIRST_ID..FIRST_ID + 1_000_000).contains(&self.next_image) { self.next_image + 1 } else { FIRST_ID };
+    /// top of everything. `live` are the placements on screen.
+    fn new_placement(&mut self, size: Rect, live: &[Placement]) -> Placement {
+        // Ids start again after `IDS`, skipping those still held: under an
+        // animation the first image can stay for as long as kb runs.
+        loop {
+            self.next_image =
+                if (FIRST_ID..FIRST_ID + IDS).contains(&self.next_image) { self.next_image + 1 } else { FIRST_ID };
+            if !self.held.iter().any(|held| held.id == self.next_image) {
+                break;
+            }
+        }
         self.next_z = self.next_z.max(BOTTOM_Z) + 1;
         Placement {
             image: self.next_image,
-            id: self.next_id(),
+            id: self.next_id(live),
             z: self.next_z,
             from: Rect { x: 0, y: 0, ..size },
             x: 0,
@@ -507,9 +519,14 @@ impl Layers {
         }
     }
 
-    fn next_id(&mut self) -> u32 {
-        self.next_placement = self.next_placement % 1_000_000 + 1;
-        self.next_placement
+    /// A placement id that none of `live`, the placements on screen, has.
+    fn next_id(&mut self, live: &[Placement]) -> u32 {
+        loop {
+            self.next_placement = self.next_placement % IDS + 1;
+            if !live.iter().any(|placement| placement.id == self.next_placement) {
+                return self.next_placement;
+            }
+        }
     }
 }
 
@@ -595,47 +612,10 @@ fn delete_image(out: &mut Vec<u8>, id: u32) {
     out.extend_from_slice(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes());
 }
 
-/// Append `base64` as an image, in escapes of at most `CHUNK` bytes, the
-/// first carrying `keys`.
-fn transmit(out: &mut Vec<u8>, keys: &str, base64: &str) {
-    let mut chunks = base64.as_bytes().chunks(CHUNK).peekable();
-    let mut first = true;
-    while let Some(chunk) = chunks.next() {
-        let more = u8::from(chunks.peek().is_some());
-        if first {
-            out.extend_from_slice(format!("\x1b_G{keys},m={more}").as_bytes());
-            first = false;
-        } else {
-            out.extend_from_slice(format!("\x1b_Gm={more}").as_bytes());
-        }
-        out.push(b';');
-        out.extend_from_slice(chunk);
-        out.extend_from_slice(b"\x1b\\");
-    }
-}
-
 /// How hard zlib works on strips: 3 makes them about as small as Chrome's
 /// own PNGs, in a third of the time 6 takes; PNG's row filters only made
 /// them larger.
 const LEVEL: u8 = 3;
-
-/// Decode a PNG into `data`, which is reused if it is large enough.
-fn decode(bytes: &[u8], mut data: Vec<u8>) -> Option<Pixels> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    // Frames come from Chrome over a pipe, not off a disk or a network:
-    // checking their checksums is a tenth of the time for nothing.
-    decoder.ignore_checksums(true);
-    let mut reader = decoder.read_info().ok()?;
-    data.resize(reader.output_buffer_size()?, 0);
-    let info = reader.next_frame(&mut data).ok()?;
-    data.truncate(info.buffer_size());
-    let alpha = match (info.color_type, info.bit_depth) {
-        (png::ColorType::Rgb, png::BitDepth::Eight) => false,
-        (png::ColorType::Rgba, png::BitDepth::Eight) => true,
-        _ => return None,
-    };
-    Some(Pixels { width: info.width, height: info.height, alpha, data })
-}
 
 /// At most this many strips are compressed at once.
 const MAX_THREADS: usize = 4;
@@ -657,22 +637,9 @@ fn split(strips: &[Rect], threads: usize) -> Vec<Rect> {
     pieces
 }
 
-/// The pixels of `rect`, zlib-compressed for the terminal.
+/// Raw pixels, zlib-compressed for the terminal (`o=z`).
 fn compress(data: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(data, LEVEL)
-}
-
-/// The pixels of `rect` of `pixels`.
-fn cut(pixels: &Pixels, rect: Rect) -> Pixels {
-    let bytes = if pixels.alpha { 4 } else { 3 };
-    let stride = pixels.width as usize * bytes;
-    let mut data = Vec::with_capacity(rect.width as usize * rect.height as usize * bytes);
-    for y in rect.y..rect.y + rect.height {
-        data.extend_from_slice(
-            &pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes],
-        );
-    }
-    Pixels { width: rect.width, height: rect.height, alpha: pixels.alpha, data }
 }
 
 /// `width` pixels of row `y` of `pixels`, from column `x`.
@@ -694,8 +661,9 @@ fn row_hash(row: &[u8]) -> u64 {
     hash
 }
 
-/// The hashes in `find_regions` are already well mixed: hashing them again
-/// would only cost time.
+/// Maps keyed by row hashes (`find_regions`, `Rows`) use them as they are:
+/// they are already well mixed, and hashing them again would only cost
+/// time.
 #[derive(Default)]
 struct Identity(u64);
 
@@ -729,15 +697,7 @@ fn column_hashes(pixels: &Pixels, width: u32) -> Vec<u64> {
     let mut hashes = vec![0; columns * height];
     for (y, row) in pixels.data.chunks_exact(stride).enumerate() {
         for (c, part) in row.chunks(column).enumerate() {
-            let (words, rest) = part.as_chunks::<8>();
-            let mut hash = part.len() as u64;
-            for word in words {
-                hash = mix(hash, u64::from_le_bytes(*word));
-            }
-            for &byte in rest {
-                hash = mix(hash, byte as u64);
-            }
-            hashes[c * height + y] = hash;
+            hashes[c * height + y] = row_hash(part);
         }
     }
     hashes
@@ -846,8 +806,8 @@ fn changed(old: &Pixels, new: &Pixels, region: &Region) -> Vec<Rect> {
     strips
 }
 
-/// What a strip costs beyond its pixels (an escape, a PNG's headers, a
-/// placement for the terminal to keep), in pixels.
+/// What a strip costs beyond its pixels (an escape and its keys, zlib's
+/// header and checksum, a placement for the terminal to keep), in pixels.
 const STRIP_COST: u64 = 4096;
 
 /// Join strips that cost less together than apart, as many small ones
@@ -880,31 +840,24 @@ fn area(rects: &[Rect]) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn encode_png(pixels: &Pixels, rect: Rect) -> Option<Vec<u8>> {
-        let bytes = if pixels.alpha { 4 } else { 3 };
-        let stride = pixels.width as usize * bytes;
-        let mut data = Vec::with_capacity(rect.width as usize * rect.height as usize * bytes);
-        for y in rect.y..rect.y + rect.height {
-            data.extend_from_slice(
-                &pixels.data[y as usize * stride + rect.x as usize * bytes..][..rect.width as usize * bytes],
-            );
-        }
+    /// `pixels` as a base64 PNG, as Chrome sends frames.
+    pub(crate) fn encode(pixels: &Pixels) -> String {
         let mut png = Vec::new();
-        let mut encoder = png::Encoder::new(&mut png, rect.width, rect.height);
+        let mut encoder = png::Encoder::new(&mut png, pixels.width, pixels.height);
         encoder.set_color(if pixels.alpha { png::ColorType::Rgba } else { png::ColorType::Rgb });
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().ok()?;
-        writer.write_image_data(&data).ok()?;
-        writer.finish().ok()?;
-        Some(png)
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&pixels.data).unwrap();
+        writer.finish().unwrap();
+        crate::base64::encode(&png)
     }
 
     /// A frame `width` pixels wide whose pixel at `x`, `y` is `at(x, y)`.
-    fn frame(width: u32, height: u32, at: impl Fn(u32, u32) -> u8) -> Pixels {
+    pub(crate) fn frame(width: u32, height: u32, at: impl Fn(u32, u32) -> u8) -> Pixels {
         let mut data = Vec::new();
         for y in 0..height {
             for x in 0..width {
@@ -1003,11 +956,6 @@ mod tests {
 
     #[test]
     fn draws_whole_then_strips() {
-        let encode = |pixels: &Pixels| {
-            crate::base64::encode(
-                &encode_png(pixels, Rect { x: 0, y: 0, width: pixels.width, height: pixels.height }).unwrap(),
-            )
-        };
         // 2 columns, 10 rows of 4x4 pixel cells.
         let (cols, rows, cell) = (2, 10, (4, 4));
         let mut layers = Layers::default();
@@ -1055,11 +1003,12 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// Just enough of a kitty-graphics terminal to see what `Layers` puts
-    /// on the screen: images, placements of parts of them at pixels within
-    /// cells, stacked by z, and deletions.
+    /// Just enough of a kitty-graphics terminal to see what `Layers` (and
+    /// `page::PageImage`) puts on the screen: images, from the pty or from
+    /// files, placements of parts of them at pixels within cells, stacked by
+    /// z, and deletions.
     #[derive(Default)]
-    struct Screen {
+    pub(crate) struct Screen {
         cursor: (u32, u32),
         images: HashMap<u32, Pixels>,
         /// Image, placement id, z, order placed, part of the image, and its
@@ -1070,7 +1019,7 @@ mod tests {
     }
 
     impl Screen {
-        fn feed(&mut self, mut bytes: &[u8], cell: (u32, u32)) {
+        pub(crate) fn feed(&mut self, mut bytes: &[u8], cell: (u32, u32)) {
             while !bytes.is_empty() {
                 if let Some(rest) = bytes.strip_prefix(b"\x1b[") {
                     let end = rest.iter().position(|&b| b == b'H').unwrap();
@@ -1098,6 +1047,11 @@ mod tests {
             }
             keys.remove("m");
             let number = |key: &str| keys.get(key).map(|v| v.parse::<i64>().unwrap());
+            if keys["a"] == "d" && keys["d"] == "A" {
+                self.placements.clear();
+                self.images.clear();
+                return;
+            }
             let id = number("i").unwrap() as u32;
             match keys["a"].as_str() {
                 "d" => {
@@ -1111,14 +1065,25 @@ mod tests {
                 }
                 action => {
                     if action == "T" {
-                        let bytes = crate::base64::decode(&data).unwrap();
+                        let mut bytes = crate::base64::decode(&data).unwrap();
+                        if keys.get("t").is_some_and(|t| t == "t") {
+                            // A file's name: read it, and delete it.
+                            let path = String::from_utf8(bytes).unwrap();
+                            bytes = std::fs::read(&path).unwrap();
+                            std::fs::remove_file(&path).unwrap();
+                        }
+                        if keys.get("o").is_some_and(|o| o == "z") {
+                            bytes = miniz_oxide::inflate::decompress_to_vec_zlib(&bytes).unwrap();
+                        }
+                        // An image scaled to cells (`c`, `r`) is drawn at
+                        // its own size: the frames here fill their cells.
                         let pixels = match number("f") {
-                            Some(100) => decode(&bytes, Vec::new()).unwrap(),
+                            Some(100) => decode_png(&bytes, Vec::new()).unwrap(),
                             Some(24) => Pixels {
                                 width: number("s").unwrap() as u32,
                                 height: number("v").unwrap() as u32,
                                 alpha: false,
-                                data: miniz_oxide::inflate::decompress_to_vec_zlib(&bytes).unwrap(),
+                                data: bytes,
                             },
                             other => panic!("format {other:?}"),
                         };
@@ -1141,7 +1106,7 @@ mod tests {
         }
 
         /// The pixels of the screen from row `top`, `width` by `height`.
-        fn page(&self, top: u32, cell: (u32, u32), width: u32, height: u32) -> Vec<u8> {
+        pub(crate) fn page(&self, top: u32, cell: (u32, u32), width: u32, height: u32) -> Vec<u8> {
             let mut page = vec![0; width as usize * height as usize * 3];
             let mut order: Vec<_> = self.placements.iter().collect();
             order.sort_by_key(|q| (q.2, q.3));
@@ -1176,8 +1141,6 @@ mod tests {
                 _ => ((y + scrolled) * 13 % 256 + x * 3) as u8,
             })
         };
-        let encode =
-            |pixels: &Pixels| crate::base64::encode(&encode_png(pixels, Rect { x: 0, y: 0, width, height }).unwrap());
         let mut layers = Layers::default();
         let mut screen = Screen::default();
         let mut scrolled = 0;
@@ -1195,6 +1158,99 @@ mod tests {
                 // Back up over rows seen before: placed again, not sent.
                 assert!(!String::from_utf8_lossy(&out).contains("a=T"), "sent rows the terminal had: {sent:?}");
             }
+        }
+    }
+
+    /// Check that the terminal holds exactly the images and placements
+    /// `layers` thinks it does: one it has forgotten could show again.
+    fn nothing_left_behind(layers: &Layers, screen: &Screen) {
+        let sorted = |mut list: Vec<(u32, u32)>| {
+            list.sort();
+            list
+        };
+        let held = sorted(layers.held.iter().map(|held| (held.id, 0)).collect());
+        let images = sorted(screen.images.keys().map(|&id| (id, 0)).collect());
+        assert_eq!(held, images, "images");
+        let placed = sorted(layers.placements.iter().map(|p| (p.image, p.id)).collect());
+        let placements = sorted(screen.placements.iter().map(|q| (q.0, q.1)).collect());
+        assert_eq!(placed, placements, "placements");
+    }
+
+    #[test]
+    fn ids_start_again_around_those_in_use() {
+        // The first image, and its first placement, stay all along while
+        // the ids run out: the page beside the sidebar scrolls, which cuts
+        // the first image in two placements, and a caret blinks.
+        let (cols, rows, cell) = (4u16, 30u16, (4u32, 4u32));
+        let (width, height) = (16, 120);
+        let frame = |scrolled: u32, caret: bool| {
+            frame(width, height, |x, y| match (x, y) {
+                (0..4, _) => (y * 5 % 256) as u8,
+                (10, 50..54) if caret => 0,
+                _ => ((y + scrolled) * 13 % 256 + x * 3) as u8,
+            })
+        };
+        let mut layers = Layers::default();
+        let mut screen = Screen::default();
+        for (n, scrolled) in [0, 0, 3, 6, 9, 12, 15, 18].into_iter().enumerate() {
+            let new = frame(scrolled, n % 2 == 1);
+            let mut out = Vec::new();
+            let sent = layers.draw(&mut out, &encode(&new), cols, rows, cell, 2).unwrap();
+            screen.feed(&out, cell);
+            assert!(screen.page(2, cell, width, height) == new.data, "step {n}: sent {sent:?}");
+            nothing_left_behind(&layers, &screen);
+            if n == 0 {
+                (layers.next_image, layers.next_placement) = (FIRST_ID + IDS - 1, IDS - 1);
+            }
+        }
+    }
+
+    #[test]
+    fn a_covered_piece_is_not_sent() {
+        // 2 columns, 10 rows of 4x4 pixel cells. Rows 8 to 16 change, and
+        // come as two strips: one row, then all of them over it.
+        let (cols, rows, cell) = (2, 10, (4, 4));
+        let mut layers = Layers::default();
+        let mut screen = Screen::default();
+        let mut out = Vec::new();
+        layers.draw(&mut out, &encode(&page(10)), cols, rows, cell, 2).unwrap();
+        let mut new = page(10);
+        new.data[8 * 24..16 * 24].fill(9);
+        let strips = [Rect { x: 0, y: 9, width: 8, height: 1 }, Rect { x: 0, y: 8, width: 8, height: 8 }];
+        let page = Page { top: 2, cell, height: 40 };
+        assert_eq!(layers.patch(&mut out, &new, &whole_page(0), &strips, page), Ok(()));
+        screen.feed(&out, cell);
+        assert!(screen.page(2, cell, 8, 40) == new.data);
+        nothing_left_behind(&layers, &screen);
+    }
+
+    #[test]
+    fn a_long_walk_leaves_nothing_behind() {
+        // A sidebar that stays put, a page that scrolls by any amount, and
+        // here and there a few pixels that change, smaller than a cell.
+        let (cols, rows, cell) = (6u16, 20u16, (4u32, 5u32));
+        let (width, height) = (24, 100);
+        let mut seed = 7u64;
+        let mut random = |below: u64| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % below
+        };
+        let mut layers = Layers::default();
+        let mut screen = Screen::default();
+        let mut scrolled = 300i64;
+        for step in 0..400 {
+            scrolled = (scrolled + random(41) as i64 - 20).max(0);
+            let (dot, dot_x, dot_y) = (random(3) == 0, random(width as u64) as u32, random(height as u64) as u32);
+            let new = frame(width, height, |x, y| match (x, y) {
+                (0..4, _) => (y * 5 % 256) as u8,
+                _ if dot && (dot_x..dot_x + 2).contains(&x) && (dot_y..dot_y + 3).contains(&y) => 1,
+                _ => ((y as i64 + scrolled) * 13 % 256 + x as i64 * 3) as u8,
+            });
+            let mut out = Vec::new();
+            let sent = layers.draw(&mut out, &encode(&new), cols, rows, cell, 2).unwrap();
+            screen.feed(&out, cell);
+            assert!(screen.page(2, cell, width, height) == new.data, "step {step}: sent {sent:?}");
+            nothing_left_behind(&layers, &screen);
         }
     }
 }

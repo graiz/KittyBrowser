@@ -9,6 +9,7 @@ use crate::engine::chrome::{self, Chrome, PageEvent};
 use crate::history::History;
 use crate::keys::{Action, Bindings};
 use crate::term::input::{Button, Event, Key, KeyCode, Mouse, MouseKind, Parser};
+use crate::term::page::{PageImage, Route};
 use crate::term::size::{self, Window};
 use crate::term::{self, graphics};
 use crate::ui::{self, AddressBar, Edit, Hit};
@@ -205,14 +206,10 @@ struct App {
     frame: Option<String>,
     /// Whether the terminal reads frames from temporary files.
     by_file: bool,
-    /// The last frame written whole to a file.
-    last_file: Option<std::path::PathBuf>,
-    /// The page as tiles, when it is drawn that way.
-    tiles: graphics::Tiles,
-    /// The page through the pty, moved as it scrolls and only what changed
-    /// sent, when it is drawn that way (the terminal can't read files, as
-    /// over ssh).
-    layers: crate::term::layers::Layers,
+    /// The page's image on the screen.
+    page: PageImage,
+    /// Whether frames go through the pty only whole (`KB_TRANSFER=png`).
+    png_only: bool,
     /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
     /// so the page reflows as in a desktop browser and stays sharp.
     zoom: f64,
@@ -259,6 +256,10 @@ struct App {
     describe_request: Option<u64>,
     /// Lines for the box, in place of the help: an element's details.
     panel: Option<Vec<String>>,
+    /// Whether the bar is asking to quit, after a click on its close
+    /// button, and whether it was answered yes.
+    asking_quit: bool,
+    quit_clicked: bool,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -371,9 +372,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         loading: false,
         frame: None,
         by_file: false,
-        last_file: None,
-        tiles: graphics::Tiles::default(),
-        layers: Default::default(),
+        page: Default::default(),
+        png_only: false,
         zoom: 1.0,
         fit_request: None,
         help: false,
@@ -398,6 +398,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         inspecting: false,
         describe_request: None,
         panel: None,
+        asking_quit: false,
+        quit_clicked: false,
     };
     if let Some(dark) = options.dark {
         app.chrome.color_scheme(Some(dark));
@@ -406,9 +408,13 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         app.note(&format!("~/.kittybrowser/keys {error}"));
     }
     app.layout();
-    // KB_TRANSFER=pty keeps frames on the pty, should files misbehave.
-    if std::env::var("KB_TRANSFER").as_deref() != Ok("pty") {
-        graphics::ask_about_files();
+    // KB_TRANSFER=pty keeps frames on the pty, should files misbehave;
+    // KB_TRANSFER=png also sends them whole, for a terminal that can't
+    // place parts of images.
+    match std::env::var("KB_TRANSFER").as_deref() {
+        Ok("png") => app.png_only = true,
+        Ok("pty") => {}
+        _ => graphics::ask_about_files(),
     }
     app.chrome.hold_acks();
     app.chrome.start_screencast();
@@ -456,6 +462,25 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     if !(mouse.kind == MouseKind::Move && next_is_move && index + 1 < count) {
                         redraw |= app.on_mouse(mouse);
                     }
+                    if app.quit_clicked {
+                        quit = Some(Ok(()));
+                        break;
+                    }
+                }
+                Msg::Term(Event::Key(key)) if app.asking_quit => {
+                    match key.code {
+                        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                            quit = Some(Ok(()));
+                            break;
+                        }
+                        _ if app.bindings.action(&key, false) == Some(Action::Quit) => {
+                            quit = Some(Ok(()));
+                            break;
+                        }
+                        KeyCode::Char('n' | 'N') | KeyCode::Esc => app.asking_quit = false,
+                        _ => {}
+                    }
+                    redraw = true;
                 }
                 Msg::Term(Event::Key(key)) => {
                     // Any key closes the help, and does nothing else.
@@ -499,7 +524,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 }
                 Msg::Term(Event::Graphics { id, ok }) => {
                     log(format_args!("graphics reply for image {id}: {ok}"));
-                    if !ok && app.layers.lost(id) {
+                    if !ok && app.page.lost(id) {
                         // The terminal dropped an image the page was drawn
                         // with: start again from the whole page.
                         term::write(graphics::DELETE);
@@ -657,9 +682,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         }
     };
     app.history.save();
-    if let Some(path) = app.last_file.take() {
-        let _ = std::fs::remove_file(path);
-    }
+    app.page.close();
     app.chrome.close();
     result
 }
@@ -694,8 +717,7 @@ impl App {
     fn clear(&mut self) {
         term::write(b"\x1b[2J");
         term::write(graphics::DELETE);
-        self.tiles.forget();
-        self.layers.forget();
+        self.page.forget();
         self.help_rect = None;
     }
 
@@ -805,7 +827,7 @@ impl App {
             (Action::Inspect, "inspect an element"),
             (Action::Devtools, "Chrome DevTools (start kb with --devtools)"),
             (Action::Help, "this help"),
-            (Action::Quit, "quit"),
+            (Action::Quit, "quit (the ✕ in the bar asks first)"),
         ] {
             let keys = keys(action);
             if !keys.is_empty() {
@@ -823,7 +845,11 @@ impl App {
             ("pane", format!("{}x{} cells of {cell_w}x{cell_h} pixels", self.window.cols, self.window.rows)),
             (
                 "frames",
-                if self.by_file { "by file, changed blocks only".to_owned() } else { "through the pty".to_owned() },
+                match (self.by_file, self.png_only) {
+                    (true, _) => "by file, changed blocks only".to_owned(),
+                    (false, false) => "through the pty, what moved or changed".to_owned(),
+                    (false, true) => "through the pty, whole PNG frames (KB_TRANSFER=png)".to_owned(),
+                },
             ),
             ("agents", format!("kb ctl -i {} ...   (kb ctl --help)", self.instance)),
         ] {
@@ -955,66 +981,14 @@ impl App {
         }
         if let Some(png) = self.frame.as_deref().filter(|_| frame) {
             let (cols, rows) = self.shown;
-            let pixels = match self.by_file {
-                true => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes)),
-                false => None,
+            let scaled = self.fixed.is_some();
+            let route = match (self.by_file, self.png_only) {
+                (true, _) => Route::Files,
+                (false, false) => Route::Layers,
+                (false, true) => Route::Png,
             };
-            // Only what changed, when the frame lines up with the cells;
-            // otherwise (a fixed viewport, or a terminal that won't read
-            // files) one image scaled to fit.
-            let mut drawn = false;
-            let pixels = match pixels {
-                Some(pixels) if self.fixed.is_none() && graphics::Tiles::fits(&pixels, cols, rows, cell) => {
-                    if !self.tiles.active() {
-                        out.extend_from_slice(graphics::DELETE);
-                    }
-                    match self.tiles.draw(&mut out, pixels, cols, rows, cell, 2) {
-                        Some(sent) => {
-                            log(format_args!("drew {sent:?}"));
-                            drawn = true;
-                        }
-                        None => out.extend_from_slice(graphics::DELETE),
-                    }
-                    None
-                }
-                other => other,
-            };
-            // Through the pty, only what changed, when the frame lines up.
-            if pixels.is_none() && !self.by_file && self.fixed.is_none() {
-                match self.layers.draw(&mut out, png, cols, rows, cell, 2) {
-                    Some(sent) => {
-                        log(format_args!("drew {sent:?}"));
-                        drawn = true;
-                    }
-                    None if self.layers.active() => {
-                        out.extend_from_slice(graphics::DELETE);
-                        self.layers.forget();
-                    }
-                    None => {}
-                }
-            } else if self.layers.active() {
-                out.extend_from_slice(graphics::DELETE);
-                self.layers.forget();
-            }
-            if !drawn {
-                if self.tiles.active() {
-                    out.extend_from_slice(graphics::DELETE);
-                    self.tiles.forget();
-                }
-                out.extend_from_slice(b"\x1b[2;1H");
-                let path = graphics::next_path();
-                match pixels.filter(|pixels| std::fs::write(&path, &pixels.data).is_ok()) {
-                    Some(pixels) => {
-                        graphics::put_file(&mut out, &path, &pixels, cols, rows);
-                        // The terminal deletes each file once read; this
-                        // covers one it didn't get to.
-                        if let Some(old) = self.last_file.replace(path) {
-                            let _ = std::fs::remove_file(old);
-                        }
-                    }
-                    None => graphics::put_png(&mut out, png, cols, rows),
-                }
-            }
+            let drawn = self.page.draw(&mut out, png, route, scaled, cols, rows, cell, 2);
+            log(format_args!("drew {drawn}"));
         }
         let cols = self.window.cols as usize;
         let mut badge = String::new();
@@ -1038,6 +1012,7 @@ impl App {
         let badge = badge.trim_end();
         let badge = (!badge.is_empty()).then_some(badge);
         match &mut self.find {
+            _ if self.asking_quit => ui::render_question(&mut out, ui::QUIT_QUESTION, cols),
             Some(field) => ui::render_bar(&mut out, field, cols, self.loading, Some("Find"), badge),
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge),
         }
@@ -1304,19 +1279,37 @@ impl App {
         if matches!(mouse.button, Some(Button::Back | Button::Forward)) {
             return false;
         }
+        // While the bar asks whether to quit, only its buttons answer.
+        if self.asking_quit {
+            let answer = (py < cell_h).then(|| ui::answer((px / cell_w) as usize + 1, ui::QUIT_QUESTION)).flatten();
+            match mouse.kind {
+                MouseKind::Move => self.set_pointer(if answer.is_some() { "pointer" } else { "default" }),
+                MouseKind::Press if mouse.button == Some(Button::Left) => match answer {
+                    Some(true) => self.quit_clicked = true,
+                    Some(false) => self.asking_quit = false,
+                    None => {}
+                },
+                _ => {}
+            }
+            return true;
+        }
         // A drag that began on the page stays with the page.
         if py < cell_h && self.buttons == 0 {
             let col = (px / cell_w) as usize + 1;
             if mouse.kind == MouseKind::Move {
                 let shape = match ui::hit(col, self.window.cols as usize) {
                     Hit::Address(_) => "text",
-                    Hit::Back | Hit::Forward | Hit::Reload => "pointer",
+                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Close => "pointer",
                     Hit::Nothing => "default",
                 };
                 self.set_pointer(shape);
             }
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
                 return false;
+            }
+            if ui::hit(col, self.window.cols as usize) == Hit::Close {
+                self.asking_quit = true;
+                return true;
             }
             if let Some(field) = &mut self.find {
                 if let Hit::Address(offset) = ui::hit(col, self.window.cols as usize) {
@@ -1331,7 +1324,7 @@ impl App {
                 Hit::Reload => self.chrome.reload(),
                 Hit::Address(offset) if self.bar.focused() => self.bar.click(offset),
                 Hit::Address(_) => self.bar.focus(),
-                Hit::Nothing => {}
+                Hit::Close | Hit::Nothing => {}
             }
             return true;
         }

@@ -44,7 +44,7 @@ when asked with `rex block close -s "$REX_SESSION" "$pane"`; otherwise leave
 it open, as the user may want to keep looking.
 
 In any other terminal, ask the user to start `kb URL` in a pane of a terminal
-with the kitty graphics protocol (kitty, Ghostty, WezTerm), then find its
+with the kitty graphics protocol (Ghostty, kitty, WezTerm), then find its
 number with `kb list`.
 
 ## Selectors
@@ -153,7 +153,8 @@ When you cite a page, leave the passage on screen (`find` and `text
 reports console errors and failed requests on every site; on third-party
 sites they are usually the site's own noise, not something to fix. A page
 titled like a bot check ("Just a moment", CAPTCHA) is named as one: kb can't
-get past it, so try another source. Don't log in, post or submit forms other
+get past it, so try another source. Many searches in quick succession get
+one, so search once, then read the results you got. Don't log in, post or submit forms other
 than searches unless the user asks.
 
 ## Things to know

@@ -41,7 +41,7 @@ keys (kb keys lists them all; Ctrl+/ in kb shows them):
   Ctrl+[ / Ctrl+]   back / forward (also Alt+Left / Alt+Right, the mouse's buttons)
   Cmd+R or Ctrl+R   reload
   Ctrl+Shift+C      inspect an element
-  Ctrl+Q            quit
+  Ctrl+Q            quit (the ✕ at the right of the bar asks first)
 Everything else, and the mouse, goes to the page.";
 
 fn usage_error(message: &str) -> ! {
