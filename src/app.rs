@@ -262,6 +262,9 @@ struct App {
 }
 
 pub fn run(options: Options) -> Result<(), String> {
+    if term::draws_graphics() == Some(false) {
+        return Err(no_graphics());
+    }
     // Before anything is written to the terminal: a failure after that
     // leaves the terminal's replies to our queries for the shell to read.
     let claim = control::claim()?;
@@ -285,6 +288,32 @@ pub fn run(options: Options) -> Result<(), String> {
     let _ = std::fs::remove_file(socket);
     term::leave();
     result
+}
+
+/// Why kb can't run here, for a terminal that answered without kitty graphics.
+fn no_graphics() -> String {
+    let multiplexer = match (std::env::var_os("TMUX"), std::env::var("TERM").unwrap_or_default()) {
+        (Some(_), _) => Some("tmux"),
+        (None, term) if term.starts_with("screen") => Some("screen"),
+        _ => None,
+    };
+    if let Some(name) = multiplexer {
+        return format!(
+            "{name} doesn't pass on the kitty graphics protocol, which kb needs to draw pages.\n\
+             Run kb outside {name}, in Ghostty, kitty, WezTerm or Rex."
+        );
+    }
+    let this = match std::env::var("TERM_PROGRAM").as_deref() {
+        Ok("Apple_Terminal") => "Terminal".to_owned(),
+        Ok("iTerm.app") => "iTerm2".to_owned(),
+        Ok("vscode") => "VS Code's terminal".to_owned(),
+        Ok(name) if !name.is_empty() => name.to_owned(),
+        _ => "This terminal".to_owned(),
+    };
+    format!(
+        "{this} doesn't support the kitty graphics protocol, which kb needs to draw pages.\n\
+         Run kb in Ghostty, kitty, WezTerm or Rex."
+    )
 }
 
 fn browse(options: Options, profile: &std::path::Path, window: Window, claim: control::Claim) -> Result<(), String> {
