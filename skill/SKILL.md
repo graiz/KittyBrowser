@@ -57,8 +57,10 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 echo "kb $n"
-k() { kb ctl -i "$n" "$@"; }   # then: k open URL, k check, ...
 ```
+
+Each shell command you run starts afresh, so write that number into every
+command: `kb ctl -i 3 open URL`. Below, `N` stands for it.
 
 Opening a pane beside yours, without taking the focus from the user:
 
@@ -98,21 +100,21 @@ from `kb ctl links`) or `:focus`.
 After each change:
 
 ```sh
-k reload                         # or: k open URL. Waits for the load, reports errors
-k check                          # exit 1 on console errors, failed requests or an error page
-k screenshot --out /tmp/page.png # then read the image to look
+kb ctl -i N reload                          # or open URL; waits for the load, reports errors
+kb ctl -i N check                           # exit 1 on console errors, failed requests or an error page
+kb ctl -i N screenshot --out /tmp/page.png  # then read the image to look
 ```
 
 Then exercise what you changed:
 
 ```sh
-k click 'text=Save'              # fails if the element is hidden, off screen or covered
-k type '#email' 'a@b.co' --clear
-k select '#plan' Pro             # by value or label
-k press Enter
-k wait '.toast' --text Saved     # visible text only; --count N, --gone, --visible
-k console --errors
-k network --failed
+kb ctl -i N click 'text=Save'           # fails if the element is hidden, off screen or covered
+kb ctl -i N type '#email' 'a@b.co' --clear
+kb ctl -i N select '#plan' Pro          # by value or label
+kb ctl -i N press Enter
+kb ctl -i N wait '.toast' --text Saved  # visible text only; --count N, --gone, --visible
+kb ctl -i N console --errors
+kb ctl -i N network --failed
 ```
 
 `click`, `type`, `press` and `select` answer once the page settles, and report
@@ -120,21 +122,21 @@ the console errors and dialogs they caused and any change of page.
 
 When something looks wrong or does nothing:
 
-- `k box SELECTOR`: where it is, whether it is rendered, what covers it.
-- `k style SELECTOR [property]`: computed CSS. `k style SELECTOR PROPERTY
+- `kb ctl -i N box SELECTOR`: where it is, whether it is rendered, what covers it.
+- `kb ctl -i N style SELECTOR [property]`: computed CSS. `kb ctl -i N style SELECTOR PROPERTY
   --why` lists the rules that set it, the winner first, with file and line.
-- `k listeners SELECTOR`: its event listeners. Nothing listed means no handler
+- `kb ctl -i N listeners SELECTOR`: its event listeners. Nothing listed means no handler
   on the element itself; ask about its parent, which may handle the event.
-- `k storage` shows localStorage, sessionStorage and cookie names; `k storage
-  --clear` then `k reload` tests a first visit.
-- `k html SELECTOR`, `k eval 'JS'` (wrap declarations in `(() => { ... })()`).
+- `kb ctl -i N storage` shows localStorage, sessionStorage and cookie names; `kb ctl -i N storage
+  --clear` then `kb ctl -i N reload` tests a first visit.
+- `kb ctl -i N html SELECTOR`, `kb ctl -i N eval 'JS'` (wrap declarations in `(() => { ... })()`).
 
-Dark mode: `k scheme dark` (or `light`, or `auto` to follow the terminal).
+Dark mode: `kb ctl -i N scheme dark` (or `light`, or `auto` to follow the terminal).
 
-Slow network (loading states, spinners): `k throttle slow` (or `fast`,
-`offline`), then `k throttle off`.
+Slow network (loading states, spinners): `kb ctl -i N throttle slow` (or `fast`,
+`offline`), then `kb ctl -i N throttle off`.
 
-Phone layout: `k viewport 375x800`, check it, then `k viewport reset`. A
+Phone layout: `kb ctl -i N viewport 375x800`, check it, then `kb ctl -i N viewport reset`. A
 control hidden at that width makes `click` fail with "the element has no
 size", and `box` says why.
 
@@ -150,12 +152,14 @@ For a script that runs unattended, assert with exit codes:
 
 ```sh
 set -e
+n=3                                              # your kb's number, from kb list
+k() { kb ctl -i "$n" "$@"; }
 k open "$base/login"
 k type '#user' tomsmith; k type '#pass' 'SuperSecretPassword!'
 k click 'button[type=submit]'
-k wait 'text=You logged into a secure area'   # fails after 10 s (--timeout)
+k wait 'text=You logged into a secure area'      # fails after 10 s (--timeout)
 [ "$(k text '#count')" = "3" ] || { echo "FAIL: expected 3 items"; exit 1; }
-k check --ignore optimizely.com,doubleclick.net   # third-party noise doesn't count
+k check --ignore optimizely.com,doubleclick.net  # third-party noise doesn't count
 ```
 
 - `text SELECTOR` prints a hidden element's text after a `(hidden: …)`
@@ -167,24 +171,24 @@ k check --ignore optimizely.com,doubleclick.net   # third-party noise doesn't co
   after a form submission, `click` falls back to clicking by script and says
   so in its answer.
 - `alert`, `confirm` and `prompt` are accepted at once and reported by the
-  command that caused them; `k dialog dismiss` or `k dialog accept --text
+  command that caused them; `kb ctl -i N dialog dismiss` or `kb ctl -i N dialog accept --text
   TEXT` changes that for those that follow.
-- Count with `k wait SELECTOR --count N`, or `k eval 'document.querySelectorAll("li").length'`.
+- Count with `kb ctl -i N wait SELECTOR --count N`, or `kb ctl -i N eval 'document.querySelectorAll("li").length'`.
 
 ## Reading and research
 
 Read pages with text, not screenshots; it is far cheaper:
 
 ```sh
-k viewport 1280x800              # desktop layout: sidebars and menus show
-k open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
-k links --match sqlite.org       # results, with the real address behind redirects
-k click @3
-k outline                        # title and headings
-k text --section 'Ranking'       # just that section; the pane scrolls to it
-k find 'bm25'                    # every place it appears, with its section
-k tables; k tables 2             # list tables; print one as tab-separated rows
-k images                         # alt text, size, caption and source
+kb ctl -i N viewport 1280x800             # desktop layout: sidebars and menus show
+kb ctl -i N open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
+kb ctl -i N links --match sqlite.org      # results, with the real address behind redirects
+kb ctl -i N click @3
+kb ctl -i N outline                       # title and headings
+kb ctl -i N text --section 'Ranking'      # just that section; the pane scrolls to it
+kb ctl -i N find 'bm25'                   # every place it appears, with its section
+kb ctl -i N tables; kb ctl -i N tables 2  # list tables; print one as tab-separated rows
+kb ctl -i N images                        # alt text, size, caption and source
 ```
 
 When you cite a page, leave the passage on screen (`find` and `text
