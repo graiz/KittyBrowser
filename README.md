@@ -220,7 +220,7 @@ kb ctl text --section Installation   # ...just one section
 
 With nobody watching (a script, CI, or an agent whose pane the user
 closed), `kb --headless URL` runs the same browser in the background
-without a pane and prints its number; `kb ctl -i N quit` stops it, and it
+without a pane and prints its id; `kb ctl -i ID quit` stops it, and it
 stops by itself after ten minutes without a command.
 
 `kb ctl --help` lists every command and `kb ctl <command> --help` describes
@@ -237,7 +237,8 @@ one:
 
 Selectors are CSS (reaching into shadow DOM), `text=Some words`, `@N` from
 `kb ctl links`, or `:focus`. With several kbs running, pick one with
-`kb ctl -i N`.
+`kb ctl -i N` (its number in `kb list`) or `-i ID` (its id, such as `3-a7f2`,
+which unlike the number isn't reused by a kb started later).
 
 The same commands are available as an MCP server, which is off until you turn
 it on: `kb mcp on` (it prints how to register it with Claude Code), `kb mcp
