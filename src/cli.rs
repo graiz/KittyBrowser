@@ -144,17 +144,18 @@ pub fn list() -> i32 {
     }
     for instance in running {
         std::env::set_var("KB_INSTANCE", instance.to_string());
-        let (page, pane) = match control::request("status", json!({"listing": true})) {
+        let (page, pane, id) = match control::request("status", json!({"listing": true})) {
             Ok(Output::Text(status)) => {
                 let field =
                     |name: &str| status.lines().find_map(|line| line.strip_prefix(name)).unwrap_or("").to_owned();
                 let url = field("url: ");
-                (if url.is_empty() { "about:blank".to_owned() } else { url }, field("pane: "))
+                (if url.is_empty() { "about:blank".to_owned() } else { url }, field("pane: "), field("id: "))
             }
-            _ => ("(not answering)".to_owned(), String::new()),
+            _ => ("(not answering)".to_owned(), String::new(), String::new()),
         };
-        // The pane tells kbs apart: an agent knows the one it split.
-        println!("{instance}\t{page}\t{pane}");
+        // The pane tells kbs apart: an agent knows the one it split. The id
+        // names this run of it, so a number taken over later isn't mistaken.
+        println!("{instance}\t{page}\t{pane}\t{id}");
     }
     0
 }

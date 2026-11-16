@@ -30,32 +30,35 @@ When nobody needs to watch (a CI job, say), a headless tool is fine.
 
 ## Your kb, in a pane beside yours
 
-Several kbs can run at once, each with a number. Always pass yours with
-`-i N`: without it, commands go to the lowest-numbered kb, which may be
-someone else's. Never drive a kb you didn't open. If one you opened earlier
-in this conversation is still in `kb list`, reuse it.
+Several kbs can run at once. Each has a number and an id (`3-a7f2`); always
+pass your kb's id with `-i`. Without `-i`, commands go to the lowest-numbered
+kb, which may be someone else's; and once a kb closes, its number passes to
+the next kb to start, while its id just stops working. Never drive a kb you
+didn't open. If one you opened earlier in this conversation is still in
+`kb list`, reuse it.
 
-To open one in Rex (`$REX_SESSION` is set), split a pane and find your kb
-by that pane's id. Others may be starting kbs at the same moment, so the
-pane is the only sure way to tell yours. Run it as one shell command:
+To open one in Rex (`$REX_SESSION` is set), split a pane and find your kb by
+that pane, since others may be starting kbs at the same moment. Run it as
+one shell command:
 
 ```sh
 pane=$(rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --focus=false --label kb --json -- kb "$url" | jq -r '.block_ids[0]')
 for _ in $(seq 1 40); do
-  n=$(kb list 2>/dev/null | awk -F'\t' -v p="$pane" '$3 == p {print $1}')
-  [ -n "$n" ] && break
+  id=$(kb list 2>/dev/null | awk -F'\t' -v p="$pane" '$3 == p {print $4}')
+  [ -n "$id" ] && break
   sleep 0.25
 done
-echo "kb $n in $pane"
+echo "kb $id in $pane"
 ```
 
-In another terminal, start `kb "$url"` in a new pane (below) and take the
-number `kb list` didn't show before; then check `kb ctl -i N status` shows
-your page, in case someone else's kb started at the same time.
+In another terminal, start `kb "$url"` in a new pane (below), take the id of
+the kb `kb list` didn't show before, and check `kb ctl -i ID status` shows
+your page, in case someone else's started at the same time. (`kb list`
+shows each kb's number, page, pane and id.)
 
-Each shell command starts afresh, so write the number (and pane id) into
-every later command: `kb ctl -i 3 open URL`. Below, `N` stands for it, and
-outside code blocks a command is named alone: `box` means `kb ctl -i N box`.
+Each shell command starts afresh, so write the id (and pane) into every
+later command: `kb ctl -i 3-a7f2 open URL`. Below, `ID` stands for it, and
+outside code blocks a command is named alone: `box` means `kb ctl -i ID box`.
 
 A new pane is often narrow, so sites show their phone layout; for reading or
 a desktop layout, run `viewport 1280x800` first.
@@ -75,13 +78,13 @@ looking. Close it with `rex block close "$pane"` in Rex, or the terminal's
 own command; that quits the kb. If it's already gone, there's nothing to
 close.
 
-Numbers are reused once a kb closes. If you lose track, find yours in
-`kb list` by its pane or page; if you can't, stop and ask. If kb won't start,
+If you lose track of your id, find it in `kb list` by your pane; if you
+can't, stop and ask. If kb won't start,
 or its pane stays blank, `kb doctor` run in that pane says why.
 
 ### When the user closes your pane
 
-If your kb is gone from `kb list`, or `kb ctl -i N` says it isn't running,
+If your kb is gone from `kb list`, or `kb ctl -i ID` says it isn't running,
 treat it as the user closing it (kb rarely crashes): they most likely wanted
 it out of the way, which overrides an earlier ask to show it in a pane. If
 the task can finish without them watching, carry on headless; if you can't
@@ -90,11 +93,12 @@ ask (as when you're a subagent). `kb ctl` may say "kb closed the connection"
 for a command that was running as the pane closed.
 
 `kb --headless URL` runs a kb in the background, with the same commands, and
-prints its number, which is yours. Like any kb, it has the signed-in profile
-only if no other kb is running. It has a desktop viewport (1280x800) and no
-pane. Stop it with `kb ctl -i N quit` when you're done; one left behind
-quits after ten minutes without a command. `kb list` marks headless kbs, and
-shows "(not answering)" for a moment while a kb starts or quits.
+prints its id first (`kb 3-a7f2, headless`): that's yours. Like any kb, it
+has the signed-in profile only if no other kb is running. It has a desktop
+viewport (1280x800) and no pane. Stop it with `kb ctl -i ID quit` when
+you're done; one left behind quits after ten minutes without a command. `kb
+list` marks headless kbs, and shows "(not answering)" for a moment while a
+kb starts or quits.
 
 ## Selectors
 
@@ -107,9 +111,9 @@ them), `@N` (a number from `links`), or `:focus`.
 After each change:
 
 ```sh
-kb ctl -i N reload                          # or open URL; waits for the load, reports errors
-kb ctl -i N check                           # exit 0 if healthy, 1 on console errors, failed requests or an error page
-kb ctl -i N screenshot --out /tmp/page.png  # or your scratch directory; then read the image
+kb ctl -i ID reload                          # or open URL; waits for the load, reports errors
+kb ctl -i ID check                           # exit 0 if healthy, 1 on console errors, failed requests or an error page
+kb ctl -i ID screenshot --out /tmp/page.png  # or your scratch directory; then read the image
 ```
 
 Only `check` sets the exit status; the other commands report what they find.
@@ -120,12 +124,12 @@ including where a result will appear. HTML includes hidden elements; `text`
 shows only what's visible:
 
 ```sh
-kb ctl -i N type '#email' 'a@b.co' --clear
-kb ctl -i N select '#plan' Pro          # by value or label
-kb ctl -i N click 'text=Save'           # fails if hidden, off screen or covered
-kb ctl -i N wait '#result' --text Saved # the element the click should change, and words you expect
-kb ctl -i N console --errors            # this page's; --all adds earlier pages'
-kb ctl -i N network --failed
+kb ctl -i ID type '#email' 'a@b.co' --clear
+kb ctl -i ID select '#plan' Pro  # by value or label
+kb ctl -i ID click 'text=Save'   # fails if hidden, off screen or covered
+kb ctl -i ID wait '#result' --text Saved # the element the click should change, and words you expect
+kb ctl -i ID console --errors    # this page's; --all adds earlier pages'
+kb ctl -i ID network --failed
 ```
 
 `click`, `type`, `press` and `select` answer once the page settles, with the
@@ -169,8 +173,8 @@ codes:
 
 ```sh
 set -e
-n=3                                              # your kb's number, from kb list
-k() { kb ctl -i "$n" "$@"; }
+id=3-a7f2                                        # your kb's id, from kb list
+k() { kb ctl -i "$id" "$@"; }
 k open "$base/login"
 k type '#user' tomsmith; k type '#pass' 'SuperSecretPassword!'
 k click 'button[type=submit]'
@@ -193,16 +197,16 @@ k check --ignore optimizely.com,doubleclick.net  # third-party noise doesn't cou
 Read with text, not screenshots; it's far cheaper:
 
 ```sh
-kb ctl -i N viewport 1280x800
-kb ctl -i N open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
-kb ctl -i N links --match sqlite.org      # links and buttons (not plain text), with real addresses
-kb ctl -i N click @3
-kb ctl -i N text                          # the page's main content
-kb ctl -i N outline                       # title and headings (there's no title command)
-kb ctl -i N text --section 'Ranking'      # one section, by its heading's words; scrolls to it
-kb ctl -i N find 'bm25'                   # where it appears, with its section (first 10; --limit N)
-kb ctl -i N tables; kb ctl -i N tables 2  # list tables; print one as tab-separated rows
-kb ctl -i N images                        # alt text, size, caption and source
+kb ctl -i ID viewport 1280x800
+kb ctl -i ID open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
+kb ctl -i ID links --match sqlite.org       # links and buttons (not plain text), with real addresses
+kb ctl -i ID click @3
+kb ctl -i ID text                           # the page's main content
+kb ctl -i ID outline                        # title and headings (there's no title command)
+kb ctl -i ID text --section 'Ranking'       # one section, by its heading's words; scrolls to it
+kb ctl -i ID find 'bm25'                    # where it appears, with its section (first 10; --limit N)
+kb ctl -i ID tables; kb ctl -i ID tables 2  # list tables; print one as tab-separated rows
+kb ctl -i ID images                         # alt text, size, caption and source
 ```
 
 - When you cite a page, leave the passage on screen (`find` and

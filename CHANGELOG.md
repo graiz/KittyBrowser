@@ -14,6 +14,13 @@ Notable changes to kb. The format follows
   the way. It answers once the first page has loaded, as `kb ctl open`
   does, or after 15 seconds if the page is slow.
 - `kb ctl console --all` heads only the pages that logged something.
+- Each kb has an id as well as a number (`3-a7f2`), shown by `kb list` and
+  `status` and printed by `kb --headless`. `kb ctl -i ID` reaches that kb
+  only: once it closes, its number passes to the next kb to start, but its
+  id stops working, so an agent can't drive someone else's kb by mistake.
+- `kb ctl` shows a command's help with `--help` anywhere; `back` on a
+  popup answers once it has closed; `text --section` finds a heading by its
+  words, whatever the punctuation.
 - `kb ctl wait` refuses an empty `--text`, which passed at once, and
   `--visible` waits for the element to take up room; `status` says how many
   windows are open.

@@ -43,15 +43,30 @@ fn instance_socket(n: u32) -> Result<PathBuf, String> {
     Ok(crate::data_dir()?.join(name))
 }
 
-/// The instance asked for with `kb ctl -i N` or KB_INSTANCE, if any.
-fn chosen_instance() -> Result<Option<u32>, String> {
-    match std::env::var("KB_INSTANCE") {
-        Ok(text) => match text.parse::<u32>() {
-            Ok(n) if (1..=MAX_INSTANCES).contains(&n) => Ok(Some(n)),
-            _ => Err(format!("{text:?} isn't an instance number; kb list shows the ones running")),
-        },
-        Err(_) => Ok(None),
+/// The instance asked for with `kb ctl -i N` or KB_INSTANCE, if any: a
+/// number, or an id (`3-a7f2`), which names one run of that kb only.
+fn chosen_instance() -> Result<Option<(u32, Option<String>)>, String> {
+    let Ok(text) = std::env::var("KB_INSTANCE") else { return Ok(None) };
+    let (number, id) = match text.split_once('-') {
+        Some((number, _)) => (number, Some(text.clone())),
+        None => (text.as_str(), None),
+    };
+    match number.parse::<u32>() {
+        Ok(n) if (1..=MAX_INSTANCES).contains(&n) => Ok(Some((n, id))),
+        _ => Err(format!("{text:?} isn't a kb's number or id; kb list shows the ones running")),
     }
+}
+
+/// A name for one run of a kb, which unlike its number the next kb to start
+/// doesn't take: the number, a dash and four hex digits.
+fn new_id(instance: u32) -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    format!("{instance}-{:04x}", (nanos ^ std::process::id().wrapping_mul(2_654_435_761)) & 0xffff)
+}
+
+/// This kb's id, once it has claimed its number.
+pub fn id() -> Option<String> {
+    std::env::var("KB_ID").ok()
 }
 
 /// A running kb's place among the others: its number, and the socket it
@@ -83,6 +98,8 @@ pub fn claim() -> Result<Claim, String> {
         let _ = std::fs::remove_file(&socket);
         let listener = UnixListener::bind(&socket).map_err(|e| format!("listening on {}: {e}", socket.display()))?;
         let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
+        // Read back by status, from this process only.
+        std::env::set_var("KB_ID", new_id(instance));
         return Ok(Claim { instance, socket, listener });
     }
     Err(match std::env::var_os("KB_SOCKET") {
@@ -112,9 +129,21 @@ fn connect() -> Result<UnixStream, String> {
     if let Some(path) = std::env::var_os("KB_SOCKET") {
         return UnixStream::connect(path).map_err(|_| NOT_RUNNING.to_owned());
     }
-    if let Some(n) = chosen_instance()? {
-        return UnixStream::connect(instance_socket(n)?)
-            .map_err(|_| format!("kb {n} isn't running; kb list shows the ones that are"));
+    if let Some((n, id)) = chosen_instance()? {
+        let gone = |name: &str| format!("kb {name} isn't running; kb list shows the ones that are");
+        let socket = instance_socket(n)?;
+        if let Some(id) = id {
+            // The number may have passed to a kb started since: only the
+            // one with this id will do.
+            let status = UnixStream::connect(&socket)
+                .map_err(|_| gone(&id))
+                .and_then(|stream| exchange(stream, "status", json!({"listing": true})).map_err(|_| gone(&id)))?;
+            let mine = matches!(&status, Output::Text(text) if text.lines().any(|line| line == format!("id: {id}")));
+            if !mine {
+                return Err(gone(&id));
+            }
+        }
+        return UnixStream::connect(socket).map_err(|_| gone(&n.to_string()));
     }
     for n in 1..=MAX_INSTANCES {
         if let Ok(stream) = UnixStream::connect(instance_socket(n)?) {
@@ -157,7 +186,10 @@ fn serve(mut stream: UnixStream, deliver: impl Fn(Request) -> bool) -> io::Resul
 
 /// Send one command to the running kb and wait for its answer.
 pub fn request(command: &str, args: Value) -> Result<Output, String> {
-    let mut stream = connect()?;
+    exchange(connect()?, command, args)
+}
+
+fn exchange(mut stream: UnixStream, command: &str, args: Value) -> Result<Output, String> {
     let lost = |e: io::Error| format!("lost the connection to kb: {e}");
     writeln!(stream, "{}", json!({"command": command, "args": args})).map_err(lost)?;
     let mut line = String::new();

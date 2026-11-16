@@ -305,6 +305,11 @@ it outlives the shell that started it, and prints its number once the copy
 answers. Nobody sees a headless kb that is forgotten, so it quits after ten
 minutes without a command; `kb list` asking its status doesn't count.
 
+Numbers are reused as soon as a kb closes, so each run also gets an id, its
+number and four hex digits (`3-a7f2`). `kb ctl -i ID` asks that socket's kb
+for its id before sending the command, and fails if it differs: an agent
+holding an old id is told its kb has gone rather than driving another.
+
 `control.rs` gives each running kb a number, the lowest not in use, and a
 socket to match: `~/.kittybrowser/kb.sock` for the first, `kb-2.sock` and so
 on after it (mode 0600). The number is taken before anything is written to

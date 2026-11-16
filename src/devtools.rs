@@ -1147,6 +1147,9 @@ impl Devtools {
                         ),
                     };
                     rest.push_str(&windows);
+                    if let Some(id) = crate::control::id() {
+                        let _ = write!(rest, "\nid: {id}");
+                    }
                     if crate::headless::running() {
                         let _ = write!(
                             rest,

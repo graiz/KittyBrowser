@@ -39,6 +39,12 @@ const FIRST_LOAD: Duration = Duration::from_secs(15);
 /// How often waits are checked, as in a pane.
 const TICK: Duration = Duration::from_millis(100);
 
+/// What the starting kb is told this one is called: its id, which no later
+/// kb takes.
+fn ready_name(instance: u32) -> String {
+    crate::control::id().unwrap_or_else(|| instance.to_string())
+}
+
 /// Whether this kb runs headless: `status` says so in place of a pane.
 pub fn running() -> bool {
     std::env::var_os(CHILD).is_some()
@@ -68,17 +74,19 @@ pub fn start(args: &[String]) -> Result<(), String> {
     let mut first = String::new();
     let _ = BufReader::new(child.stdout.take().ok_or("no output from kb")?).read_line(&mut first);
     let mut words = first.split_whitespace();
-    match words.next().unwrap_or("").parse::<u32>() {
-        Ok(instance) => {
+    let name = words.next().unwrap_or("").to_owned();
+    match name.split('-').next().unwrap_or("").parse::<u32>() {
+        Ok(_) => {
+            println!("kb {name}, headless");
             if words.next() == Some("loading") {
                 println!(
-                    "the page is still loading after {} s; kb ctl -i {instance} status says when it's done",
+                    "the page is still loading after {} s; kb ctl -i {name} status says when it's done",
                     FIRST_LOAD.as_secs()
                 );
             }
             println!(
-                "kb {instance}, headless: kb ctl -i {instance} ... drives it, and kb ctl -i {instance} quit stops it \
-                 (it stops by itself after {} minutes without a command)",
+                "kb ctl -i {name} ... drives it, and kb ctl -i {name} quit stops it (it stops by itself after {} \
+                 minutes without a command)",
                 idle().as_secs() / 60
             );
             Ok(())
@@ -147,7 +155,7 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
     let started = std::time::Instant::now();
     let mut announced = address.is_none();
     if announced {
-        println!("{instance}");
+        println!("{}", ready_name(instance));
     }
     let mut seen_loading = false;
 
@@ -222,7 +230,7 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
         devtools.tick(&mut chrome);
         if !announced && ((seen_loading && !loading) || started.elapsed() > FIRST_LOAD) {
             announced = true;
-            println!("{instance}{}", if loading || !seen_loading { " loading" } else { "" });
+            println!("{}{}", ready_name(instance), if loading || !seen_loading { " loading" } else { "" });
         }
     }
     chrome.close();
