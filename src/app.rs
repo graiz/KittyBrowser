@@ -269,13 +269,7 @@ pub fn run(options: Options) -> Result<(), String> {
     // Before anything is written to the terminal: a failure after that
     // leaves the terminal's replies to our queries for the shell to read.
     let claim = control::claim()?;
-    // Chrome won't share a profile between processes, so each kb running
-    // beside the first has its own.
-    let profile = crate::data_dir()?.join(match claim.instance {
-        1 => "profile".to_owned(),
-        n => format!("profile-{n}"),
-    });
-    std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
+    let profile = profile(claim.instance)?;
     let window = size::window().ok_or("can't read the terminal size")?;
 
     // Asked last, just before raw mode, with nothing left that can fail:
@@ -298,6 +292,18 @@ pub fn run(options: Options) -> Result<(), String> {
     let _ = std::fs::remove_file(socket);
     term::leave();
     result
+}
+
+/// The profile kb `instance` keeps cookies and site data in. Chrome won't
+/// share a profile between processes, so each kb running beside the first
+/// has its own.
+pub fn profile(instance: u32) -> Result<std::path::PathBuf, String> {
+    let profile = crate::data_dir()?.join(match instance {
+        1 => "profile".to_owned(),
+        n => format!("profile-{n}"),
+    });
+    std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
+    Ok(profile)
 }
 
 fn browse(options: Options, profile: &std::path::Path, window: Window, claim: control::Claim) -> Result<(), String> {
@@ -529,6 +535,11 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 }
                 Msg::Control(request) => {
                     log(format_args!("control: {} {}", request.command, request.args));
+                    if request.command == "quit" {
+                        let _ = request.reply.send(Ok(Output::Text("kb is quitting; its pane closes".to_owned())));
+                        quit = Some(Ok(()));
+                        break;
+                    }
                     if request.command == "scheme" {
                         let _ = request.reply.send(app.set_scheme(request.args["scheme"].as_str().unwrap_or("")));
                         continue;

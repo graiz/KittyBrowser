@@ -12,6 +12,7 @@ mod control;
 mod devtools;
 mod doctor;
 mod engine;
+mod headless;
 mod history;
 mod keys;
 mod mcp;
@@ -35,6 +36,9 @@ usage: kb [--scale N] [--dark | --light] [--devtools] [URL]
                    the terminal's background)
   --devtools       serve Chrome DevTools on a local port, so F12 can open it;
                    any program on this machine can then reach the browser
+  --headless       run in the background without a pane, for kb ctl alone; prints
+                   its number. kb ctl -i N quit stops it, and it stops by itself
+                   after 10 minutes without a command
 
 keys (kb keys lists them all; Ctrl+/ in kb shows them):
   Cmd+L or Ctrl+L   edit the address
@@ -88,6 +92,8 @@ fn main() {
         dark: None,
     };
     let mut address = Vec::new();
+    let mut headless = false;
+    let all = words.clone();
     let mut args = words.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -100,6 +106,7 @@ fn main() {
                 return;
             }
             "--devtools" => options.devtools = true,
+            "--headless" => headless = true,
             "--dark" => options.dark = Some(true),
             "--light" => options.dark = Some(false),
             "--scale" => {
@@ -117,7 +124,12 @@ fn main() {
     if !address.is_empty() {
         options.url = Some(address.join(" "));
     }
-    if let Err(err) = app::run(options) {
+    let result = match (headless, headless::running()) {
+        (true, false) => headless::start(&all),
+        (true, true) => headless::run(options),
+        (false, _) => app::run(options),
+    };
+    if let Err(err) = result {
         // An empty error has been explained already, at more length.
         if !err.is_empty() {
             eprintln!("kb: {err}");

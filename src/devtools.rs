@@ -1139,7 +1139,13 @@ impl Devtools {
                         ),
                     };
                     rest.push_str(&windows);
-                    if let Ok(pane) = std::env::var("REX_BLOCK") {
+                    if crate::headless::running() {
+                        let _ = write!(
+                            rest,
+                            "\npane: none (headless; it quits after {} minutes without a command)",
+                            crate::headless::idle().as_secs() / 60
+                        );
+                    } else if let Ok(pane) = std::env::var("REX_BLOCK") {
                         let _ = write!(rest, "\npane: {pane}");
                     }
                     if width < 600 {

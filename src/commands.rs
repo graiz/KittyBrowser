@@ -80,6 +80,11 @@ pub const COMMANDS: &[Command] = &[
     },
     Command { name: "forward", help: "Go forward one page in history.", params: &[] },
     Command {
+        name: "quit",
+        help: "Quit this kb and its browser. In a pane that ran only kb, the pane closes; a headless kb (kb --headless) stops. Cookies and sign-ins are kept in its profile.",
+        params: &[],
+    },
+    Command {
         name: "screenshot",
         help: "Take a PNG screenshot of what the window shows, of one element, or of the whole page. By default one image pixel is one CSS pixel (a 1280x800 viewport gives 1280x800): sharp enough to read, and a quarter of the size of a retina capture. A whole page taller than 8000 pixels is scaled down to fit.",
         params: &[

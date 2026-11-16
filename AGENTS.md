@@ -41,6 +41,7 @@ src/doctor.rs          kb doctor, and what kb says in a terminal it can't draw i
 src/mcp.rs             kb mcp
 src/skill.rs           kb skill; the skill's text is skill/SKILL.md
 src/bench.rs           kb bench
+src/headless.rs        kb --headless: the browser without a pane, for kb ctl alone
 ```
 
 ## Conventions

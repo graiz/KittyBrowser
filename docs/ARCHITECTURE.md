@@ -297,6 +297,14 @@ front ends can't drift apart. `kb mcp serve` is a thin JSON-RPC wrapper that
 forwards each tool call over the same socket; it lists no tools unless
 `~/.kittybrowser/mcp-enabled` exists (`kb mcp on`).
 
+`headless.rs` runs the same Chrome, profile and `Devtools` without a
+terminal, for `kb ctl` alone: no screencast, a desktop viewport, and a
+small loop of its own rather than the app's, which is built around the
+pane. `kb --headless` starts a copy of itself in a session of its own, so
+it outlives the shell that started it, and prints its number once the copy
+answers. Nobody sees a headless kb that is forgotten, so it quits after ten
+minutes without a command; `kb list` asking its status doesn't count.
+
 `control.rs` gives each running kb a number, the lowest not in use, and a
 socket to match: `~/.kittybrowser/kb.sock` for the first, `kb-2.sock` and so
 on after it (mode 0600). The number is taken before anything is written to

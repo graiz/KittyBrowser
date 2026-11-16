@@ -218,10 +218,15 @@ kb ctl outline                       # read a page: headings, then...
 kb ctl text --section Installation   # ...just one section
 ```
 
+With nobody watching (a script, CI, or an agent whose pane the user
+closed), `kb --headless URL` runs the same browser in the background
+without a pane and prints its number; `kb ctl -i N quit` stops it, and it
+stops by itself after ten minutes without a command.
+
 `kb ctl --help` lists every command and `kb ctl <command> --help` describes
 one:
 
-- **Navigating:** open, reload, back, forward, status, check, viewport.
+- **Navigating:** open, reload, back, forward, status, check, viewport, quit.
 - **Reading:** outline, text (the main content, an element, or
   `--section HEADING`), find, links, tables, images, html, screenshot
   (`--size small|normal|sharp|WIDTH`).
@@ -257,6 +262,7 @@ it's worth knowing before you turn on the MCP server. See
 | `KB_TRANSFER=pty` | Always send frames through the terminal, never by file |
 | `KB_TRANSFER=png` | Through the terminal, and each frame whole as a PNG: for a terminal that shows kb's page broken over ssh |
 | `KB_FORCE` | Start without asking the terminal whether it draws kitty graphics |
+| `KB_HEADLESS_IDLE` | Seconds a headless kb (`kb --headless`) waits for a command before quitting by itself; default 600 |
 | `KB_LOG` | A file to append diagnostics to (sizes, frames, clicks) |
 
 ## Troubleshooting

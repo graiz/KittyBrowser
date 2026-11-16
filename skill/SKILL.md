@@ -89,9 +89,17 @@ same terminal's command, which quits that kb and its browser; otherwise
 leave it open, as the user may want to keep looking.
 
 The user may close your pane too. If your kb is gone from `kb list` (or
-`kb ctl -i N` says it isn't running), that's no error: open a new one the
-same way, go back to the page you were on, and carry on. Don't reuse a
-number that now belongs to another kb.
+`kb ctl -i N` says it isn't running), that's no error, but a sign: they
+likely wanted it out of the way. If the task can finish without them
+watching, carry on without a pane: `kb --headless URL` starts a kb in the
+background, with the same commands and profile, and prints its number;
+go back to the page you were on from there. If you can't tell whether
+they want you to go on, ask. Don't reuse a number that now belongs to
+another kb.
+
+A headless kb has no pane to close: when you're done with it, stop it with
+`kb ctl -i N quit`. One left behind stops by itself after ten minutes
+without a command. `kb list` marks headless kbs.
 
 If kb won't start in a pane, or the pane stays blank, `kb doctor` run in
 that pane says why.
@@ -153,7 +161,8 @@ Dark mode: `kb ctl -i N scheme dark` (or `light`, or `auto` to follow the termin
 Slow network (loading states, spinners): `kb ctl -i N throttle slow` (or `fast`,
 `offline`), then `kb ctl -i N throttle off`.
 
-Phone layout: `kb ctl -i N viewport 375x800`, look at it (`text`, or a screenshot), then `kb ctl -i N viewport reset` to go back to the pane's size. A
+Phone layout: `kb ctl -i N viewport 375x800`, look at it (`text`, or a screenshot), then `kb ctl -i N viewport reset` to go back to the pane's size
+(`status` shows it). A viewport stays set across pages until reset. A
 control hidden at that width makes `click` fail with "the element has no
 size", and `box` says why.
 

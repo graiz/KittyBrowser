@@ -143,7 +143,7 @@ pub fn list() -> i32 {
     }
     for instance in running {
         std::env::set_var("KB_INSTANCE", instance.to_string());
-        let (page, pane) = match control::request("status", json!({})) {
+        let (page, pane) = match control::request("status", json!({"listing": true})) {
             Ok(Output::Text(status)) => {
                 let field =
                     |name: &str| status.lines().find_map(|line| line.strip_prefix(name)).unwrap_or("").to_owned();

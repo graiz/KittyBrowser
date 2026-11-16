@@ -6,6 +6,15 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- `kb --headless URL` runs kb in the background without a pane, driven by
+  `kb ctl` alone, with the same profile and commands. It prints its number,
+  `kb ctl -i N quit` stops it (and quits any kb), and it stops by itself
+  after ten minutes without a command (`KB_HEADLESS_IDLE`). The skill has
+  agents finish this way when the user closes their pane to get it out of
+  the way.
+- `kb ctl wait` refuses an empty `--text`, which passed at once, and
+  `--visible` waits for the element to take up room; `status` says how many
+  windows are open.
 - Sign-in popups work ("Continue with Google" and the like): a window a
   page opens is shown over it, and when it closes the page is shown again,
   signed in. Before, kb loaded it in place of the page, which then never
