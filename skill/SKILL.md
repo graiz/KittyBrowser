@@ -79,18 +79,17 @@ or its pane stays blank, `kb doctor` run in that pane says why.
 ### When the user closes your pane
 
 If your kb is gone from `kb list`, or `kb ctl -i N` says it isn't running,
-treat it as the user closing it (kb rarely crashes): they most likely
-wanted it out of the way, which overrides an earlier ask to show it in a
-pane. If the task can finish
-without them watching, carry on headless; if you can't tell whether they
-want you to go on, ask.
+treat it as the user closing it (kb rarely crashes): they most likely wanted
+it out of the way, which overrides an earlier ask to show it in a pane. If
+the task can finish without them watching, carry on headless; if you can't
+tell whether they want you to go on, ask.
 
-`kb --headless URL` runs a kb in the background, with the same commands,
-and prints its number. Like any kb, it has the signed-in profile only if
-no other kb is running. It has a desktop viewport (1280x800, which
-`viewport reset` returns to) and no pane. Stop it with `kb ctl -i N quit`
-when you're done (with your pane gone, that's all there is to close); one left behind quits after ten minutes without a command.
-`kb list` marks headless kbs.
+`kb --headless URL` runs a kb in the background, with the same commands, and
+prints its number. Like any kb, it has the signed-in profile only if no
+other kb is running. It has a desktop viewport (1280x800, which `viewport
+reset` returns to) and no pane. Stop it with `kb ctl -i N quit` when you're
+done (with your pane gone, that's all there is to close); one left behind
+quits after ten minutes without a command. `kb list` marks headless kbs.
 
 ## Selectors
 
