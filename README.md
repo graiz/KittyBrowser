@@ -288,7 +288,7 @@ kb's data folder, and prints what to fix.
 - **The page is blurry or tiny:** set `--scale` to your display's pixel
   ratio.
 - **Sites show their phone layout:** the pane is narrow. Widen it, zoom out
-  with Ctrl+-, or have the agent run `kb ctl viewport 1280x800`.
+  with Ctrl+-, or have the agent run `kb ctl viewport 1280`.
 - **A kb you can't find:** `kb list` shows the ones running, with the pane
   each is in; quit one with Ctrl+Q in its pane.
 

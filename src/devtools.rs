@@ -1171,7 +1171,7 @@ impl Devtools {
                     if width < 600 {
                         rest.push_str(
                             "\nnote: the viewport is narrow, so many sites show their phone layout, with menus \
-                             collapsed; kb ctl viewport 1280x800 lays pages out as on a desktop",
+                             collapsed; kb ctl viewport 1280 lays pages out as on a desktop",
                         );
                     }
                     // The title has to be asked for; the rest is already known.
