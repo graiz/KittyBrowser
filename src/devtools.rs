@@ -724,6 +724,8 @@ pub struct Devtools {
     document_error: Option<String>,
     /// `back` and `forward` waiting for the page to change.
     moving: Vec<(Reply, Instant)>,
+    /// `back` closing a window: answered once fewer are open than this.
+    closing: Vec<(Reply, usize, Instant)>,
     waits: Vec<Wait>,
     next_wait: u64,
     settling: Vec<Settling>,
@@ -2041,8 +2043,10 @@ impl Devtools {
                     }
                     // The first page of a window a page opened: back is closing it.
                     None if step < 0 && chrome.windows().1 > 1 => {
-                        let under = chrome.close_window();
-                        text(&reply, format!("closed this window, which had no earlier page; shown again: {under}"));
+                        // Answered once it has closed, so a status right after agrees.
+                        let open = chrome.windows().1;
+                        chrome.close_window();
+                        self.closing.push((reply, open, Instant::now() + MOVE_TIMEOUT));
                     }
                     None => fail(
                         &reply,
@@ -2114,6 +2118,18 @@ impl Devtools {
             }
         }
 
+        let open = chrome.windows().1;
+        self.closing.retain(|(reply, before, deadline)| {
+            if open < *before {
+                let under = chrome.url();
+                text(reply, format!("closed this window, which had no earlier page; shown again: {under}"));
+                return false;
+            }
+            if *deadline <= now {
+                fail(reply, "the window didn't close");
+            }
+            *deadline > now
+        });
         self.moving.retain(|(reply, deadline)| {
             if *deadline <= now {
                 fail(reply, "the page didn't change");

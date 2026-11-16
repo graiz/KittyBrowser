@@ -86,8 +86,7 @@ tell whether they want you to go on, ask.
 
 `kb --headless URL` runs a kb in the background, with the same commands, and
 prints its number. Like any kb, it has the signed-in profile only if no
-other kb is running. It has a desktop viewport (1280x800, which `viewport
-reset` returns to) and no pane. Stop it with `kb ctl -i N quit` when you're
+other kb is running. It has a desktop viewport (1280x800) and no pane. Stop it with `kb ctl -i N quit` when you're
 done (with your pane gone, that's all there is to close); one left behind
 quits after ten minutes without a command. `kb list` marks headless kbs.
 
@@ -111,7 +110,8 @@ Only `check` sets the exit status; the other commands report what they find.
 
 Then try what you changed. Read the page's HTML for selectors
 rather than guessing: `kb ctl -i N html form` for a form's fields,
-`html body` for the whole page, including where a result will appear:
+`html body` for the whole page, including where a result will appear. HTML
+includes hidden elements; `text` shows only what's visible:
 
 ```sh
 kb ctl -i N type '#email' 'a@b.co' --clear
@@ -145,7 +145,8 @@ Also:
 - **Dark mode:** `scheme dark` (or `light`, or `auto` to follow the terminal).
 - **Slow network:** `throttle slow` (or `fast`, `offline`), then `throttle off`.
 - **Phone layout:** `viewport 375x800`, look (`text` or a screenshot), then
-  `viewport reset` to return to the size the kb started at. A viewport stays set across
+  `viewport reset`, which drops any size you set: the kb follows its pane
+  again (a headless kb goes back to 1280x800). A viewport stays set across
   pages until reset. A control hidden at that width makes `click` fail with
   "the element has no size".
 - **Dev servers:** use the address the server printed, not a guessed port.
