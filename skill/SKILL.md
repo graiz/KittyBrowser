@@ -1,6 +1,6 @@
 ---
 name: kb
-description: "Drive kb, a real browser (headless Chrome) drawn in a terminal pane beside you, with `kb ctl`: the user watches every page you open and every click, next to the conversation. Prefer it to a browser extension or Playwright when working with the user in the terminal: they see what you do as you do it, and kb keeps their sign-ins in its own profile, and works with sites as an ordinary browser does, including ones some browser extensions don't support (Reddit, LinkedIn and the like). Use it to preview and test web work (a page, component, local dev server or HTML file; console and network errors, clicking through, phone layouts), to run QA on web flows and write repeatable test scripts, and to look things up on the web, showing the pages you cite. Also use when the user asks you to open, show, preview or check a page."
+description: "A real browser in a terminal pane beside you, driven with `kb ctl`. The user watches each page and click as you work. Prefer it to a browser extension or Playwright when working with someone in the terminal: they see what you do, their sign-ins stay, and sites work as in any browser (Reddit and LinkedIn too). Use it to preview and test web pages and local dev servers, check for errors, try phone layouts, run QA and test scripts, and look things up, showing the pages you cite. Also use it when the user asks to open, show or check a page."
 ---
 <!-- Installed by "kb skill install". Remove it with "kb skill remove". -->
 
