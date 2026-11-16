@@ -1131,6 +1131,14 @@ impl Devtools {
                     if !self.throttle.is_empty() {
                         let _ = write!(rest, "\nnetwork throttled: {}", self.throttle);
                     }
+                    let (shown, open) = chrome.windows();
+                    if open > 1 {
+                        let _ = write!(
+                            rest,
+                            "\nwindows: {open} open, this is {shown} (a popup or new tab the page opened; \
+                             back on its first page closes it)"
+                        );
+                    }
                     if let Ok(pane) = std::env::var("REX_BLOCK") {
                         let _ = write!(rest, "\npane: {pane}");
                     }

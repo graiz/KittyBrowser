@@ -46,7 +46,8 @@ If one you opened earlier in this conversation is still listed by `kb list`,
 reuse it instead of opening another.
 
 Open kb in a pane beside yours, with your terminal's own command for a split
-(below), and find its number as the one `kb list` didn't show before:
+(below), and find its number as the one `kb list` didn't show before. Run
+all of this as one shell command, since `$before` is gone in the next:
 
 ```sh
 before=$(kb list 2>/dev/null | cut -f1)
@@ -102,7 +103,7 @@ After each change:
 ```sh
 kb ctl -i N reload                          # or open URL; waits for the load, reports errors
 kb ctl -i N check                           # exit 1 on console errors, failed requests or an error page
-kb ctl -i N screenshot --out /tmp/page.png  # any temporary file; then read the image
+kb ctl -i N screenshot --out /tmp/page.png  # or your scratch directory; then read the image
 ```
 
 Then exercise what you changed:
@@ -118,7 +119,9 @@ kb ctl -i N network --failed
 ```
 
 `click`, `type`, `press` and `select` answer once the page settles, and report
-the console errors and dialogs they caused and any change of page.
+the console errors and dialogs they caused and any change of page. What
+comes later (a result after a timer or a request) isn't there yet: follow
+with `wait`, as above, before reading it.
 
 When something looks wrong or does nothing:
 
@@ -138,7 +141,7 @@ Dark mode: `kb ctl -i N scheme dark` (or `light`, or `auto` to follow the termin
 Slow network (loading states, spinners): `kb ctl -i N throttle slow` (or `fast`,
 `offline`), then `kb ctl -i N throttle off`.
 
-Phone layout: `kb ctl -i N viewport 375x800`, check it, then `kb ctl -i N viewport reset`. A
+Phone layout: `kb ctl -i N viewport 375x800`, check it, then `kb ctl -i N viewport reset` to go back to the pane's size. A
 control hidden at that width makes `click` fail with "the element has no
 size", and `box` says why.
 
@@ -187,7 +190,7 @@ kb ctl -i N open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
 kb ctl -i N links --match sqlite.org      # results, with the real address behind redirects
 kb ctl -i N click @3
 kb ctl -i N outline                       # title and headings
-kb ctl -i N text --section 'Ranking'      # just that section; the pane scrolls to it
+kb ctl -i N text --section 'Ranking'      # a heading's words (its number not needed); scrolls to it
 kb ctl -i N find 'bm25'                   # every place it appears, with its section
 kb ctl -i N tables; kb ctl -i N tables 2  # list tables; print one as tab-separated rows
 kb ctl -i N images                        # alt text, size, caption and source
@@ -205,9 +208,11 @@ than searches unless the user asks.
 ## Things to know
 
 - There are no tabs: one page per kb. Open a second pane to compare two pages.
-  A window the page opens (a sign-in popup, a link to a new tab) is shown
-  over it, and commands act on it; click and the other actions say so. When
-  it closes, or on `kb ctl back` from its first page, the page is shown again.
+- A window the page opens (a sign-in popup, a link to a new tab) is shown in
+  its place, and commands act on it; `click` says when one opened or closed,
+  and `status` lists the windows while more than one is open. A popup that
+  finishes closes itself and the page is shown again. To dismiss one
+  instead, `kb ctl -i N back` on its first page closes it.
 - The pane is often narrow, so many sites show their phone layout until you
   set a desktop viewport; `status` says when it is narrow.
 - Screenshots are one image pixel per CSS pixel (a 1280x800 viewport gives
