@@ -97,8 +97,9 @@ go back to the page you were on from there. If you can't tell whether
 they want you to go on, ask. Don't reuse a number that now belongs to
 another kb.
 
-A headless kb has no pane to close: when you're done with it, stop it with
-`kb ctl -i N quit`. One left behind stops by itself after ten minutes
+A headless kb has a desktop's viewport (1280x800), which `viewport reset`
+goes back to, and no pane to close (nor is there one if the user closed
+yours): when you're done with it, stop it with `kb ctl -i N quit`. One left behind stops by itself after ten minutes
 without a command. `kb list` marks headless kbs.
 
 If kb won't start in a pane, or the pane stays blank, `kb doctor` run in
