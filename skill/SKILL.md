@@ -15,11 +15,11 @@ work as well as to do it.
 - **The user sees it.** They watch you work, can stop you, and can take over
   with the mouse. Playwright and other headless tools show nothing until you
   report back.
-- **Sign-ins stay.** kb keeps its own profile (`~/.kittybrowser/profile`),
-  apart from the user's everyday Chrome. They sign in to a site once and stay
-  signed in; sign-in popups ("Continue with Google") work. Only the first kb
-  running uses that profile: one opened beside it gets a fresh profile, so to
-  use their sign-ins, reuse their kb if they say so, or ask them to close it.
+- **Sign-ins stay.** kb has its own profile, apart from the user's Chrome:
+  they sign in once and stay signed in, popups like "Continue with Google"
+  included. Only the first kb running has it; one opened beside it starts
+  fresh, so to use their sign-ins, reuse their kb if they say so, or ask them
+  to close it.
 - **Sites work as in any browser,** including ones some extensions don't
   support, such as Reddit or LinkedIn. kb gets around nothing: a site's terms
   apply, and you act for the user, at a person's pace.
@@ -78,9 +78,8 @@ looking. Close it with `rex block close "$pane"` in Rex, or the terminal's
 own command; that quits the kb. If it's already gone, there's nothing to
 close.
 
-If you lose track of your id, find it in `kb list` by your pane; if you
-can't, stop and ask. If kb won't start,
-or its pane stays blank, `kb doctor` run in that pane says why.
+Lost your id? Find it in `kb list` by your pane, or stop and ask. If kb
+won't start, or its pane stays blank, `kb doctor` run in that pane says why.
 
 ### When the user closes your pane
 
@@ -111,9 +110,9 @@ them), `@N` (a number from `links`), or `:focus`.
 After each change:
 
 ```sh
-kb ctl -i ID reload                          # or open URL; waits for the load, reports errors
-kb ctl -i ID check                           # exit 0 if healthy, 1 on console errors, failed requests or an error page
-kb ctl -i ID screenshot --out /tmp/page.png  # or your scratch directory; then read the image
+kb ctl -i ID reload                               # or open URL; waits for the load, reports errors
+kb ctl -i ID check                                # exit 0 if healthy, 1 on console errors, failed requests or an error page
+kb ctl -i ID screenshot --out "$TMPDIR/page.png"  # then read the image
 ```
 
 Only `check` sets the exit status; the other commands report what they find.
@@ -191,7 +190,7 @@ k check --ignore optimizely.com,doubleclick.net  # third-party noise doesn't cou
 - `alert`, `confirm` and `prompt` are accepted and reported by the command
   that caused them; `dialog dismiss` or `dialog accept --text TEXT` changes
   that for later ones.
-- `eval` reads anything no command does (an order, a count, one value).
+- `eval` reads what no command does (an order, a count, one value).
 
 ## Reading and research
 
