@@ -42,6 +42,7 @@ that pane, since others may be starting kbs at the same moment. Run it as
 one shell command:
 
 ```sh
+url=https://example.com   # the page to open
 pane=$(rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --focus=false --label kb --json -- kb "$url" | jq -r '.block_ids[0]')
 for _ in $(seq 1 40); do
   id=$(kb list 2>/dev/null | awk -F'\t' -v p="$pane" '$3 == p {print $4}')
