@@ -1,6 +1,6 @@
 ---
 name: kb
-description: Drive kb, a real browser (headless Chrome) drawn in a terminal pane beside you that the user watches, with `kb ctl`. Use it to preview and test web work (a page, component, CSS, local dev server or HTML file: see it, check it for console or network errors, click through it, test a phone layout); to run QA on web flows and write repeatable test scripts; and to look things up and read on the web (search, docs, articles), showing the user the pages you cite. Also use when the user asks you to open, show, preview or check a page.
+description: "Drive kb, a real browser (headless Chrome) drawn in a terminal pane beside you that the user watches, with `kb ctl`. Use it to preview and test web work (a page, component, CSS, local dev server or HTML file: see it, check it for console or network errors, click through it, test a phone layout); to run QA on web flows and write repeatable test scripts; and to look things up and read on the web (search, docs, articles), showing the user the pages you cite. Also use when the user asks you to open, show, preview or check a page."
 ---
 <!-- Installed by "kb skill install". Remove it with "kb skill remove". -->
 
