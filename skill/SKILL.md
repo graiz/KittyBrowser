@@ -104,7 +104,8 @@ kb ctl -i N screenshot --out /tmp/page.png  # or your scratch directory; then re
 ```
 
 Then try what you changed. `kb ctl -i N html form` shows a form's fields
-with their ids and names:
+with their ids and names; `html body` shows the rest, such as where a
+result will appear:
 
 ```sh
 kb ctl -i N type '#email' 'a@b.co' --clear
@@ -117,7 +118,7 @@ kb ctl -i N network --failed
 
 `click`, `type`, `press` and `select` answer once the page settles, with the
 errors and dialogs they caused. What comes later (after a timer or a
-request) isn't there yet, so `wait` for it before reading. `wait --text`
+request) isn't there yet, so please `wait` for it before reading. `wait --text`
 matches visible text, case and all; if you don't know the words, `wait
 SELECTOR --visible`, then `text SELECTOR`. `wait` also takes `--count N` and
 `--gone`.
@@ -137,7 +138,7 @@ Also:
 - **Dark mode:** `scheme dark` (or `light`, or `auto` to follow the terminal).
 - **Slow network:** `throttle slow` (or `fast`, `offline`), then `throttle off`.
 - **Phone layout:** `viewport 375x800`, look (`text` or a screenshot), then
-  `viewport reset` to return to the pane's size. A viewport stays set across
+  `viewport reset` to return to the pane's size (1280x800 for a headless kb). A viewport stays set across
   pages until reset. A control hidden at that width makes `click` fail with
   "the element has no size".
 - **Dev servers:** use the address the server printed, not a guessed port.

@@ -1188,13 +1188,15 @@ impl Devtools {
                     }
                 }
                 "console" => {
-                    let errors = flag("errors");
-                    let mut out = self.console_lines(flag("all"), errors);
+                    let (all, errors) = (flag("all"), flag("errors"));
+                    let mut out = self.console_lines(all, errors);
                     if !self.page_console().any(|m| !errors || m.level == "error") {
+                        // After earlier pages' messages, say which page this is about.
                         let _ = write!(
                             out,
-                            "no console {} since the page loaded",
-                            if errors { "errors" } else { "messages" }
+                            "no console {} {}",
+                            if errors { "errors" } else { "messages" },
+                            if all { "on the current page since it loaded" } else { "since the page loaded" }
                         );
                     }
                     text(&reply, out.trim_end());
