@@ -68,7 +68,7 @@ Opening a pane elsewhere, without taking the user's focus:
 | tmux, screen, Zellij | can't show kb's images: open it in a pane of the terminal itself |
 
 Close your pane with `rex block close "$pane"` in Rex, or the terminal's
-own command elsewhere.
+own command elsewhere; if it's already gone, there's nothing to close.
 Closing the pane quits that kb. Leave it open unless asked to close it: the
 user may want to keep looking.
 
@@ -82,13 +82,16 @@ If your kb is gone from `kb list`, or `kb ctl -i N` says it isn't running,
 treat it as the user closing it (kb rarely crashes): they most likely wanted
 it out of the way, which overrides an earlier ask to show it in a pane. If
 the task can finish without them watching, carry on headless; if you can't
-tell whether they want you to go on, ask.
+tell whether they want you to go on, ask, or carry on if there's no one to
+ask (as when you're a subagent). `kb ctl` may say "kb closed the connection"
+for a command that was running as the pane closed.
 
 `kb --headless URL` runs a kb in the background, with the same commands, and
 prints its number. Like any kb, it has the signed-in profile only if no
-other kb is running. It has a desktop viewport (1280x800) and no pane. Stop it with `kb ctl -i N quit` when you're
-done (with your pane gone, that's all there is to close); one left behind
-quits after ten minutes without a command. `kb list` marks headless kbs.
+other kb is running. It has a desktop viewport (1280x800) and no pane. Stop
+it with `kb ctl -i N quit` when you're done; one left behind quits after ten
+minutes without a command. `kb list` marks headless kbs, and shows "(not
+answering)" for a moment while a kb starts or quits.
 
 ## Selectors
 
@@ -195,7 +198,7 @@ kb ctl -i N click @3
 kb ctl -i N text                          # the page's main content
 kb ctl -i N outline                       # title and headings (there's no title command)
 kb ctl -i N text --section 'Ranking'      # one section, by its heading's words; scrolls to it
-kb ctl -i N find 'bm25'                   # every place it appears, with its section
+kb ctl -i N find 'bm25'                   # where it appears, with its section (first 10; --limit N)
 kb ctl -i N tables; kb ctl -i N tables 2  # list tables; print one as tab-separated rows
 kb ctl -i N images                        # alt text, size, caption and source
 ```
