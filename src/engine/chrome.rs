@@ -70,7 +70,7 @@ pub const CTRL: u32 = 2;
 pub const SHIFT: u32 = 8;
 
 /// A window kb can show: the first one, or one a page opened (a link to a
-/// new tab, a sign-in popup). Only the top one is shown and gets input;
+/// new tab, a sign-in popup). One is shown and gets input;
 /// the others wait, as tabs behind a browser's do.
 struct Tab {
     session: String,
