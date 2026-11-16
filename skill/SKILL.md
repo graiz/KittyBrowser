@@ -35,40 +35,40 @@ Several kbs can run at once, each with a number. Always pass yours with
 someone else's. Never drive a kb you didn't open. If one you opened earlier
 in this conversation is still in `kb list`, reuse it.
 
-To open one, start `kb "$url"` in a new pane beside yours and take the number
-`kb list` didn't show before. Run it all as one shell command, since
-`$before` is gone in the next:
+To open one in Rex (`$REX_SESSION` is set), split a pane and find your kb
+by that pane's id. Others may be starting kbs at the same moment, so the
+pane is the only sure way to tell yours. Run it as one shell command:
 
 ```sh
-before=$(kb list 2>/dev/null | cut -f1)
-# ... start `kb "$url"` in a new pane beside yours (see below) ...
+pane=$(rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --focus=false --label kb --json -- kb "$url" | jq -r '.block_ids[0]')
 for _ in $(seq 1 40); do
-  n=$(kb list 2>/dev/null | cut -f1 | grep -vxF "$before" | head -n1)
+  n=$(kb list 2>/dev/null | awk -F'\t' -v p="$pane" '$3 == p {print $1}')
   [ -n "$n" ] && break
   sleep 0.25
 done
-echo "kb $n"
+echo "kb $n in $pane"
 ```
+
+In another terminal, start `kb "$url"` in a new pane (below) and take the
+number `kb list` didn't show before; then check `kb ctl -i N status` shows
+your page, in case someone else's kb started at the same time.
 
 Each shell command starts afresh, so write the number into every command:
 `kb ctl -i 3 open URL`. Below, `N` stands for it, and outside code blocks a
 command is named alone: `box` means `kb ctl -i N box`.
 
-Opening a pane without taking the user's focus:
+Opening a pane elsewhere, without taking the user's focus:
 
 | Terminal | Command |
 |---|---|
-| Rex (`$REX_SESSION` set) | `rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --focus=false --label kb --json -- kb "$url"` |
 | herdr (`HERDR_ENV=1`) | `herdr pane split <your pane> --direction right --no-focus`, then `herdr pane run <new pane> "kb $url"` |
 | kitty | `kitten @ launch --location=vsplit --keep-focus kb "$url"` (needs remote control) |
 | WezTerm | `wezterm cli split-pane --right -- kb "$url"` |
 | Ghostty, cmux, others | the terminal's own command or scripting, if any; or ask the user to split a pane (Cmd+D in Ghostty) and run `kb URL` |
 | tmux, screen, Zellij | can't show kb's images: open it in a pane of the terminal itself |
 
-In Rex, `rex split --json` prints your new pane's id (`block_ids`), and
-`kb list` shows each kb's pane: yours is the one on that id. That's surer
-than the numbers when others start kbs at the same moment. Close it with
-`rex block close block:…`. Elsewhere, use the terminal's own command.
+Close your pane with `rex block close "$pane"` in Rex, or the terminal's
+own command elsewhere.
 Closing the pane quits that kb. Leave it open unless asked to close it: the
 user may want to keep looking.
 
@@ -84,8 +84,9 @@ ask to show it in a pane. If the task can finish
 without them watching, carry on headless; if you can't tell whether they
 want you to go on, ask.
 
-`kb --headless URL` runs a kb in the background, with the same commands and
-profile, and prints its number. It has a desktop viewport (1280x800, which
+`kb --headless URL` runs a kb in the background, with the same commands,
+and prints its number. Like any kb, it has the signed-in profile only if
+no other kb is running. It has a desktop viewport (1280x800, which
 `viewport reset` returns to) and no pane. Stop it with `kb ctl -i N quit`
 when you're done; one left behind quits after ten minutes without a command.
 `kb list` marks headless kbs.
@@ -102,13 +103,13 @@ After each change:
 
 ```sh
 kb ctl -i N reload                          # or open URL; waits for the load, reports errors
-kb ctl -i N check                           # exit 1 on console errors, failed requests or an error page
+kb ctl -i N check                           # exit 1 on console errors, failed requests or an error page (the only exit-status check)
 kb ctl -i N screenshot --out /tmp/page.png  # or your scratch directory; then read the image
 ```
 
-Then try what you changed. `kb ctl -i N html form` prints the form's
-HTML, with its fields' ids and names; `html body` prints the whole page,
-including where a result will appear:
+Then try what you changed. Read the page's HTML for selectors
+rather than guessing: `kb ctl -i N html form` for a form's fields,
+`html body` for the whole page, including where a result will appear:
 
 ```sh
 kb ctl -i N type '#email' 'a@b.co' --clear
@@ -209,7 +210,7 @@ kb ctl -i N images                        # alt text, size, caption and source
 
 - One page per kb, no tabs; open a second pane to compare two pages.
 - A window the page opens (a sign-in popup, a new tab) is shown in its
-  place, and commands act on it. `click` says when one opens or closes, and
+  place, and commands act on it: click and type in it as on any page. `click` says when one opens or closes, and
   `status` counts them. A finished popup closes itself; to dismiss one,
   `back` on its first page closes it.
 - Screenshots are one image pixel per CSS pixel. `--size small` halves
