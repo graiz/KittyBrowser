@@ -126,8 +126,9 @@ kb ctl -i N network --failed
 ```
 
 `wait --text` matches visible text, case and all, so copy the words as the
-page will show them. `wait` also takes `--count N`, `--gone` and
-`--visible`.
+page will show them. If you don't know the words yet, `wait SELECTOR
+--visible` waits for the element to show, then `text SELECTOR` reads it.
+`wait` also takes `--count N` and `--gone`.
 
 `click`, `type`, `press` and `select` answer once the page settles, and report
 the console errors and dialogs they caused and any change of page. What
@@ -222,7 +223,7 @@ than searches unless the user asks.
 - There are no tabs: one page per kb. Open a second pane to compare two pages.
 - A window the page opens (a sign-in popup, a link to a new tab) is shown in
   its place, and commands act on it; `click` says when one opened or closed,
-  and `status` lists the windows while more than one is open. A popup that
+  and `status` says how many windows are open. A popup that
   finishes closes itself and the page is shown again. To dismiss one
   instead, `kb ctl -i N back` on its first page closes it.
 - The pane is often narrow, so many sites show their phone layout until you

@@ -1131,14 +1131,14 @@ impl Devtools {
                     if !self.throttle.is_empty() {
                         let _ = write!(rest, "\nnetwork throttled: {}", self.throttle);
                     }
-                    let (shown, open) = chrome.windows();
-                    if open > 1 {
-                        let _ = write!(
-                            rest,
+                    let windows = match chrome.windows() {
+                        (_, 1) => "\nwindows: 1 open".to_owned(),
+                        (shown, open) => format!(
                             "\nwindows: {open} open, this is {shown} (a popup or new tab the page opened; \
                              back on its first page closes it)"
-                        );
-                    }
+                        ),
+                    };
+                    rest.push_str(&windows);
                     if let Ok(pane) = std::env::var("REX_BLOCK") {
                         let _ = write!(rest, "\npane: {pane}");
                     }
@@ -1465,6 +1465,12 @@ impl Devtools {
                         None => DEFAULT_WAIT,
                     };
                     let selector = need("selector")?;
+                    // Empty text is in every element: waiting for it would pass at once.
+                    if args["text"].as_str().is_some_and(|text| text.trim().is_empty()) {
+                        return Err(
+                            "--text needs the words to wait for; to wait for the element to show, use --visible".into(),
+                        );
+                    }
                     let (what, condition) = match arg("text") {
                         _ if flag("gone") => (format!("{selector} to be gone"), "all.length === 0".to_owned()),
                         _ if arg("count").is_some() => {
@@ -1477,7 +1483,12 @@ impl Devtools {
                             format!("all.some(el => __kb.visible(el) && {TEXT_OF}.includes({}))", quote(wanted)),
                         ),
                         None if flag("visible") => {
-                            (format!("{selector} to be shown"), "all.some(el => __kb.visible(el))".to_owned())
+                            // Visible and taking up room: an empty element waiting for its
+                            // text is not shown yet.
+                            (
+                                format!("{selector} to be shown"),
+                                "all.some(el => __kb.visible(el) && __kb.shown(el))".to_owned(),
+                            )
                         }
                         None => (selector.to_owned(), "all.length > 0".to_owned()),
                     };
