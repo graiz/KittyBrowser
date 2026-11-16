@@ -52,10 +52,15 @@ done
 echo "kb $id in $pane"
 ```
 
-In another terminal, start `kb "$url"` in a new pane (below), take the id of
-the kb `kb list` didn't show before, and check `kb ctl -i ID status` shows
-your page, in case someone else's started at the same time. `kb list`
-prints one kb a line, tab-separated: number, page, pane, id.
+In another terminal, open a pane beside yours with the terminal's own
+command, without taking the user's focus (herdr: `herdr pane split`, kitty:
+`kitten @ launch`, WezTerm: `wezterm cli split-pane`), and run `kb "$url"` in
+it. If it has no such command, ask the user to open a pane and run `kb URL`.
+Then take the id of the kb `kb list` didn't show before, and check
+`kb ctl -i ID status` shows your page, in case someone else's started at the
+same time. `kb list` prints one kb a line, tab-separated: number, page,
+pane, id. (tmux, screen and Zellij can't show kb's images: open it in a pane
+of the terminal itself.)
 
 Each shell command starts afresh, so write the id (and pane) into every
 later command: `kb ctl -i 3-a7f2 open URL`. Below, `ID` stands for it, and
@@ -63,16 +68,6 @@ outside code blocks a command is named alone: `box` means `kb ctl -i ID box`.
 
 A new pane is often narrow, so sites show their phone layout; for reading or
 a desktop layout, run `viewport 1280x800` first.
-
-Opening a pane elsewhere, without taking the user's focus:
-
-| Terminal | Command |
-|---|---|
-| herdr (`HERDR_ENV=1`) | `herdr pane split <your pane> --direction right --no-focus`, then `herdr pane run <new pane> "kb $url"` |
-| kitty | `kitten @ launch --location=vsplit --keep-focus kb "$url"` (needs remote control) |
-| WezTerm | `wezterm cli split-pane --right -- kb "$url"` |
-| Ghostty, cmux, others | the terminal's own command or scripting, if any; or ask the user to split a pane (Cmd+D in Ghostty) and run `kb URL` |
-| tmux, screen, Zellij | can't show kb's images: open it in a pane of the terminal itself |
 
 Leave your pane open unless asked to close it: the user may want to keep
 looking. Close it with `rex block close "$pane"` in Rex, or the terminal's
