@@ -9,8 +9,9 @@ Notable changes to kb. The format follows
 - Sign-in popups work ("Continue with Google" and the like): a window a
   page opens is shown over it, and when it closes the page is shown again,
   signed in. Before, kb loaded it in place of the page, which then never
-  heard back. The bar says how many windows are open; ✕, or Back on a
-  window's first page, closes the one shown.
+  heard back. With more than one window open, the bar shows "‹ 2/3 ›" to
+  switch between them; ✕, or Back on a window's first page, closes the
+  one shown.
 - Fewer captchas: navigator.webdriver is false, the client hints
   (Sec-CH-UA) name the browser and system, and pages see a real screen
   and a window bigger than themselves.

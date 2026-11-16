@@ -22,13 +22,26 @@ pub enum Hit {
     Forward,
     Reload,
     Close,
+    /// The window switcher's halves.
+    PreviousWindow,
+    NextWindow,
     /// A click in the address field, as an offset into the visible text.
     Address(usize),
     Nothing,
 }
 
+/// The window switcher, between the field and ✕, when a page has opened
+/// windows and there's room: "‹ 2/3 ›" for the second window of three
+/// shown. `windows` is the one shown, from 1, and how many are open.
+fn switcher(windows: (usize, usize), cols: usize) -> Option<String> {
+    let text = format!("‹ {}/{} ›", windows.0, windows.1);
+    (windows.1 > 1 && cols > MIN_COLS + text.chars().count()).then_some(text)
+}
+
 /// What a column of the top bar holds.
-pub fn hit(col: usize, cols: usize) -> Hit {
+pub fn hit(col: usize, cols: usize, windows: (usize, usize)) -> Hit {
+    let switcher = switcher(windows, cols).map_or(0, |text| text.chars().count());
+    let switcher_start = cols.saturating_sub(CLOSE + switcher) + 1;
     if cols < MIN_COLS {
         Hit::Nothing
     } else if BACK.contains(&col) {
@@ -41,6 +54,13 @@ pub fn hit(col: usize, cols: usize) -> Hit {
         Hit::Nothing
     } else if col > cols - CLOSE {
         Hit::Close
+    } else if switcher > 0 && col >= switcher_start {
+        // Either half: wide enough to hit, the arrows being one column each.
+        if col < switcher_start + switcher / 2 {
+            Hit::PreviousWindow
+        } else {
+            Hit::NextWindow
+        }
     } else if (FIELD..=cols - CLOSE).contains(&col) {
         Hit::Address(col.saturating_sub(FIELD + 1))
     } else {
@@ -393,7 +413,9 @@ pub fn blank(out: &mut Vec<u8>, rect: Rect) {
 
 /// Draw the top row: the buttons and `bar`, or `label` in the buttons'
 /// place when the field is for something other than the address.
-/// `badge`, if given, is shown at the right end, after the field.
+/// `badge`, if given, is shown at the right end, after the field, and the
+/// window switcher after it when `windows` (the one shown, how many) says
+/// there's more than one.
 pub fn render_bar(
     out: &mut Vec<u8>,
     bar: &mut AddressBar,
@@ -401,6 +423,7 @@ pub fn render_bar(
     loading: bool,
     label: Option<&str>,
     badge: Option<&str>,
+    windows: (usize, usize),
 ) {
     let mut s = String::from("\x1b[1;1H");
     let colors = palette();
@@ -420,9 +443,11 @@ pub fn render_bar(
         }
     }
 
-    let badge = badge.filter(|badge| cols > MIN_COLS + badge.chars().count());
+    let switcher = switcher(windows, cols);
+    let switcher_width = switcher.as_ref().map_or(0, |text| text.chars().count());
+    let badge = badge.filter(|badge| cols > MIN_COLS + switcher_width + badge.chars().count());
     let badge_width = badge.map_or(0, |badge| badge.chars().count() + 1);
-    let width = cols - FIELD - 2 - CLOSE - badge_width;
+    let width = cols - FIELD - 2 - CLOSE - badge_width - switcher_width;
     let window = bar.window(width);
     let shown: Vec<char> = bar.text.iter().chain(&bar.completion).copied().collect();
     let typed_end = bar.text.len().clamp(window.start, window.end);
@@ -443,6 +468,9 @@ pub fn render_bar(
     s.push(' ');
     if let Some(badge) = badge {
         let _ = write!(s, "{badge} ");
+    }
+    if let Some(switcher) = switcher {
+        s.push_str(&switcher);
     }
     s.push_str(" ✕ \x1b[0m");
     if bar.focused {
@@ -620,7 +648,7 @@ mod tests {
         press(&mut bar, KeyCode::Char('g'));
         bar.set_completion(Some("o.com".into()));
         let mut out = Vec::new();
-        render_bar(&mut out, &mut bar, 40, false, None, None);
+        render_bar(&mut out, &mut bar, 40, false, None, None, (1, 1));
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(" g\x1b[7mo.com\x1b[27m"), "{text:?}");
         // The cursor sits after the typed text, before the completion.
@@ -658,7 +686,7 @@ mod tests {
                 bar.focus();
             }
             let mut out = Vec::new();
-            render_bar(&mut out, &mut bar, 40, false, None, None);
+            render_bar(&mut out, &mut bar, 40, false, None, None, (1, 1));
             // Count printed cells: drop escape sequences, which end in a letter.
             let text = String::from_utf8(out).unwrap();
             let mut cells = 0;
@@ -676,16 +704,23 @@ mod tests {
 
     #[test]
     fn hit_testing() {
-        assert_eq!(hit(2, 80), Hit::Back);
-        assert_eq!(hit(5, 80), Hit::Forward);
-        assert_eq!(hit(8, 80), Hit::Reload);
-        assert_eq!(hit(10, 80), Hit::Nothing);
-        assert_eq!(hit(11, 80), Hit::Address(0));
-        assert_eq!(hit(14, 80), Hit::Address(2));
-        assert_eq!(hit(77, 80), Hit::Address(65));
-        assert_eq!(hit(78, 80), Hit::Close);
-        assert_eq!(hit(80, 80), Hit::Close);
-        assert_eq!(hit(81, 80), Hit::Nothing);
+        assert_eq!(hit(2, 80, (1, 1)), Hit::Back);
+        assert_eq!(hit(5, 80, (1, 1)), Hit::Forward);
+        assert_eq!(hit(8, 80, (1, 1)), Hit::Reload);
+        assert_eq!(hit(10, 80, (1, 1)), Hit::Nothing);
+        assert_eq!(hit(11, 80, (1, 1)), Hit::Address(0));
+        assert_eq!(hit(14, 80, (1, 1)), Hit::Address(2));
+        assert_eq!(hit(77, 80, (1, 1)), Hit::Address(65));
+        assert_eq!(hit(78, 80, (1, 1)), Hit::Close);
+        assert_eq!(hit(80, 80, (1, 1)), Hit::Close);
+        assert_eq!(hit(81, 80, (1, 1)), Hit::Nothing);
+        // "‹ 2/3 ›" takes columns 71 to 77, before ✕.
+        assert_eq!(hit(70, 80, (2, 3)), Hit::Address(58));
+        assert_eq!(hit(71, 80, (2, 3)), Hit::PreviousWindow);
+        assert_eq!(hit(73, 80, (2, 3)), Hit::PreviousWindow);
+        assert_eq!(hit(74, 80, (2, 3)), Hit::NextWindow);
+        assert_eq!(hit(77, 80, (2, 3)), Hit::NextWindow);
+        assert_eq!(hit(78, 80, (2, 3)), Hit::Close);
         // " Quit?  " puts Yes at columns 9 to 13 and No at 15 to 18.
         assert_eq!(answer(8, "Quit?"), None);
         assert_eq!(answer(9, "Quit?"), Some(true));

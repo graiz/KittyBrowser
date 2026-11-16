@@ -2000,7 +2000,7 @@ impl Devtools {
                         self.moving.push((reply, Instant::now() + MOVE_TIMEOUT));
                     }
                     // The first page of a window a page opened: back is closing it.
-                    None if step < 0 && chrome.windows() > 1 => {
+                    None if step < 0 && chrome.windows().1 > 1 => {
                         let under = chrome.close_window();
                         text(&reply, format!("closed this window, which had no earlier page; shown again: {under}"));
                     }
@@ -2094,8 +2094,10 @@ impl Devtools {
                 // It opened a window (a sign-in popup, a link to a new tab),
                 // or closed the one it was in: the page acted on isn't shown.
                 let shown = match chrome.windows() {
-                    1 => "the window under it is shown again".to_owned(),
-                    n => format!("it opened a window, shown now ({n} open; kb ctl back on its first page closes it)"),
+                    (_, 1) => "its window closed, and the page is shown again".to_owned(),
+                    (at, n) => format!(
+                        "another window is shown now, {at} of {n} (kb ctl back on a window's first page closes it)"
+                    ),
                 };
                 text(&action.reply, format!("{}; {shown}: {}", action.message, chrome.url()));
             } else if self.loads != action.since.loads && new_page {

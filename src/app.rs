@@ -590,9 +590,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                             redraw = true;
                         }
                         Some(PageEvent::Shown(url)) => {
-                            // Another window: whether it is loading comes in its own events.
-                            app.loading = false;
-                            app.went_to(url);
+                            app.shown(url);
                             redraw = true;
                         }
                         Some(PageEvent::Loading(loading)) => {
@@ -888,6 +886,19 @@ impl App {
         out.extend_from_slice(b"\x1b[?25l");
     }
 
+    /// Another window is shown, at `url`. Whether it is loading comes in
+    /// its own events.
+    fn shown(&mut self, url: String) {
+        self.loading = false;
+        self.went_to(url);
+    }
+
+    fn switch_window(&mut self, step: isize) {
+        if let Some(PageEvent::Shown(url)) = self.chrome.switch(step) {
+            self.shown(url);
+        }
+    }
+
     /// The page shown is at `url` now.
     fn went_to(&mut self, url: String) {
         log(format_args!("url {url}"));
@@ -1001,15 +1012,6 @@ impl App {
             let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
             badge.push(SPINNER[step % SPINNER.len()]);
         }
-        // Windows a page opened, such as a sign-in popup, are shown over it;
-        // ✕, or Back on one's first page, closes it.
-        let windows = self.chrome.windows();
-        if windows > 1 {
-            if !badge.is_empty() {
-                badge.push(' ');
-            }
-            badge.push_str(&format!("{windows} windows"));
-        }
         if (self.zoom - 1.0).abs() > 0.001 {
             if !badge.is_empty() {
                 badge.push(' ');
@@ -1020,8 +1022,10 @@ impl App {
         let badge = (!badge.is_empty()).then_some(badge);
         match &mut self.find {
             _ if self.asking_quit => ui::render_question(&mut out, ui::QUIT_QUESTION, cols),
-            Some(field) => ui::render_bar(&mut out, field, cols, self.loading, Some("Find"), badge),
-            None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge),
+            Some(field) => {
+                ui::render_bar(&mut out, field, cols, self.loading, Some("Find"), badge, self.chrome.windows())
+            }
+            None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge, self.chrome.windows()),
         }
         self.render_help(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
@@ -1304,9 +1308,11 @@ impl App {
         if py < cell_h && self.buttons == 0 {
             let col = (px / cell_w) as usize + 1;
             if mouse.kind == MouseKind::Move {
-                let shape = match ui::hit(col, self.window.cols as usize) {
+                let shape = match ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
                     Hit::Address(_) => "text",
-                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Close => "pointer",
+                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Close | Hit::PreviousWindow | Hit::NextWindow => {
+                        "pointer"
+                    }
                     Hit::Nothing => "default",
                 };
                 self.set_pointer(shape);
@@ -1314,10 +1320,10 @@ impl App {
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
                 return false;
             }
-            if ui::hit(col, self.window.cols as usize) == Hit::Close {
+            if ui::hit(col, self.window.cols as usize, self.chrome.windows()) == Hit::Close {
                 // A window a page opened closes like a browser's tab; the
                 // last one is kb itself, so that asks first.
-                if self.chrome.windows() > 1 {
+                if self.chrome.windows().1 > 1 {
                     self.chrome.close_window();
                 } else {
                     self.asking_quit = true;
@@ -1325,18 +1331,20 @@ impl App {
                 return true;
             }
             if let Some(field) = &mut self.find {
-                if let Hit::Address(offset) = ui::hit(col, self.window.cols as usize) {
+                if let Hit::Address(offset) = ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
                     field.click(offset);
                 }
                 return true;
             }
-            match ui::hit(col, self.window.cols as usize) {
+            match ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
                 Hit::Back => self.chrome.back(),
                 Hit::Forward => self.chrome.forward(),
                 Hit::Reload if self.loading => self.chrome.stop(),
                 Hit::Reload => self.chrome.reload(),
                 Hit::Address(offset) if self.bar.focused() => self.bar.click(offset),
                 Hit::Address(_) => self.bar.focus(),
+                Hit::PreviousWindow => self.switch_window(-1),
+                Hit::NextWindow => self.switch_window(1),
                 Hit::Close | Hit::Nothing => {}
             }
             return true;

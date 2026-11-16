@@ -48,8 +48,8 @@ kb news.ycombinator.com
 ```
 
 Ctrl+/ shows the keys, Ctrl+Q quits (or the ✕ at the right of the bar, which asks first).
-A window a page opens, such as a sign-in popup, is shown over the page; ✕
-closes it.
+A window a page opens, such as a sign-in popup, is shown over the page;
+‹ › in the bar switch between open windows, and ✕ closes the one shown.
 
 There is no prebuilt release yet, so kb needs Rust to build. Once releases
 are published, this will install kb without Rust:

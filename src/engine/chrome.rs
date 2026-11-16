@@ -71,7 +71,7 @@ pub const SHIFT: u32 = 8;
 
 /// A window kb can show: the first one, or one a page opened (a link to a
 /// new tab, a sign-in popup). Only the top one is shown and gets input;
-/// the others wait under it, as a browser's would behind it.
+/// the others wait, as tabs behind a browser's do.
 struct Tab {
     session: String,
     target: String,
@@ -85,9 +85,9 @@ struct Tab {
 pub struct Chrome {
     child: Child,
     tx: Sender,
-    /// The window shown, and the ones under it, newest last.
-    tab: Tab,
-    below: Vec<Tab>,
+    /// The windows open, in the order they opened in, and which is shown.
+    tabs: Vec<Tab>,
+    shown: usize,
     /// Windows a page opened that kb is attaching to.
     opening: HashSet<String>,
     /// What every window is told when kb attaches to it, in order: the
@@ -538,8 +538,8 @@ impl Chrome {
         let chrome = Chrome {
             child,
             tx,
-            tab: Tab { session, target, main_frame, url: String::new(), window, cache_off: false },
-            below: Vec::new(),
+            tabs: vec![Tab { session, target, main_frame, url: String::new(), window, cache_off: false }],
+            shown: 0,
             opening: HashSet::new(),
             settings,
             window_request: None,
@@ -558,55 +558,56 @@ impl Chrome {
 
     // Send failures mean Chrome is gone; the reader thread reports that.
     fn send(&mut self, method: &str, params: Value) {
-        let _ = self.tx.send(method, params, Some(&self.tab.session));
+        let _ = self.tx.send(method, params, Some(&self.tabs[self.shown].session));
     }
 
     /// Send a command whose reply the caller wants: returns the id the reply
     /// will carry.
     pub fn request(&mut self, method: &str, params: Value) -> u64 {
-        self.tx.send(method, params, Some(&self.tab.session)).unwrap_or(0)
+        self.tx.send(method, params, Some(&self.tabs[self.shown].session)).unwrap_or(0)
     }
 
     /// Tell every window, and those opened later, the same thing.
     fn send_to_all(&mut self, method: &'static str, params: Value) {
         self.settings.retain(|(sent, _)| *sent != method);
         self.settings.push((method, params.clone()));
-        for tab in std::iter::once(&self.tab).chain(&self.below) {
+        for tab in &self.tabs {
             let _ = self.tx.send(method, params.clone(), Some(&tab.session));
         }
     }
 
     pub fn main_frame(&self) -> &str {
-        &self.tab.main_frame
+        &self.tabs[self.shown].main_frame
     }
 
     /// The shown window's session, which commands go to.
     pub fn session(&self) -> &str {
-        &self.tab.session
+        &self.tabs[self.shown].session
     }
 
     /// Where the shown window is.
     pub fn url(&self) -> &str {
-        &self.tab.url
+        &self.tabs[self.shown].url
     }
 
-    /// How many windows are open: the shown one and those under it.
-    pub fn windows(&self) -> usize {
-        1 + self.below.len()
+    /// Which window is shown, counting from 1, and how many are open.
+    pub fn windows(&self) -> (usize, usize) {
+        (self.shown + 1, self.tabs.len())
     }
 
     /// Whether the app should look at this message: replies, the browser's
-    /// own events, and events from the window shown, not from those under it.
+    /// own events, and events from the window shown, not from the others.
     pub fn shown(&self, message: &Value) -> bool {
-        message.get("id").is_some() || message["sessionId"].as_str().is_none_or(|session| session == self.tab.session)
+        message.get("id").is_some()
+            || message["sessionId"].as_str().is_none_or(|session| session == self.tabs[self.shown].session)
     }
 
     /// Switch the HTTP cache off if `url` is local, on if not. Call before
     /// going there.
     pub fn cache_for(&mut self, url: &str) {
         let off = is_local(url);
-        if off != self.tab.cache_off {
-            self.tab.cache_off = off;
+        if off != self.tabs[self.shown].cache_off {
+            self.tabs[self.shown].cache_off = off;
             self.send("Network.setCacheDisabled", json!({"cacheDisabled": off}));
         }
     }
@@ -664,29 +665,29 @@ impl Chrome {
                 if frame.get("parentId").is_some() {
                     return None;
                 }
-                self.tab.main_frame = frame["id"].as_str()?.to_owned();
+                self.tabs[self.shown].main_frame = frame["id"].as_str()?.to_owned();
                 let mut url = frame["url"].as_str()?.to_owned();
                 url.push_str(frame["urlFragment"].as_str().unwrap_or(""));
                 // For what loads next: links followed from here aren't seen in advance.
                 self.cache_for(&url);
-                self.tab.url.clone_from(&url);
+                self.tabs[self.shown].url.clone_from(&url);
                 Some(PageEvent::Url(url))
             }
-            "Page.navigatedWithinDocument" if params["frameId"] == self.tab.main_frame.as_str() => {
-                self.tab.url = params["url"].as_str()?.to_owned();
-                Some(PageEvent::Url(self.tab.url.clone()))
+            "Page.navigatedWithinDocument" if params["frameId"] == self.tabs[self.shown].main_frame.as_str() => {
+                self.tabs[self.shown].url = params["url"].as_str()?.to_owned();
+                Some(PageEvent::Url(self.tabs[self.shown].url.clone()))
             }
-            "Page.frameStartedLoading" if params["frameId"] == self.tab.main_frame.as_str() => {
+            "Page.frameStartedLoading" if params["frameId"] == self.tabs[self.shown].main_frame.as_str() => {
                 Some(PageEvent::Loading(true))
             }
-            "Page.frameStoppedLoading" if params["frameId"] == self.tab.main_frame.as_str() => {
+            "Page.frameStoppedLoading" if params["frameId"] == self.tabs[self.shown].main_frame.as_str() => {
                 Some(PageEvent::Loading(false))
             }
             "Target.targetCreated" => {
                 let info = &params["targetInfo"];
                 let id = info["targetId"].as_str()?;
                 // A window a page opened. (A prerendered page isn't one yet.)
-                let known = self.tabs().any(|tab| tab.target == id) || self.opening.contains(id);
+                let known = self.tabs.iter().any(|tab| tab.target == id) || self.opening.contains(id);
                 if info["type"] == "page" && info.get("subtype").is_none() && info["attached"] != true && !known {
                     self.opening.insert(id.to_owned());
                     self.send_browser("Target.attachToTarget", json!({"targetId": id, "flatten": true}));
@@ -709,52 +710,61 @@ impl Chrome {
                 let info = &params["targetInfo"];
                 let id = info["targetId"].as_str()?;
                 let url = info["url"].as_str()?;
-                if let Some(tab) = self.below.iter_mut().find(|tab| tab.target == id) {
-                    tab.url = url.to_owned();
-                } else if id == self.tab.target && url != self.tab.url {
-                    self.tab.url = url.to_owned();
-                    return Some(PageEvent::Url(self.tab.url.clone()));
+                let at = self.tabs.iter().position(|tab| tab.target == id)?;
+                if self.tabs[at].url == url {
+                    return None;
                 }
-                None
+                self.tabs[at].url = url.to_owned();
+                (at == self.shown).then(|| PageEvent::Url(url.to_owned()))
             }
             "Target.targetDestroyed" | "Target.detachedFromTarget" => {
                 let id = params["targetId"].as_str()?;
                 self.opening.remove(id);
-                self.below.retain(|tab| tab.target != id);
-                if id == self.tab.target {
-                    return self.closed();
-                }
-                None
+                self.closed(id)
             }
             _ => None,
         }
     }
 
-    fn tabs(&self) -> impl Iterator<Item = &Tab> {
-        std::iter::once(&self.tab).chain(&self.below)
+    /// Show a window a page opened, next to the one it opened it from.
+    fn open(&mut self, session: String, target: String, url: String) -> Option<PageEvent> {
+        for (method, params) in &self.settings {
+            let _ = self.tx.send(method, params.clone(), Some(&session));
+        }
+        let asked = self.tx.send("Browser.getWindowForTarget", json!({"targetId": target}), None);
+        self.window_request = asked.ok().map(|id| (id, target.clone()));
+        let main_frame = target.clone();
+        let tab = Tab { session, target, main_frame, url: url.clone(), window: None, cache_off: false };
+        self.tabs.insert(self.shown + 1, tab);
+        let event = self.show(self.shown + 1);
+        self.cache_for(&url);
+        event
     }
 
-    /// Show a window a page opened, above the one it opened it from.
-    fn open(&mut self, session: String, target: String, url: String) -> Option<PageEvent> {
-        // The page under it keeps its own screencast stopped until it is
-        // shown again; frames from it need no acknowledging.
-        if self.screencast.is_some() {
+    /// Show the window at `at` in place of the one shown. The others keep
+    /// their screencasts stopped until shown again; frames from them need
+    /// no acknowledging.
+    fn show(&mut self, at: usize) -> Option<PageEvent> {
+        if self.screencast.is_some() && at != self.shown && self.shown < self.tabs.len() {
             self.send("Page.stopScreencast", json!({}));
         }
         self.unacked.clear();
-        let main_frame = target.clone();
-        let tab = Tab { session, target: target.clone(), main_frame, url: url.clone(), window: None, cache_off: false };
-        self.below.push(std::mem::replace(&mut self.tab, tab));
-        for (method, params) in self.settings.clone() {
-            self.send(method, params);
-        }
-        self.cache_for(&url);
-        let asked = self.tx.send("Browser.getWindowForTarget", json!({"targetId": target}), None);
-        self.window_request = asked.ok().map(|id| (id, target));
+        self.shown = at;
         if let Some(params) = self.screencast.clone() {
             self.send("Page.startScreencast", params);
         }
-        Some(PageEvent::Shown(url))
+        Some(PageEvent::Shown(self.tabs[at].url.clone()))
+    }
+
+    /// Show the next window, or with a negative `step` an earlier one,
+    /// going round.
+    pub fn switch(&mut self, step: isize) -> Option<PageEvent> {
+        let count = self.tabs.len() as isize;
+        if count < 2 {
+            return None;
+        }
+        let at = (self.shown as isize + step).rem_euclid(count) as usize;
+        self.show(at)
     }
 
     /// The window holding a page just shown: fit it to the viewport, as the
@@ -766,23 +776,36 @@ impl Chrome {
         else {
             return;
         };
-        if self.tab.target != target {
-            return;
-        }
+        let Some(at) = self.tabs.iter().position(|tab| tab.target == target) else { return };
         let mut window = Window::new(id, (width, height));
         let fit = self.viewport.and_then(|(width, height)| window.resized(None, (width as i64, height as i64)));
-        self.tab.window = Some(window);
-        self.set_window(fit);
+        self.tabs[at].window = Some(window);
+        if at == self.shown {
+            self.set_window(fit);
+        } else if let Some((width, height)) = fit {
+            let bounds = json!({"windowId": id, "bounds": {"width": width, "height": height}});
+            let _ = self.tx.send("Browser.setWindowBounds", bounds, None);
+        }
     }
 
-    /// The window shown closed: show the one under it again.
-    fn closed(&mut self) -> Option<PageEvent> {
-        self.tab = self.below.pop()?;
-        self.unacked.clear();
-        if let Some(params) = self.screencast.clone() {
-            self.send("Page.startScreencast", params);
+    /// A window closed: forget it, and if it was shown, show the one before
+    /// it, usually the page that opened it.
+    fn closed(&mut self, target: &str) -> Option<PageEvent> {
+        let at = self.tabs.iter().position(|tab| tab.target == target)?;
+        if self.tabs.len() == 1 {
+            return None;
         }
-        Some(PageEvent::Shown(self.tab.url.clone()))
+        self.tabs.remove(at);
+        if at < self.shown {
+            self.shown -= 1;
+            None
+        } else if at == self.shown {
+            // Its screencast went with it.
+            self.shown = usize::MAX;
+            self.show(at.saturating_sub(1))
+        } else {
+            None
+        }
     }
 
     /// Go back in the shown window, or, in a window a page opened that has
@@ -798,11 +821,11 @@ impl Chrome {
     }
 
     /// Close the window shown, a page's popup or new tab, and return where
-    /// the one under it, shown again once it has closed, is.
+    /// the one shown next, once it has closed, is.
     pub fn close_window(&mut self) -> String {
-        let target = self.tab.target.clone();
+        let target = self.tabs[self.shown].target.clone();
         self.send_browser("Target.closeTarget", json!({"targetId": target}));
-        self.below.last().map(|tab| tab.url.clone()).unwrap_or_default()
+        self.tabs[self.shown.saturating_sub(1)].url.clone()
     }
 
     pub fn navigate(&mut self, url: &str) {
@@ -820,7 +843,7 @@ impl Chrome {
     }
 
     pub fn back(&mut self) {
-        if self.below.is_empty() {
+        if self.tabs.len() == 1 {
             self.send("Runtime.evaluate", json!({"expression": "history.back()"}));
         } else {
             self.history_request = Some(self.request("Page.getNavigationHistory", json!({})));
@@ -851,20 +874,21 @@ impl Chrome {
         );
         let size = |(width, height): (u32, u32)| (width as i64, height as i64);
         let old = self.viewport.replace((width, height)).map(size);
-        // Windows under the one shown are fitted now too, ready to be shown.
-        for tab in &mut self.below {
+        let shown = self.tabs[self.shown].target.clone();
+        // The other windows are fitted now too, ready to be shown.
+        for tab in self.tabs.iter_mut().filter(|tab| tab.target != shown) {
             let Some(window) = &mut tab.window else { continue };
             if let Some((width, height)) = window.resized(old, size((width, height))) {
                 let bounds = json!({"windowId": window.id, "bounds": {"width": width, "height": height}});
                 let _ = self.tx.send("Browser.setWindowBounds", bounds, None);
             }
         }
-        let fit = self.tab.window.as_mut().and_then(|window| window.resized(old, size((width, height))));
+        let fit = self.tabs[self.shown].window.as_mut().and_then(|window| window.resized(old, size((width, height))));
         self.set_window(fit);
     }
 
     fn set_window(&mut self, size: Option<(i64, i64)>) {
-        let (Some(window), Some((width, height))) = (&self.tab.window, size) else { return };
+        let (Some(window), Some((width, height))) = (&self.tabs[self.shown].window, size) else { return };
         let bounds = json!({"windowId": window.id, "bounds": {"width": width, "height": height}});
         self.window_reply = self.tx.send("Browser.setWindowBounds", bounds, None).ok();
     }
@@ -872,9 +896,12 @@ impl Chrome {
     /// The frame, cut to the viewport if it holds more (see `Window::crop`).
     /// Only PNG frames are cut; kb draws JPEG ones only in kb bench.
     fn crop_frame(&self, data: String, metadata: &Value) -> Option<String> {
-        let (Some(window), Some((width, height)), Some(css_width), Some(css_height)) =
-            (&self.tab.window, self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
-        else {
+        let (Some(window), Some((width, height)), Some(css_width), Some(css_height)) = (
+            &self.tabs[self.shown].window,
+            self.viewport,
+            metadata["deviceWidth"].as_f64(),
+            metadata["deviceHeight"].as_f64(),
+        ) else {
             return Some(data);
         };
         let viewport = (width as i64, height as i64);
@@ -886,9 +913,12 @@ impl Chrome {
 
     /// Fit the window to the viewport if this frame shows it cropping them.
     fn check_frame_size(&mut self, metadata: &Value) {
-        let (Some(window), Some((width, height)), Some(got_width), Some(got_height)) =
-            (&mut self.tab.window, self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
-        else {
+        let (Some(window), Some((width, height)), Some(got_width), Some(got_height)) = (
+            &mut self.tabs[self.shown].window,
+            self.viewport,
+            metadata["deviceWidth"].as_f64(),
+            metadata["deviceHeight"].as_f64(),
+        ) else {
             return;
         };
         let fit = window.frame((width as i64, height as i64), (got_width.round() as i64, got_height.round() as i64));
@@ -922,7 +952,7 @@ impl Chrome {
         let port = ports.lines().next().unwrap_or("").trim();
         let url = format!(
             "http://127.0.0.1:{port}/devtools/inspector.html?ws=127.0.0.1:{port}/devtools/page/{}",
-            self.tab.target
+            self.tabs[self.shown].target
         );
         // The same browser kb runs, as a desktop app: DevTools is Chrome's.
         let bundle = self.binary.ancestors().find(|path| path.extension().is_some_and(|e| e == "app"));
