@@ -53,8 +53,10 @@ In another terminal, start `kb "$url"` in a new pane (below) and take the
 number `kb list` didn't show before; then check `kb ctl -i N status` shows
 your page, in case someone else's kb started at the same time.
 
-Each shell command starts afresh, so write the number into every command:
-`kb ctl -i 3 open URL`. Below, `N` stands for it, and outside code blocks a
+Each shell command starts afresh, so write the number (and the pane id)
+into every later command: `kb ctl -i 3 open URL`. A new pane is often
+narrow, which gives sites their phone layout; `kb ctl -i N viewport
+1280x800` gives a desktop one. Below, `N` stands for it, and outside code blocks a
 command is named alone: `box` means `kb ctl -i N box`.
 
 Opening a pane elsewhere, without taking the user's focus:
@@ -87,11 +89,11 @@ ask (as when you're a subagent). `kb ctl` may say "kb closed the connection"
 for a command that was running as the pane closed.
 
 `kb --headless URL` runs a kb in the background, with the same commands, and
-prints its number. Like any kb, it has the signed-in profile only if no
-other kb is running. It has a desktop viewport (1280x800) and no pane. Stop
-it with `kb ctl -i N quit` when you're done; one left behind quits after ten
-minutes without a command. `kb list` marks headless kbs, and shows "(not
-answering)" for a moment while a kb starts or quits.
+prints its number, which is yours. Like any kb, it has the signed-in profile
+only if no other kb is running. It has a desktop viewport (1280x800) and no
+pane. Stop it with `kb ctl -i N quit` when you're done; one left behind
+quits after ten minutes without a command. `kb list` marks headless kbs, and
+shows "(not answering)" for a moment while a kb starts or quits.
 
 ## Selectors
 
@@ -193,7 +195,7 @@ so set a desktop viewport first:
 ```sh
 kb ctl -i N viewport 1280x800
 kb ctl -i N open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
-kb ctl -i N links --match sqlite.org      # results, with the real address behind redirects
+kb ctl -i N links --match sqlite.org      # links and buttons (not plain text), with real addresses
 kb ctl -i N click @3
 kb ctl -i N text                          # the page's main content
 kb ctl -i N outline                       # title and headings (there's no title command)
@@ -204,7 +206,8 @@ kb ctl -i N images                        # alt text, size, caption and source
 ```
 
 - When you cite a page, leave the passage on screen (`find` and
-  `text --section` scroll to it) so the user sees it.
+  `text --section` scroll to it) so the user sees it; with no pane, skip
+  this.
 - Console errors on other people's sites are their noise, not yours to fix.
 - A bot check ("Just a moment", a CAPTCHA) is reported as one; kb can't pass
   it, so try another source. Searching many times in a row brings one on:
