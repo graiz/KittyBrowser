@@ -45,29 +45,45 @@ drive a kb you didn't open.
 If one you opened earlier in this conversation is still listed by `kb list`,
 reuse it instead of opening another.
 
-In Rex (`$REX_SESSION` is set), split a pane beside yours. `kb list` shows
-each kb's number, page and pane, so find yours by the pane you created:
+Open kb in a pane beside yours, with your terminal's own command for a split
+(below), and find its number as the one `kb list` didn't show before:
 
 ```sh
-pane=$(rex split -s "$REX_SESSION" -b "$REX_BLOCK" --split=right --focus=false --label kb --json -- kb "$url" | jq -r '.block_ids[0]')
+before=$(kb list 2>/dev/null | cut -f1)
+# ... start `kb "$url"` in a new pane beside yours (see below) ...
 for _ in $(seq 1 40); do
-  n=$(kb list 2>/dev/null | awk -F'\t' -v p="$pane" '$3 == p {print $1}')
+  n=$(kb list 2>/dev/null | cut -f1 | grep -vxF "$before" | head -n1)
   [ -n "$n" ] && break
   sleep 0.25
 done
-echo "kb $n in $pane"
+echo "kb $n"
 k() { kb ctl -i "$n" "$@"; }   # then: k open URL, k check, ...
 ```
 
-Write down both `n` and `pane`. Numbers are reused: when a kb closes, the
-next one to start may take its number, so if you lose track, find yours again
-by its pane with `kb list`, and if you can't, stop and ask. Close your pane
-when asked with `rex block close -s "$REX_SESSION" "$pane"`; otherwise leave
-it open, as the user may want to keep looking.
+Opening a pane beside yours, without taking the focus from the user:
 
-In any other terminal, ask the user to start `kb URL` in a pane of a terminal
-with the kitty graphics protocol (Ghostty, kitty, WezTerm), then find its
-number with `kb list`. If kb won't start there, or its pane stays blank,
+- **Rex** (`$REX_SESSION` is set): `rex split -s "$REX_SESSION" -b "$REX_BLOCK"
+  --split=right --focus=false --label kb --json -- kb "$url"`. `kb list`
+  also shows each kb's Rex pane, a sure way to find yours again. The rex
+  skill covers the rest.
+- **herdr** (`HERDR_ENV=1`): `herdr pane split <your pane> --direction right
+  --no-focus`, then `herdr pane run <new pane> "kb $url"`. The herdr skill
+  covers pane ids.
+- **kitty**: `kitten @ launch --location=vsplit --keep-focus kb "$url"`
+  (needs remote control on).
+- **WezTerm**: `wezterm cli split-pane --right -- kb "$url"`.
+- **Ghostty, cmux and others**: use the terminal's command line or scripting
+  for splits if it has one; otherwise ask the user to split a pane (Cmd+D in
+  Ghostty) and run `kb URL` there, then find it with `kb list`.
+- **tmux, screen and Zellij** don't pass the kitty graphics protocol on, so
+  kb can't draw inside them: open it in a pane of the terminal itself.
+
+Write down `n` (and the pane, if your terminal gave you one). Numbers are
+reused: when a kb closes, the next one to start may take its number, so if
+you lose track, find yours again with `kb list` (by its pane, or the page it
+is on), and if you can't, stop and ask. Close your pane when asked, with the
+same terminal's command; otherwise leave it open, as the user may want to
+keep looking. If kb won't start in a pane, or the pane stays blank,
 `kb doctor` run in that pane says why.
 
 ## Selectors
