@@ -65,8 +65,10 @@ Opening a pane without taking the user's focus:
 | Ghostty, cmux, others | the terminal's own command or scripting, if any; or ask the user to split a pane (Cmd+D in Ghostty) and run `kb URL` |
 | tmux, screen, Zellij | can't show kb's images: open it in a pane of the terminal itself |
 
-In Rex, `kb list` and `kb ctl -i N status` show each kb's pane (`block:…`); close yours
-with `rex block close block:…`. Elsewhere, use the terminal's own command.
+In Rex, `rex split --json` prints your new pane's id (`block_ids`), and
+`kb list` shows each kb's pane: yours is the one on that id. That's surer
+than the numbers when others start kbs at the same moment. Close it with
+`rex block close block:…`. Elsewhere, use the terminal's own command.
 Closing the pane quits that kb. Leave it open unless asked to close it: the
 user may want to keep looking.
 
@@ -77,7 +79,8 @@ or its pane stays blank, `kb doctor` run in that pane says why.
 ### When the user closes your pane
 
 If your kb is gone from `kb list`, or `kb ctl -i N` says it isn't running,
-the user most likely wanted it out of the way. If the task can finish
+the user most likely wanted it out of the way, which overrides an earlier
+ask to show it in a pane. If the task can finish
 without them watching, carry on headless; if you can't tell whether they
 want you to go on, ask.
 
@@ -103,9 +106,9 @@ kb ctl -i N check                           # exit 1 on console errors, failed r
 kb ctl -i N screenshot --out /tmp/page.png  # or your scratch directory; then read the image
 ```
 
-Then try what you changed. `kb ctl -i N html form` shows a form's fields
-with their ids and names; `html body` shows the rest, such as where a
-result will appear:
+Then try what you changed. `kb ctl -i N html form` prints the form's
+HTML, with its fields' ids and names; `html body` prints the whole page,
+including where a result will appear:
 
 ```sh
 kb ctl -i N type '#email' 'a@b.co' --clear
@@ -120,7 +123,8 @@ kb ctl -i N network --failed
 errors and dialogs they caused. What comes later (after a timer or a
 request) isn't there yet, so please `wait` for it before reading. `wait --text`
 matches visible text, case and all; if you don't know the words, `wait
-SELECTOR --visible`, then `text SELECTOR`. `wait` also takes `--count N` and
+SELECTOR --visible`, then `text SELECTOR`. A typed value shows only when
+you read that field (`text '#name'`), not in the whole page's `text`. `wait` also takes `--count N` and
 `--gone`.
 
 When something looks wrong or does nothing:
@@ -138,7 +142,7 @@ Also:
 - **Dark mode:** `scheme dark` (or `light`, or `auto` to follow the terminal).
 - **Slow network:** `throttle slow` (or `fast`, `offline`), then `throttle off`.
 - **Phone layout:** `viewport 375x800`, look (`text` or a screenshot), then
-  `viewport reset` to return to the pane's size (1280x800 for a headless kb). A viewport stays set across
+  `viewport reset` to return to the size the kb started at. A viewport stays set across
   pages until reset. A control hidden at that width makes `click` fail with
   "the element has no size".
 - **Dev servers:** use the address the server printed, not a guessed port.
