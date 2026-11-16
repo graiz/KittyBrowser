@@ -11,7 +11,9 @@ Notable changes to kb. The format follows
   `kb ctl -i N quit` stops it (and quits any kb), and it stops by itself
   after ten minutes without a command (`KB_HEADLESS_IDLE`). The skill has
   agents finish this way when the user closes their pane to get it out of
-  the way.
+  the way. It answers once the first page has loaded, as `kb ctl open`
+  does, or after 15 seconds if the page is slow.
+- `kb ctl console --all` heads only the pages that logged something.
 - `kb ctl wait` refuses an empty `--text`, which passed at once, and
   `--visible` waits for the element to take up room; `status` says how many
   windows are open.

@@ -1188,19 +1188,8 @@ impl Devtools {
                     }
                 }
                 "console" => {
-                    let mut out = String::new();
-                    let (all, errors) = (flag("all"), flag("errors"));
-                    for message in self.console.iter().filter(|m| all || m.seq >= self.page_seq) {
-                        let wanted = match message.level.as_str() {
-                            PAGE => all,
-                            "error" => true,
-                            _ => !errors,
-                        };
-                        if wanted {
-                            out.push_str(&message.line());
-                            out.push('\n');
-                        }
-                    }
+                    let errors = flag("errors");
+                    let mut out = self.console_lines(flag("all"), errors);
                     if !self.page_console().any(|m| !errors || m.level == "error") {
                         let _ = write!(
                             out,
@@ -1689,6 +1678,30 @@ impl Devtools {
             }
             _ => {}
         }
+    }
+
+    /// The console messages wanted, this page's or with `all` every page's,
+    /// each earlier page under a header, given only when it has messages.
+    fn console_lines(&self, all: bool, errors: bool) -> String {
+        let mut out = String::new();
+        let mut header = None;
+        for message in self.console.iter().filter(|m| all || m.seq >= self.page_seq) {
+            let wanted = match message.level.as_str() {
+                PAGE => {
+                    header = all.then(|| message.line());
+                    false
+                }
+                "error" => true,
+                _ => !errors,
+            };
+            if wanted {
+                for line in header.take().into_iter().chain([message.line()]) {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+        }
+        out
     }
 
     fn log(&mut self, level: &str, text: String, source: String) {
@@ -2254,5 +2267,14 @@ mod tests {
             "\nthis caused 1 console error:\n[error] Uncaught TypeError: x is null (app.js:9)"
         );
         assert_eq!(tools.console[1].line(), "--- page: https://site.test/ ---");
+
+        // Every page's, with a header only for pages that logged something.
+        tools.new_page("loader-2", "https://quiet.test/");
+        tools.new_page("loader-3", "https://site.test/next");
+        tools.log("error", "late".into(), String::new());
+        let all = tools.console_lines(true, true);
+        assert!(all.contains("--- page: https://site.test/ ---"), "{all}");
+        assert!(!all.contains("quiet.test"), "{all}");
+        assert!(all.contains("--- page: https://site.test/next ---\n[error] late"), "{all}");
     }
 }
