@@ -53,8 +53,8 @@ echo "kb $id in $pane"
 
 In another terminal, start `kb "$url"` in a new pane (below), take the id of
 the kb `kb list` didn't show before, and check `kb ctl -i ID status` shows
-your page, in case someone else's started at the same time. (`kb list`
-shows each kb's number, page, pane and id.)
+your page, in case someone else's started at the same time. `kb list`
+prints one kb a line, tab-separated: number, page, pane, id.
 
 Each shell command starts afresh, so write the id (and pane) into every
 later command: `kb ctl -i 3-a7f2 open URL`. Below, `ID` stands for it, and
@@ -156,7 +156,8 @@ Also:
 
 - **Dark mode:** `scheme dark` (or `light`, or `auto` to follow the terminal).
 - **Slow network:** `throttle slow` (or `fast`, `offline`), then `throttle off`.
-- **Phone layout:** `viewport 375x800`, look (`text` or a screenshot), then
+- **Phone layout:** `status` shows the viewport and whether it was set;
+  `viewport 375x800`, look (`text` or a screenshot), then
   `viewport reset`, which drops any size you set: the kb follows its pane
   again (a headless kb goes back to 1280x800). A viewport stays set across
   pages until reset. A control hidden at that width makes `click` fail with

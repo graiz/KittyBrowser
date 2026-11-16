@@ -557,6 +557,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         viewport: app.viewport,
                         scale: app.scale,
                         zoom: app.zoom,
+                        viewport_set: app.fixed.is_some(),
                     };
                     app.devtools.command(request, &mut app.chrome, page);
                 }

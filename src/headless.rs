@@ -202,7 +202,14 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
                         let _ = request.reply.send(reply);
                     }
                     _ => {
-                        let page = Page { url: &url, loading, viewport, scale: options.scale, zoom: 1.0 };
+                        let page = Page {
+                            url: &url,
+                            loading,
+                            viewport,
+                            scale: options.scale,
+                            zoom: 1.0,
+                            viewport_set: viewport != VIEWPORT,
+                        };
                         devtools.command(request, &mut chrome, page);
                     }
                 }

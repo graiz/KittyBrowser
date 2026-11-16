@@ -706,6 +706,9 @@ pub struct Page<'a> {
     pub scale: f64,
     /// Browser zoom, 1 for 100%.
     pub zoom: f64,
+    /// Whether the viewport was set with `viewport`, rather than following
+    /// the pane (or a headless kb's default).
+    pub viewport_set: bool,
 }
 
 #[derive(Default)]
@@ -1130,8 +1133,14 @@ impl Devtools {
                         zoom if (zoom - 1.0).abs() < 0.001 => String::new(),
                         zoom => format!(", zoomed to {:.0}%", zoom * 100.0),
                     };
+                    // So "put the size back" isn't a guess: reset undoes a set size.
+                    let source = match (page.viewport_set, crate::headless::running()) {
+                        (true, _) => "set with viewport; viewport reset undoes it",
+                        (false, true) => "a headless kb's default",
+                        (false, false) => "follows the pane",
+                    };
                     let mut rest = format!(
-                        "loading: {}\nviewport: {width}x{height} CSS pixels, scale {}{zoom}\n{}",
+                        "loading: {}\nviewport: {width}x{height} CSS pixels ({source}), scale {}{zoom}\n{}",
                         if page.loading { "yes" } else { "no" },
                         (page.scale * 1000.0).round() / 1000.0,
                         self.health(),
