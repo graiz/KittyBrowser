@@ -93,6 +93,18 @@ impl Splash {
         }
     }
 
+    /// Draw a frame at the next chance, still or not: something covered or
+    /// uncovered the logo.
+    pub fn again(&mut self) {
+        self.last = None;
+    }
+
+    /// Append the escape that takes the logo away, leaving its black: it is
+    /// an image above the text, so it would cover a box drawn over it.
+    pub fn hide(out: &mut Vec<u8>) {
+        out.extend_from_slice(format!("\x1b_Ga=d,d=I,i={ID},q=2\x1b\\").as_bytes());
+    }
+
     /// Append the escapes that remove the logo and its black, from the row
     /// `top` down. The page is drawn under cells with a colour of their own,
     /// so they must go before it can show.

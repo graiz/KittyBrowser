@@ -794,7 +794,7 @@ impl App {
             let all = self.bindings.keys_for(action);
             all.iter().take(2).cloned().collect::<Vec<_>>().join(", ")
         };
-        for (action, does) in [
+        let rows = [
             (Action::Address, "edit the address"),
             (Action::Find, "find on the page; Enter, Shift+Enter: next, previous"),
             (Action::Back, "back (or the mouse's back button)"),
@@ -806,13 +806,20 @@ impl App {
             (Action::ZoomReset, "zoom to 100%, or out until the page fits"),
             (Action::Inspect, "inspect an element"),
             (Action::Devtools, "Chrome DevTools (start kb with --devtools)"),
+            (Action::NextWindow, "next window: a popup, a new tab (‹ › in the bar)"),
+            (Action::PreviousWindow, "previous window"),
+            (Action::CloseWindow, "close the window shown (✕); on the last one, ask to quit"),
             (Action::Help, "this help"),
             (Action::Quit, "quit (the ✕ in the bar closes a popup, or asks first)"),
-        ] {
-            let keys = keys(action);
-            if !keys.is_empty() {
-                lines.push(format!("{keys:<26}{does}"));
-            }
+        ]
+        .map(|(action, does)| (keys(action), does))
+        .into_iter()
+        .filter(|(keys, _)| !keys.is_empty())
+        .collect::<Vec<_>>();
+        // As wide as the widest keys, so each description starts in line.
+        let width = rows.iter().map(|(keys, _)| keys.chars().count() + 2).max().unwrap_or(0);
+        for (keys, does) in rows {
+            lines.push(format!("{keys:<width$}{does}"));
         }
         lines.push(String::new());
         lines.push("\tChange keys in ~/.kittybrowser/keys; kb keys lists them.".to_owned());
@@ -864,7 +871,11 @@ impl App {
         let (cols, rows) = (self.window.cols, self.page_rows());
         let Some(splash) = &mut self.splash else { return };
         let mut out = b"\x1b[?2026h".to_vec();
-        splash.draw(&mut out, cols, rows, cell, 2);
+        if self.help {
+            crate::splash::Splash::hide(&mut out);
+        } else {
+            splash.draw(&mut out, cols, rows, cell, 2);
+        }
         // The splash paints the pane black, help and all.
         self.help_rect = None;
         self.render_help(&mut out);
@@ -893,6 +904,16 @@ impl App {
         self.went_to(url);
     }
 
+    /// Close the window shown, as a browser's tab closes; the last one is
+    /// kb itself, so that asks first.
+    fn close_window(&mut self) {
+        if self.chrome.windows().1 > 1 {
+            self.chrome.close_window();
+        } else {
+            self.asking_quit = true;
+        }
+    }
+
     fn switch_window(&mut self, step: isize) {
         if let Some(PageEvent::Shown(url)) = self.chrome.switch(step) {
             self.shown(url);
@@ -914,8 +935,20 @@ impl App {
         }
     }
 
+    /// Show the help box, or the panel set for it. The logo, an image,
+    /// would cover it, so it is hidden meanwhile.
+    fn open_help(&mut self) {
+        self.help = true;
+        if let Some(splash) = &mut self.splash {
+            splash.again();
+        }
+    }
+
     fn close_help(&mut self) {
         self.help = false;
+        if let Some(splash) = &mut self.splash {
+            splash.again();
+        }
         if self.panel.take().is_some() {
             self.chrome.evaluate(UNHOVER);
         }
@@ -1124,10 +1157,15 @@ impl App {
             Action::Back => self.chrome.back(),
             Action::Forward => self.chrome.forward(),
             Action::Reload => self.chrome.reload(),
+            // With one window, the key goes to the page.
+            Action::NextWindow | Action::PreviousWindow if self.chrome.windows().1 == 1 => return false,
+            Action::NextWindow => self.switch_window(1),
+            Action::PreviousWindow => self.switch_window(-1),
+            Action::CloseWindow => self.close_window(),
             Action::ZoomIn => self.step_zoom(true),
             Action::ZoomOut => self.step_zoom(false),
             Action::ZoomReset => self.zoom_to_fit(),
-            Action::Help => self.help = true,
+            Action::Help => self.open_help(),
             Action::Copy => {
                 // The field being edited, or the page: the page reports what
                 // it copies, and kb passes it to the clipboard.
@@ -1207,7 +1245,7 @@ impl App {
             lines.push(String::new());
             lines.push(format!("\tThe selector is copied. {again} inspects another; any key closes this."));
             self.panel = Some(lines);
-            self.help = true;
+            self.open_help();
             return true;
         }
         false
@@ -1321,13 +1359,7 @@ impl App {
                 return false;
             }
             if ui::hit(col, self.window.cols as usize, self.chrome.windows()) == Hit::Close {
-                // A window a page opened closes like a browser's tab; the
-                // last one is kb itself, so that asks first.
-                if self.chrome.windows().1 > 1 {
-                    self.chrome.close_window();
-                } else {
-                    self.asking_quit = true;
-                }
+                self.close_window();
                 return true;
             }
             if let Some(field) = &mut self.find {

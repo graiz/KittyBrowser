@@ -161,6 +161,9 @@ click the address to edit it, and click, drag and scroll the page.
 | Ctrl+= and Ctrl+- | Zoom in and out; the zoom shows at the right of the bar |
 | Ctrl+0 | Zoom to 100%, or out until a page too wide for the pane fits |
 | Ctrl+/ | Help: the keys, and the page, zoom, viewport and pane sizes |
+| Ctrl+Tab, Ctrl+PageDown | Next window: a popup or a new tab a page opened (‹ › in the bar) |
+| Ctrl+Shift+Tab, Ctrl+PageUp | Previous window |
+| Ctrl+W | Close the window shown (✕); on the last one, ask to quit |
 | Ctrl+Q | Quit (the ✕ at the right of the bar closes a popup, or asks first) |
 
 Every other key goes to the page. The mouse's back and forward buttons go

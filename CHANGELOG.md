@@ -10,8 +10,11 @@ Notable changes to kb. The format follows
   page opens is shown over it, and when it closes the page is shown again,
   signed in. Before, kb loaded it in place of the page, which then never
   heard back. With more than one window open, the bar shows "‹ 2/3 ›" to
-  switch between them; ✕, or Back on a window's first page, closes the
-  one shown.
+  switch between them, as do Ctrl+Tab and Ctrl+PageDown (Ctrl+Shift+Tab,
+  Ctrl+PageUp back); ✕, Ctrl+W, or Back on a window's first page, closes
+  the one shown.
+- The logo no longer covers the help on a blank page, and the help's keys
+  line up however long they are.
 - Fewer captchas: navigator.webdriver is false, the client hints
   (Sec-CH-UA) name the browser and system, and pages see a real screen
   and a window bigger than themselves.

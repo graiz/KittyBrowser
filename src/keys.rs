@@ -30,6 +30,9 @@ pub enum Action {
     Inspect,
     Devtools,
     Help,
+    NextWindow,
+    PreviousWindow,
+    CloseWindow,
     Quit,
     /// Unbound: the key goes to the page.
     None,
@@ -51,6 +54,9 @@ const ACTIONS: &[(Action, &str, &str)] = &[
     (Action::Inspect, "inspect", "inspect: hover to highlight elements, click one for its details"),
     (Action::Devtools, "devtools", "open Chrome DevTools for the page (needs kb --devtools)"),
     (Action::Help, "help", "show the help"),
+    (Action::NextWindow, "next-window", "show the next window a page opened (a popup, a new tab)"),
+    (Action::PreviousWindow, "previous-window", "show the previous window"),
+    (Action::CloseWindow, "close-window", "close the window shown; on the last one, ask to quit"),
     (Action::Quit, "quit", "quit"),
     (Action::None, "none", "nothing: the key goes to the page"),
 ];
@@ -88,6 +94,13 @@ const DEFAULTS: &[(&str, Action)] = &[
     ("cmd+alt+i", Action::Devtools),
     ("ctrl+/", Action::Help),
     ("ctrl+?", Action::Help),
+    // Chrome's keys for tabs. Terminals often keep Ctrl+Tab for their own
+    // tabs; Ctrl+PageDown and Ctrl+PageUp are Chrome's too, and rarely taken.
+    ("ctrl+tab", Action::NextWindow),
+    ("ctrl+pagedown", Action::NextWindow),
+    ("ctrl+shift+tab", Action::PreviousWindow),
+    ("ctrl+pageup", Action::PreviousWindow),
+    ("ctrl+w", Action::CloseWindow),
     ("ctrl+q", Action::Quit),
 ];
 
@@ -123,6 +136,8 @@ impl Spec {
         }
         spec.code = match *last {
             "enter" | "return" => KeyCode::Enter,
+            // Shift+Tab arrives as a key of its own.
+            "tab" if spec.shift => KeyCode::BackTab,
             "tab" => KeyCode::Tab,
             "esc" | "escape" => KeyCode::Esc,
             "backspace" => KeyCode::Backspace,
@@ -163,6 +178,8 @@ impl Spec {
                 want == got.to_ascii_lowercase() && self.shift == (key.shift || got.is_ascii_uppercase())
             }
             (KeyCode::Char(want), KeyCode::Char(got)) => want == got && (!self.shift || key.shift),
+            // Without the kitty keyboard protocol it comes without Shift set.
+            (KeyCode::BackTab, KeyCode::BackTab) => true,
             (want, got) => want == got && self.shift == key.shift,
         }
     }
@@ -248,7 +265,9 @@ impl Bindings {
     pub fn action(&self, key: &Key, editing: bool) -> Option<Action> {
         // Later lines win, so the file overrides the defaults.
         let (spec, action) = self.list.iter().rev().find(|(spec, _)| spec.matches(key))?;
-        if *action == Action::None || (editing && spec.yields_to_fields()) {
+        // In a field, Ctrl+W deletes a word, as in a shell.
+        let field_key = spec.yields_to_fields() || *action == Action::CloseWindow;
+        if *action == Action::None || (editing && field_key) {
             return None;
         }
         Some(*action)
@@ -272,6 +291,7 @@ impl std::fmt::Display for Spec {
             KeyCode::Char('+') => f.write_str("Plus"),
             KeyCode::Char(c) => write!(f, "{}", c.to_ascii_uppercase()),
             KeyCode::F(n) => write!(f, "F{n}"),
+            KeyCode::BackTab => f.write_str("Tab"),
             code => write!(f, "{code:?}"),
         }
     }
@@ -338,6 +358,24 @@ mod tests {
         assert_eq!(bindings.action(&Key { ctrl: true, ..key(KeyCode::Char('?')) }, false), Some(Action::Help));
         let shift_slash = Key { ctrl: true, shift: true, ..key(KeyCode::Char('/')) };
         assert_eq!(bindings.action(&shift_slash, false), Some(Action::Help));
+    }
+
+    #[test]
+    fn window_keys() {
+        let bindings = Bindings::load(None);
+        let ctrl = |code| Key { ctrl: true, ..key(code) };
+        assert_eq!(bindings.action(&ctrl(KeyCode::Tab), false), Some(Action::NextWindow));
+        assert_eq!(bindings.action(&ctrl(KeyCode::PageDown), false), Some(Action::NextWindow));
+        assert_eq!(bindings.action(&ctrl(KeyCode::PageUp), false), Some(Action::PreviousWindow));
+        // Ctrl+Shift+Tab, with the kitty protocol's Shift and without.
+        let back_tab = ctrl(KeyCode::BackTab);
+        assert_eq!(bindings.action(&Key { shift: true, ..back_tab }, false), Some(Action::PreviousWindow));
+        assert_eq!(bindings.action(&back_tab, false), Some(Action::PreviousWindow));
+        assert_eq!(Spec::parse("ctrl+shift+tab").unwrap().to_string(), "Ctrl+Shift+Tab");
+        // In a field, Ctrl+W deletes a word.
+        let ctrl_w = ctrl(KeyCode::Char('w'));
+        assert_eq!(bindings.action(&ctrl_w, false), Some(Action::CloseWindow));
+        assert_eq!(bindings.action(&ctrl_w, true), None);
     }
 
     #[test]
