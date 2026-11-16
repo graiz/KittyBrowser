@@ -65,7 +65,7 @@ Opening a pane without taking the user's focus:
 | Ghostty, cmux, others | the terminal's own command or scripting, if any; or ask the user to split a pane (Cmd+D in Ghostty) and run `kb URL` |
 | tmux, screen, Zellij | can't show kb's images: open it in a pane of the terminal itself |
 
-In Rex, `kb list` and `status` show each kb's pane (`block:…`); close yours
+In Rex, `kb list` and `kb ctl -i N status` show each kb's pane (`block:…`); close yours
 with `rex block close block:…`. Elsewhere, use the terminal's own command.
 Closing the pane quits that kb. Leave it open unless asked to close it: the
 user may want to keep looking.
@@ -185,7 +185,7 @@ kb ctl -i N open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
 kb ctl -i N links --match sqlite.org      # results, with the real address behind redirects
 kb ctl -i N click @3
 kb ctl -i N text                          # the page's main content
-kb ctl -i N outline                       # title and headings
+kb ctl -i N outline                       # title and headings (there's no title command)
 kb ctl -i N text --section 'Ranking'      # one section, by its heading's words; scrolls to it
 kb ctl -i N find 'bm25'                   # every place it appears, with its section
 kb ctl -i N tables; kb ctl -i N tables 2  # list tables; print one as tab-separated rows

@@ -69,7 +69,8 @@ pub fn run(mut words: &[String]) -> i32 {
     };
 
     let words = &words[1..];
-    if matches!(words, [word] if word == "--help" || word == "-h") {
+    // Anywhere, as an agent adds it to a command it was about to run.
+    if words.iter().any(|word| word == "--help" || word == "-h") {
         println!("{}", command.describe());
         return 0;
     }
