@@ -68,7 +68,7 @@ Opening a pane beside yours, without taking the focus from the user:
 - **Rex** (`$REX_SESSION` is set): `rex split -s "$REX_SESSION" -b "$REX_BLOCK"
   --split=right --focus=false --label kb --json -- kb "$url"`. `kb list`
   and `kb ctl -i N status` show each kb's pane (`block:…`), a sure way to
-  find yours again. Close it with `rex block close <pane>`.
+  find yours again. Close it with `rex block close block:…`, that id.
 - **herdr** (`HERDR_ENV=1`): `herdr pane split <your pane> --direction right
   --no-focus`, then `herdr pane run <new pane> "kb $url"`. The herdr skill
   covers pane ids.
@@ -86,8 +86,15 @@ reused: when a kb closes, the next one to start may take its number, so if
 you lose track, find yours again with `kb list` (by its pane, or the page it
 is on), and if you can't, stop and ask. Close your pane when asked, with the
 same terminal's command, which quits that kb and its browser; otherwise
-leave it open, as the user may want to keep looking. If kb won't start in a pane, or the pane stays blank,
-`kb doctor` run in that pane says why.
+leave it open, as the user may want to keep looking.
+
+The user may close your pane too. If your kb is gone from `kb list` (or
+`kb ctl -i N` says it isn't running), that's no error: open a new one the
+same way, go back to the page you were on, and carry on. Don't reuse a
+number that now belongs to another kb.
+
+If kb won't start in a pane, or the pane stays blank, `kb doctor` run in
+that pane says why.
 
 ## Selectors
 
@@ -118,7 +125,8 @@ kb ctl -i N console --errors            # this page's; --all adds earlier pages'
 kb ctl -i N network --failed
 ```
 
-`wait` matches visible text only, and also takes `--count N`, `--gone` and
+`wait --text` matches visible text, case and all, so copy the words as the
+page will show them. `wait` also takes `--count N`, `--gone` and
 `--visible`.
 
 `click`, `type`, `press` and `select` answer once the page settles, and report
@@ -144,7 +152,7 @@ Dark mode: `kb ctl -i N scheme dark` (or `light`, or `auto` to follow the termin
 Slow network (loading states, spinners): `kb ctl -i N throttle slow` (or `fast`,
 `offline`), then `kb ctl -i N throttle off`.
 
-Phone layout: `kb ctl -i N viewport 375x800`, check it, then `kb ctl -i N viewport reset` to go back to the pane's size. A
+Phone layout: `kb ctl -i N viewport 375x800`, look at it (`text`, or a screenshot), then `kb ctl -i N viewport reset` to go back to the pane's size. A
 control hidden at that width makes `click` fail with "the element has no
 size", and `box` says why.
 
@@ -192,6 +200,7 @@ kb ctl -i N viewport 1280x800             # desktop layout: sidebars and menus s
 kb ctl -i N open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
 kb ctl -i N links --match sqlite.org      # results, with the real address behind redirects
 kb ctl -i N click @3
+kb ctl -i N text                          # the page's main content
 kb ctl -i N outline                       # title and headings
 kb ctl -i N text --section 'Ranking'      # a heading's words (its number not needed); scrolls to it
 kb ctl -i N find 'bm25'                   # every place it appears, with its section
