@@ -37,8 +37,8 @@ the next kb to start, while its id just stops working. Never drive a kb you
 didn't open. If one you opened earlier in this conversation is still in
 `kb list`, reuse it.
 
-To open one in Rex (`$REX_SESSION` is set), split a pane and find your kb by
-that pane, since others may be starting kbs at the same moment. Run it as
+To open one in Rex (`$REX_SESSION` is set; Rex calls a pane a block), split
+a pane and find your kb by that pane, since others may be starting kbs at the same moment. Run it as
 one shell command:
 
 ```sh
@@ -66,9 +66,9 @@ Each shell command starts afresh, so write the id (and pane) into every
 later command: `kb ctl -i 3-a7f2 open URL`. Below, `ID` stands for it, and
 outside code blocks a command is named alone: `box` means `kb ctl -i ID box`.
 
-A new pane is often narrow, so sites show their phone layout; for reading or
-a desktop layout, run `viewport 1280` first (a width alone is as tall as
-fills the pane).
+A new pane is often narrow, so sites show their phone layout. For reading,
+or to see the desktop layout, run `viewport 1280` first; given only a width,
+kb makes the page as tall as the pane.
 
 Leave your pane open unless asked to close it: the user may want to keep
 looking. Close it with `rex block close "$pane"` in Rex, or the terminal's
@@ -81,8 +81,9 @@ won't start, or its pane stays blank, `kb doctor` run in that pane says why.
 ### When the user closes your pane
 
 If your kb is gone from `kb list`, or `kb ctl -i ID` says it isn't running,
-treat it as the user closing it (kb rarely crashes): they most likely wanted
-it out of the way, which overrides an earlier ask to show it in a pane. If
+the user closed it; it didn't crash. They most likely wanted it out of the
+way, which overrides an earlier ask to show it in a pane, so don't open a new
+pane for it. If
 the task can finish without them watching, carry on headless; if you can't
 tell whether they want you to go on, ask, or carry on if there's no one to
 ask (as when you're a subagent). `kb ctl` may say "kb closed the connection"
@@ -132,6 +133,8 @@ kb ctl -i ID network --failed
 errors and dialogs they caused. What comes later (after a timer or a
 request) isn't there yet, so please `wait` for it before reading.
 
+- `wait SELECTOR` alone passes as soon as the element exists, even empty;
+  add `--text` or `--visible` to wait for what it shows.
 - `wait --text` matches visible text, case and all. If you don't know the
   words, `wait SELECTOR --visible`, then `text SELECTOR`. It also takes
   `--count N`, `--gone` and `--timeout` (10 s by default).
@@ -222,8 +225,8 @@ kb ctl -i ID images                         # alt text, size, caption and source
 - A window the page opens (a sign-in popup, a new tab) is shown in its
   place; click and type in it as on any page. `click` says when one opens
   or closes, and `status` counts them.
-- A popup that finishes closes itself. To dismiss one, `back` on its first
-  page closes it.
+- A popup that finishes closes itself. To dismiss one, run `back` while it
+  shows the page it opened with; that closes it.
 - Screenshots are one image pixel per CSS pixel. `--size small` halves
   that, `--size sharp` gives device pixels, `--size 800` a set width.
   Prefer `--selector CSS` for one element; `--full` pages stop at 8000
