@@ -71,7 +71,10 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "viewport",
         help: "Lay the page out at a given size instead of the pane's, to test other widths and media queries, or to get a site's desktop layout in a small pane. If it is bigger than the pane it is shown shrunk to fit. Stays until kb ctl viewport reset.",
-        params: &[required("size", "WIDTHxHEIGHT in CSS pixels (such as 1280x800), a width alone, or reset")],
+        params: &[required(
+                "size",
+                "WIDTHxHEIGHT in CSS pixels (such as 1280x800), a width alone (as tall as fills the pane), or reset",
+            )],
     },
     Command {
         name: "back",

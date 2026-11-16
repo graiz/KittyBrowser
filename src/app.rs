@@ -195,7 +195,8 @@ struct App {
     devtools: Devtools,
     /// The page's viewport in CSS pixels.
     viewport: (u32, u32),
-    /// A viewport size asked for with `kb ctl viewport`, in place of the pane's.
+    /// A viewport size asked for with `kb ctl viewport`, in place of the
+    /// pane's; a height of 0 means as tall as fills the pane.
     fixed: Option<(u32, u32)>,
     /// The cells the page image covers: the whole pane below the bar, or
     /// less when a fixed viewport has another shape.
@@ -724,6 +725,15 @@ impl App {
         // The space for the page, in device pixels.
         let (space_w, space_h) = (cols as f64 * cell_w as f64, rows as f64 * cell_h as f64);
         let (width, height) = match self.fixed {
+            // A width alone: as tall as fills the pane once that width fits it.
+            Some((width, 0)) => {
+                let fit = (space_w / (width as f64 * self.page_scale())).min(1.0);
+                let height = (space_h / (self.page_scale() * fit)).floor();
+                let cells = |pixels: f64, cell: u32, most: u16| ((pixels / cell as f64).round() as u16).clamp(1, most);
+                let shown_w = cells(width as f64 * self.page_scale() * fit, cell_w, cols);
+                self.shown = (shown_w, rows);
+                (width as f64, height)
+            }
             Some((width, height)) => {
                 // Shown at its own size if it fits, else shrunk to fit,
                 // keeping its shape as nearly as whole cells allow.
@@ -981,13 +991,9 @@ impl App {
                 (Some(width), Some(height)) => Some((width, height)),
                 _ => return Err(format!("{size:?} isn't a size; give WIDTHxHEIGHT in CSS pixels, such as 1280x800")),
             },
-            // A width alone keeps the pane's height.
+            // A width alone: as tall as fills the pane (see layout).
             None => match parse(size) {
-                Some(width) => {
-                    self.fixed = None;
-                    self.layout();
-                    Some((width, self.viewport.1))
-                }
+                Some(width) => Some((width, 0)),
                 None => return Err(format!("{size:?} isn't a size; give WIDTH, WIDTHxHEIGHT, or reset")),
             },
         };

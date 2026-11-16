@@ -67,7 +67,8 @@ later command: `kb ctl -i 3-a7f2 open URL`. Below, `ID` stands for it, and
 outside code blocks a command is named alone: `box` means `kb ctl -i ID box`.
 
 A new pane is often narrow, so sites show their phone layout; for reading or
-a desktop layout, run `viewport 1280x800` first.
+a desktop layout, run `viewport 1280` first (a width alone is as tall as
+fills the pane).
 
 Leave your pane open unless asked to close it: the user may want to keep
 looking. Close it with `rex block close "$pane"` in Rex, or the terminal's
@@ -193,7 +194,7 @@ k check --ignore optimizely.com,doubleclick.net  # third-party noise doesn't cou
 Read with text, not screenshots; it's far cheaper:
 
 ```sh
-kb ctl -i ID viewport 1280x800
+kb ctl -i ID viewport 1280
 kb ctl -i ID open 'https://html.duckduckgo.com/html/?q=sqlite+fts5+bm25'
 kb ctl -i ID links --match sqlite.org       # links and buttons (not plain text), with real addresses
 kb ctl -i ID click @3

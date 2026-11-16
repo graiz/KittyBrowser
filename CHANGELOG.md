@@ -14,6 +14,8 @@ Notable changes to kb. The format follows
   the way. It answers once the first page has loaded, as `kb ctl open`
   does, or after 15 seconds if the page is slow.
 - `kb ctl console --all` heads only the pages that logged something.
+- `kb ctl viewport WIDTH` lays the page out at that width and as tall as
+  fills the pane, rather than shrinking it into the top of the pane.
 - Each kb has an id as well as a number (`3-a7f2`), shown by `kb list` and
   `status` and printed by `kb --headless`. `kb ctl -i ID` reaches that kb
   only: once it closes, its number passes to the next kb to start, but its
