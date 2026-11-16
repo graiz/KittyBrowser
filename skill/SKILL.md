@@ -66,8 +66,8 @@ Opening a pane beside yours, without taking the focus from the user:
 
 - **Rex** (`$REX_SESSION` is set): `rex split -s "$REX_SESSION" -b "$REX_BLOCK"
   --split=right --focus=false --label kb --json -- kb "$url"`. `kb list`
-  also shows each kb's Rex pane, a sure way to find yours again. The rex
-  skill covers the rest.
+  and `kb ctl -i N status` show each kb's pane (`block:…`), a sure way to
+  find yours again. Close it with `rex block close <pane>`.
 - **herdr** (`HERDR_ENV=1`): `herdr pane split <your pane> --direction right
   --no-focus`, then `herdr pane run <new pane> "kb $url"`. The herdr skill
   covers pane ids.
@@ -84,8 +84,8 @@ Write down `n` (and the pane, if your terminal gave you one). Numbers are
 reused: when a kb closes, the next one to start may take its number, so if
 you lose track, find yours again with `kb list` (by its pane, or the page it
 is on), and if you can't, stop and ask. Close your pane when asked, with the
-same terminal's command; otherwise leave it open, as the user may want to
-keep looking. If kb won't start in a pane, or the pane stays blank,
+same terminal's command, which quits that kb and its browser; otherwise
+leave it open, as the user may want to keep looking. If kb won't start in a pane, or the pane stays blank,
 `kb doctor` run in that pane says why.
 
 ## Selectors
@@ -102,7 +102,7 @@ After each change:
 ```sh
 kb ctl -i N reload                          # or open URL; waits for the load, reports errors
 kb ctl -i N check                           # exit 1 on console errors, failed requests or an error page
-kb ctl -i N screenshot --out /tmp/page.png  # then read the image to look
+kb ctl -i N screenshot --out /tmp/page.png  # any temporary file; then read the image
 ```
 
 Then exercise what you changed:
@@ -130,6 +130,8 @@ When something looks wrong or does nothing:
 - `kb ctl -i N storage` shows localStorage, sessionStorage and cookie names; `kb ctl -i N storage
   --clear` then `kb ctl -i N reload` tests a first visit.
 - `kb ctl -i N html SELECTOR`, `kb ctl -i N eval 'JS'` (wrap declarations in `(() => { ... })()`).
+  When no command reads what you need (an order, a count, one value),
+  `eval` can read it from the page.
 
 Dark mode: `kb ctl -i N scheme dark` (or `light`, or `auto` to follow the terminal).
 
