@@ -1,6 +1,6 @@
 ---
 name: kb
-description: "Drive kb, a real browser (headless Chrome) drawn in a terminal pane beside you, with `kb ctl`: the user watches every page you open and every click, next to the conversation. Prefer it to a browser extension or Playwright when working with the user in the terminal: they see what you do as you do it, and kb keeps their sign-ins in its own profile, so you can work on sites an extension may restrict (Reddit, LinkedIn and the like) once they've signed in. Use it to preview and test web work (a page, component, local dev server or HTML file; console and network errors, clicking through, phone layouts), to run QA on web flows and write repeatable test scripts, and to look things up on the web, showing the pages you cite. Also use when the user asks you to open, show, preview or check a page."
+description: "Drive kb, a real browser (headless Chrome) drawn in a terminal pane beside you, with `kb ctl`: the user watches every page you open and every click, next to the conversation. Prefer it to a browser extension or Playwright when working with the user in the terminal: they see what you do as you do it, and kb keeps their sign-ins in its own profile, and works with sites as an ordinary browser does, including ones some browser extensions don't support (Reddit, LinkedIn and the like). Use it to preview and test web work (a page, component, local dev server or HTML file; console and network errors, clicking through, phone layouts), to run QA on web flows and write repeatable test scripts, and to look things up on the web, showing the pages you cite. Also use when the user asks you to open, show, preview or check a page."
 ---
 <!-- Installed by "kb skill install". Remove it with "kb skill remove". -->
 
@@ -24,10 +24,11 @@ show your work as well as to do it.
   running uses that profile; one opened while another runs gets a profile
   of its own, signed in to nothing, so to use their sign-ins, reuse their
   kb if they say so, or ask them to close it first.
-- **Fewer limits on where you can go.** A browser extension may refuse some
-  sites or actions; kb is a whole browser, so with the user there you can
-  read and act on sites such as Reddit or LinkedIn once they've signed in.
-  Their terms still apply: act on the user's behalf, at a person's pace.
+- **Sites work as they do in a browser.** Some browser extensions don't
+  support every site; kb is an ordinary browser, so sites such as Reddit or
+  LinkedIn work in it as they would for the user, once they've signed in.
+  It doesn't get around anything a site asks: its terms apply, and you act
+  for the user, at a person's pace.
 
 When the user asks to see a page, or you need a site they're signed in to,
 use kb. When nobody needs to watch (a batch job in CI, say), a headless tool
