@@ -53,11 +53,12 @@ In another terminal, start `kb "$url"` in a new pane (below) and take the
 number `kb list` didn't show before; then check `kb ctl -i N status` shows
 your page, in case someone else's kb started at the same time.
 
-Each shell command starts afresh, so write the number (and the pane id)
-into every later command: `kb ctl -i 3 open URL`. A new pane is often
-narrow, which gives sites their phone layout; `kb ctl -i N viewport
-1280x800` gives a desktop one. Below, `N` stands for it, and outside code blocks a
-command is named alone: `box` means `kb ctl -i N box`.
+Each shell command starts afresh, so write the number (and pane id) into
+every later command: `kb ctl -i 3 open URL`. Below, `N` stands for it, and
+outside code blocks a command is named alone: `box` means `kb ctl -i N box`.
+
+A new pane is often narrow, so sites show their phone layout; for reading or
+a desktop layout, run `viewport 1280x800` first.
 
 Opening a pane elsewhere, without taking the user's focus:
 
@@ -69,10 +70,10 @@ Opening a pane elsewhere, without taking the user's focus:
 | Ghostty, cmux, others | the terminal's own command or scripting, if any; or ask the user to split a pane (Cmd+D in Ghostty) and run `kb URL` |
 | tmux, screen, Zellij | can't show kb's images: open it in a pane of the terminal itself |
 
-Close your pane with `rex block close "$pane"` in Rex, or the terminal's
-own command elsewhere; if it's already gone, there's nothing to close.
-Closing the pane quits that kb. Leave it open unless asked to close it: the
-user may want to keep looking.
+Leave your pane open unless asked to close it: the user may want to keep
+looking. Close it with `rex block close "$pane"` in Rex, or the terminal's
+own command; that quits the kb. If it's already gone, there's nothing to
+close.
 
 Numbers are reused once a kb closes. If you lose track, find yours in
 `kb list` by its pane or page; if you can't, stop and ask. If kb won't start,
@@ -113,10 +114,10 @@ kb ctl -i N screenshot --out /tmp/page.png  # or your scratch directory; then re
 
 Only `check` sets the exit status; the other commands report what they find.
 
-Then try what you changed. Read the page's HTML for selectors
-rather than guessing: `kb ctl -i N html form` for a form's fields,
-`html body` for the whole page, including where a result will appear. HTML
-includes hidden elements; `text` shows only what's visible:
+Then try what you changed. Read the page's HTML for selectors rather than
+guessing: `html form` for a form's fields, `html body` for the whole page,
+including where a result will appear. HTML includes hidden elements; `text`
+shows only what's visible:
 
 ```sh
 kb ctl -i N type '#email' 'a@b.co' --clear
@@ -129,11 +130,13 @@ kb ctl -i N network --failed
 
 `click`, `type`, `press` and `select` answer once the page settles, with the
 errors and dialogs they caused. What comes later (after a timer or a
-request) isn't there yet, so please `wait` for it before reading. `wait --text`
-matches visible text, case and all; if you don't know the words, `wait
-SELECTOR --visible`, then `text SELECTOR`. A typed value shows only when
-you read that field (`text '#name'`), not in the whole page's `text`. `wait` also takes `--count N` and
-`--gone`.
+request) isn't there yet, so please `wait` for it before reading.
+
+- `wait --text` matches visible text, case and all. If you don't know the
+  words, `wait SELECTOR --visible`, then `text SELECTOR`. It also takes
+  `--count N`, `--gone` and `--timeout` (10 s by default).
+- A typed value shows when you read that field (`text '#name'`), not in the
+  whole page's `text`.
 
 When something looks wrong or does nothing:
 
@@ -176,21 +179,18 @@ k wait 'text=You logged into a secure area'      # fails after 10 s (--timeout)
 k check --ignore optimizely.com,doubleclick.net  # third-party noise doesn't count
 ```
 
-- `text SELECTOR` prefixes a hidden element's text with `(hidden: …)`;
-  `wait --text` only matches visible text.
+- `text SELECTOR` prefixes a hidden element's text with `(hidden: …)`.
 - `click --double` double-clicks; `click SELECTOR --at X,Y` clicks a point
   in an element (a canvas, a map). If the mouse click doesn't reach the
   page, `click` clicks by script instead and says so.
 - `alert`, `confirm` and `prompt` are accepted and reported by the command
   that caused them; `dialog dismiss` or `dialog accept --text TEXT` changes
   that for later ones.
-- Count with `wait SELECTOR --count N`, or `eval` for anything no command
-  reads (an order, a count, one value).
+- `eval` reads anything no command does (an order, a count, one value).
 
 ## Reading and research
 
-Read with text, not screenshots; it's far cheaper. The pane is often narrow,
-so set a desktop viewport first:
+Read with text, not screenshots; it's far cheaper:
 
 ```sh
 kb ctl -i N viewport 1280x800
@@ -219,9 +219,10 @@ kb ctl -i N images                        # alt text, size, caption and source
 
 - One page per kb, no tabs; open a second pane to compare two pages.
 - A window the page opens (a sign-in popup, a new tab) is shown in its
-  place, and commands act on it: click and type in it as on any page. `click` says when one opens or closes, and
-  `status` counts them. A finished popup closes itself; to dismiss one,
-  `back` on its first page closes it.
+  place; click and type in it as on any page. `click` says when one opens
+  or closes, and `status` counts them.
+- A popup that finishes closes itself. To dismiss one, `back` on its first
+  page closes it.
 - Screenshots are one image pixel per CSS pixel. `--size small` halves
   that, `--size sharp` gives device pixels, `--size 800` a set width.
   Prefer `--selector CSS` for one element; `--full` pages stop at 8000
