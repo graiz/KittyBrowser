@@ -257,7 +257,13 @@ const SECTION: &str = r#"((scope, want) => {
   const tags = 'h1, h2, h3, h4, h5, h6, [role=heading]';
   const within = scope ? [__kb.get(scope)] : __kb.roots();
   const heads = within.flatMap(r => [...r.querySelectorAll(tags)]).filter(h => __kb.shown(h));
-  const head = heads.find(h => __kb.label(h).toLowerCase() === w) || heads.find(h => __kb.label(h).toLowerCase().includes(w));
+  // Exactly, then as part of it, then by its words, whatever the punctuation:
+  // "bm25 function" finds "The bm25() function".
+  const words = t => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const asked = words(want).split(' ').filter(Boolean);
+  const hasWords = h => { const l = ' ' + words(__kb.label(h)) + ' '; return asked.length && asked.every(x => l.includes(' ' + x + ' ')); };
+  const head = heads.find(h => __kb.label(h).toLowerCase() === w) || heads.find(h => __kb.label(h).toLowerCase().includes(w))
+    || heads.find(hasWords);
   if (!head) throw new Error('no heading reads ' + JSON.stringify(want) + '; see the headings with: kb ctl outline');
   // Show the user the part being read.
   head.scrollIntoView({block: 'start', behavior: 'instant'});
