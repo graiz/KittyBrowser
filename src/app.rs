@@ -562,6 +562,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                             continue;
                         }
                     }
+                    if !app.chrome.shown(&message) {
+                        continue;
+                    }
                     app.devtools.observe(&message, &mut app.chrome);
                     match app.chrome.handle(message) {
                         Some(PageEvent::Frame(png)) => {
@@ -583,17 +586,13 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                             }
                         }
                         Some(PageEvent::Url(url)) => {
-                            log(format_args!("url {url}"));
-                            app.committed |= url != "about:blank";
-                            app.history.record(&url);
-                            app.url = if url == "about:blank" { String::new() } else { url };
-                            // An empty field waiting for an address gives way to
-                            // a page opened some other way (by an agent, a link).
-                            if app.bar.focused() && app.bar.text().is_empty() && !app.url.is_empty() {
-                                app.bar.blur(&app.url);
-                            } else if !app.bar.focused() {
-                                app.bar.set_text(&app.url);
-                            }
+                            app.went_to(url);
+                            redraw = true;
+                        }
+                        Some(PageEvent::Shown(url)) => {
+                            // Another window: whether it is loading comes in its own events.
+                            app.loading = false;
+                            app.went_to(url);
                             redraw = true;
                         }
                         Some(PageEvent::Loading(loading)) => {
@@ -810,7 +809,7 @@ impl App {
             (Action::Inspect, "inspect an element"),
             (Action::Devtools, "Chrome DevTools (start kb with --devtools)"),
             (Action::Help, "this help"),
-            (Action::Quit, "quit (the ✕ in the bar asks first)"),
+            (Action::Quit, "quit (the ✕ in the bar closes a popup, or asks first)"),
         ] {
             let keys = keys(action);
             if !keys.is_empty() {
@@ -887,6 +886,21 @@ impl App {
         self.help_rect = Some(ui::render_box(out, &lines, self.window.cols, self.window.rows));
         // The box, not the address field, has the user's attention.
         out.extend_from_slice(b"\x1b[?25l");
+    }
+
+    /// The page shown is at `url` now.
+    fn went_to(&mut self, url: String) {
+        log(format_args!("url {url}"));
+        self.committed |= url != "about:blank";
+        self.history.record(&url);
+        self.url = if url == "about:blank" { String::new() } else { url };
+        // An empty field waiting for an address gives way to
+        // a page opened some other way (by an agent, a link).
+        if self.bar.focused() && self.bar.text().is_empty() && !self.url.is_empty() {
+            self.bar.blur(&self.url);
+        } else if !self.bar.focused() {
+            self.bar.set_text(&self.url);
+        }
     }
 
     fn close_help(&mut self) {
@@ -986,6 +1000,15 @@ impl App {
             const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
             badge.push(SPINNER[step % SPINNER.len()]);
+        }
+        // Windows a page opened, such as a sign-in popup, are shown over it;
+        // ✕, or Back on one's first page, closes it.
+        let windows = self.chrome.windows();
+        if windows > 1 {
+            if !badge.is_empty() {
+                badge.push(' ');
+            }
+            badge.push_str(&format!("{windows} windows"));
         }
         if (self.zoom - 1.0).abs() > 0.001 {
             if !badge.is_empty() {
@@ -1292,7 +1315,13 @@ impl App {
                 return false;
             }
             if ui::hit(col, self.window.cols as usize) == Hit::Close {
-                self.asking_quit = true;
+                // A window a page opened closes like a browser's tab; the
+                // last one is kb itself, so that asks first.
+                if self.chrome.windows() > 1 {
+                    self.chrome.close_window();
+                } else {
+                    self.asking_quit = true;
+                }
                 return true;
             }
             if let Some(field) = &mut self.find {

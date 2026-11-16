@@ -54,8 +54,16 @@ Things it takes care of itself:
   scale factor is set at launch with `--force-device-scale-factor`; setting it
   only through `Emulation.setDeviceMetricsOverride` gives a blurry 1x image.
   So the scale is fixed per run. Resizing the viewport later needs no restart.
-- **New windows.** There are no tabs. A page opened by a link or script is
-  loaded in the one page instead and its own target closed.
+- **New windows.** A window a page opens (a link to a new tab, a sign-in
+  popup) is attached to and shown over the page that opened it, which waits
+  underneath, as a browser's tab would behind it. Loading it in the one page
+  instead would break sign-in: the popup hands its result to the page that
+  opened it, through `window.opener`, and then closes. Each window gets the
+  same settings (the domains kb listens to, the user agent, the viewport,
+  the colour scheme) and its own headless window, fitted like the first.
+  Only the window shown sends events the app looks at. When it closes, by
+  itself, with ✕, or with Back on its first page, the one under it is
+  shown again.
 - **Looking like a browser.** Sites such as Google answer what looks like a
   robot with captchas, and headless Chrome looks like one in four ways, each
   put right: `navigator.webdriver` is true (Chrome starts with

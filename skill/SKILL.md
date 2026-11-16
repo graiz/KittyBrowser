@@ -161,6 +161,9 @@ than searches unless the user asks.
 ## Things to know
 
 - There are no tabs: one page per kb. Open a second pane to compare two pages.
+  A window the page opens (a sign-in popup, a link to a new tab) is shown
+  over it, and commands act on it; click and the other actions say so. When
+  it closes, or on `kb ctl back` from its first page, the page is shown again.
 - The pane is often narrow, so many sites show their phone layout until you
   set a desktop viewport; `status` says when it is narrow.
 - Screenshots are one image pixel per CSS pixel (a 1280x800 viewport gives

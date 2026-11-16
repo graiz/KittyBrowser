@@ -597,6 +597,8 @@ impl ShotSize {
 /// How things stood before an action, to tell what it caused.
 #[derive(Clone)]
 struct Baseline {
+    /// The window shown.
+    window: String,
     seq: u64,
     failed: usize,
     url: String,
@@ -729,8 +731,8 @@ pub struct Devtools {
     dpr: f64,
     /// The network speed being imitated, if any.
     throttle: String,
-    /// Whether the DOM and CSS domains are on, for `style --why`.
-    css_on: bool,
+    /// The window whose DOM and CSS domains are on, for `style --why`.
+    css_on: Option<String>,
     /// Stylesheets by id: where each came from and the line it starts at.
     sheets: HashMap<String, (String, u64, bool)>,
     /// How dialogs are answered: dismissed if set, else accepted, and with
@@ -1028,8 +1030,9 @@ impl Devtools {
         lines.join("\n")
     }
 
-    fn baseline(&self) -> Baseline {
+    fn baseline(&self, window: &str) -> Baseline {
         Baseline {
+            window: window.to_owned(),
             seq: self.next_seq,
             failed: self.requests.iter().filter(|r| r.failed()).count(),
             url: self.url.clone(),
@@ -1216,8 +1219,8 @@ impl Devtools {
                 "style" if flag("why") => {
                     let property =
                         arg("property").ok_or("style --why needs a property, such as: kb ctl style h1 color --why")?;
-                    if !self.css_on {
-                        self.css_on = true;
+                    if self.css_on.as_deref() != Some(chrome.session()) {
+                        self.css_on = Some(chrome.session().to_owned());
                         chrome.request("DOM.enable", json!({}));
                         chrome.request("CSS.enable", json!({}));
                     }
@@ -1316,7 +1319,7 @@ impl Devtools {
                 "select" => {
                     let script =
                         format!("{}({}, {})", script(SELECT), quote(need("selector")?), quote(need("option")?));
-                    self.evaluate(chrome, &script, Pending::Acted(reply.clone(), self.baseline()));
+                    self.evaluate(chrome, &script, Pending::Acted(reply.clone(), self.baseline(chrome.session())));
                 }
                 "hover" => {
                     let selector = need("selector")?;
@@ -1366,7 +1369,7 @@ impl Devtools {
                         );
                         let message =
                             format!("cleared cookies and storage for {origin}; reload to start the page fresh");
-                        self.park(id, Pending::Done(reply.clone(), message, self.baseline(), None));
+                        self.park(id, Pending::Done(reply.clone(), message, self.baseline(chrome.session()), None));
                     } else {
                         self.evaluate(chrome, STORAGE, Pending::Eval(reply.clone()));
                     }
@@ -1432,7 +1435,7 @@ impl Devtools {
                     let key = parse_key(name).ok_or(format!(
                         "don't know the key {name:?}; try Enter, Tab, Escape, ArrowDown, a character, or Ctrl+a"
                     ))?;
-                    let since = self.baseline();
+                    let since = self.baseline(chrome.session());
                     chrome.key(&key);
                     let message = format!("pressed {name}");
                     self.settling.push(Settling {
@@ -1815,7 +1818,7 @@ impl Devtools {
                 }
                 match then {
                     Then::Hover(selector) => {
-                        let since = self.baseline();
+                        let since = self.baseline(chrome.session());
                         let id = chrome.request(
                             "Input.dispatchMouseEvent",
                             json!({"type": "mouseMoved", "x": x + width / 2.0, "y": y + height / 2.0}),
@@ -1823,7 +1826,7 @@ impl Devtools {
                         self.park(id, Pending::Done(reply, format!("the mouse is over {selector}"), since, None));
                     }
                     Then::Click(selector, count, at) => {
-                        let since = self.baseline();
+                        let since = self.baseline(chrome.session());
                         let (x, y) = match at {
                             Some((dx, dy)) => (x + dx, y + dy),
                             None => (x + width / 2.0, y + height / 2.0),
@@ -1854,7 +1857,7 @@ impl Devtools {
                         self.park(id, Pending::Done(reply, format!("{verb} {selector}"), since, target));
                     }
                     Then::Type(selector, typed) => {
-                        let since = self.baseline();
+                        let since = self.baseline(chrome.session());
                         let id = chrome.request("Input.insertText", json!({"text": typed}));
                         self.park(id, Pending::Done(reply, format!("typed into {selector}"), since, None));
                     }
@@ -1996,6 +1999,11 @@ impl Devtools {
                         chrome.request("Page.navigateToHistoryEntry", json!({"entryId": entry["id"]}));
                         self.moving.push((reply, Instant::now() + MOVE_TIMEOUT));
                     }
+                    // The first page of a window a page opened: back is closing it.
+                    None if step < 0 && chrome.windows() > 1 => {
+                        let under = chrome.close_window();
+                        text(&reply, format!("closed this window, which had no earlier page; shown again: {under}"));
+                    }
                     None => fail(
                         &reply,
                         format!("there is no {} page to go to", if step < 0 { "earlier" } else { "later" }),
@@ -2082,7 +2090,15 @@ impl Devtools {
         for action in settled {
             // A new page, not a move within this one (an anchor, a client-side route).
             let new_page = self.loader != action.since.loader || self.busy;
-            if self.loads != action.since.loads && new_page {
+            if action.since.window != chrome.session() {
+                // It opened a window (a sign-in popup, a link to a new tab),
+                // or closed the one it was in: the page acted on isn't shown.
+                let shown = match chrome.windows() {
+                    1 => "the window under it is shown again".to_owned(),
+                    n => format!("it opened a window, shown now ({n} open; kb ctl back on its first page closes it)"),
+                };
+                text(&action.reply, format!("{}; {shown}: {}", action.message, chrome.url()));
+            } else if self.loads != action.since.loads && new_page {
                 // It led to another page: answer when that has loaded and gone quiet.
                 let stopped = (!self.busy).then_some(now);
                 self.await_load(action.reply, format!("{}\n", action.message));
@@ -2202,7 +2218,7 @@ mod tests {
         assert_eq!(tools.health(), "1 console error, no failed requests\nsee: kb ctl console --errors");
 
         // An action's answer carries the errors that followed it, and only those.
-        let since = tools.baseline();
+        let since = tools.baseline("");
         assert_eq!(tools.fallout(&since), "");
         tools.log("error", "Uncaught TypeError: x is null".into(), "app.js:9".into());
         tools.log("log", "noise".into(), String::new());

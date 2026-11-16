@@ -25,6 +25,9 @@ pub enum PageEvent {
     Loading(bool),
     /// The page copied this text (the selection, or a copy button's).
     Copy(String),
+    /// Another window is shown now, at this URL: one a page opened, or the
+    /// one under a window that closed.
+    Shown(String),
 }
 
 /// Run in every page before its own scripts: report what the page copies
@@ -66,17 +69,35 @@ pub const ALT: u32 = 1;
 pub const CTRL: u32 = 2;
 pub const SHIFT: u32 = 8;
 
-pub struct Chrome {
-    child: Child,
-    tx: Sender,
+/// A window kb can show: the first one, or one a page opened (a link to a
+/// new tab, a sign-in popup). Only the top one is shown and gets input;
+/// the others wait under it, as a browser's would behind it.
+struct Tab {
     session: String,
     target: String,
     main_frame: String,
-    /// Pages opened by the page (target=_blank, window.open) whose URL isn't
-    /// known yet. There are no tabs, so they get loaded here instead.
-    popups: HashSet<String>,
+    url: String,
+    window: Option<Window>,
     /// Whether the HTTP cache is switched off, as it is on local pages.
     cache_off: bool,
+}
+
+pub struct Chrome {
+    child: Child,
+    tx: Sender,
+    /// The window shown, and the ones under it, newest last.
+    tab: Tab,
+    below: Vec<Tab>,
+    /// Windows a page opened that kb is attaching to.
+    opening: HashSet<String>,
+    /// What every window is told when kb attaches to it, in order: the
+    /// domains kb listens to, how the browser presents itself, and the
+    /// viewport and colour scheme, as last set.
+    settings: Vec<(&'static str, Value)>,
+    /// The ids of the replies saying which window holds a page just
+    /// attached to, and where the shown one can go back to.
+    window_request: Option<(u64, String)>,
+    history_request: Option<u64>,
     /// Whether frames wait for `ack` rather than being acknowledged as they
     /// arrive, and the acknowledgements waiting, oldest first. Chrome sends
     /// a second frame before the first is acknowledged, and counts: one
@@ -87,7 +108,6 @@ pub struct Chrome {
     profile: PathBuf,
     /// Whether Chrome also listens on a local port for DevTools.
     devtools: bool,
-    window: Option<Window>,
     /// The viewport asked for, in CSS pixels.
     viewport: Option<(u32, u32)>,
     /// How the screencast was started, while it runs, and the id of the
@@ -491,13 +511,9 @@ impl Chrome {
                 Some(Window::new(reply["windowId"].as_u64()?, (bounds["width"].as_i64()?, bounds["height"].as_i64()?)))
             });
 
-        call(&mut tx, &mut rx, "Page.enable", json!({}), s)?;
         // Console, log and network events feed `kb ctl console` and `network`.
-        for domain in ["Runtime.enable", "Log.enable", "Network.enable"] {
-            call(&mut tx, &mut rx, domain, json!({}), s)?;
-        }
-        let tree = call(&mut tx, &mut rx, "Page.getFrameTree", json!({}), s)?;
-        let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or(&target).to_owned();
+        let mut settings: Vec<(&'static str, Value)> =
+            ["Page.enable", "Runtime.enable", "Log.enable", "Network.enable"].map(|domain| (domain, json!({}))).into();
         // Some sites turn away anything that calls itself headless. The
         // client hints go with the name: overriding it alone leaves them
         // empty, which is a robot's mark too.
@@ -505,34 +521,34 @@ impl Chrome {
         if let (Some(agent), Some(product)) = (version["userAgent"].as_str(), version["product"].as_str()) {
             let agent = agent.replace("HeadlessChrome", "Chrome");
             let metadata = agent_metadata(product, &binary);
-            call(
-                &mut tx,
-                &mut rx,
-                "Emulation.setUserAgentOverride",
-                json!({"userAgent": agent, "userAgentMetadata": metadata}),
-                s,
-            )?;
+            settings
+                .push(("Emulation.setUserAgentOverride", json!({"userAgent": agent, "userAgentMetadata": metadata})));
         }
         // Without this the page believes it is in the background: no caret, no focus styles.
-        call(&mut tx, &mut rx, "Emulation.setFocusEmulationEnabled", json!({"enabled": true}), s)?;
+        settings.push(("Emulation.setFocusEmulationEnabled", json!({"enabled": true})));
+        settings.push(("Runtime.addBinding", json!({"name": "__kbCopy"})));
+        settings.push(("Page.addScriptToEvaluateOnNewDocument", json!({"source": COPY_HOOK})));
+        for (method, params) in &settings {
+            call(&mut tx, &mut rx, method, params.clone(), s)?;
+        }
+        let tree = call(&mut tx, &mut rx, "Page.getFrameTree", json!({}), s)?;
+        let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or(&target).to_owned();
         call(&mut tx, &mut rx, "Target.setDiscoverTargets", json!({"discover": true}), None)?;
-        call(&mut tx, &mut rx, "Runtime.addBinding", json!({"name": "__kbCopy"}), s)?;
-        call(&mut tx, &mut rx, "Page.addScriptToEvaluateOnNewDocument", json!({"source": COPY_HOOK}), s)?;
 
         let chrome = Chrome {
             child,
             tx,
-            session,
-            target,
-            main_frame,
-            popups: HashSet::new(),
-            cache_off: false,
+            tab: Tab { session, target, main_frame, url: String::new(), window, cache_off: false },
+            below: Vec::new(),
+            opening: HashSet::new(),
+            settings,
+            window_request: None,
+            history_request: None,
             hold_acks: false,
             unacked: Default::default(),
             binary,
             profile: profile.to_owned(),
             devtools,
-            window,
             viewport: None,
             screencast: None,
             window_reply: None,
@@ -542,25 +558,55 @@ impl Chrome {
 
     // Send failures mean Chrome is gone; the reader thread reports that.
     fn send(&mut self, method: &str, params: Value) {
-        let _ = self.tx.send(method, params, Some(&self.session));
+        let _ = self.tx.send(method, params, Some(&self.tab.session));
     }
 
     /// Send a command whose reply the caller wants: returns the id the reply
     /// will carry.
     pub fn request(&mut self, method: &str, params: Value) -> u64 {
-        self.tx.send(method, params, Some(&self.session)).unwrap_or(0)
+        self.tx.send(method, params, Some(&self.tab.session)).unwrap_or(0)
+    }
+
+    /// Tell every window, and those opened later, the same thing.
+    fn send_to_all(&mut self, method: &'static str, params: Value) {
+        self.settings.retain(|(sent, _)| *sent != method);
+        self.settings.push((method, params.clone()));
+        for tab in std::iter::once(&self.tab).chain(&self.below) {
+            let _ = self.tx.send(method, params.clone(), Some(&tab.session));
+        }
     }
 
     pub fn main_frame(&self) -> &str {
-        &self.main_frame
+        &self.tab.main_frame
+    }
+
+    /// The shown window's session, which commands go to.
+    pub fn session(&self) -> &str {
+        &self.tab.session
+    }
+
+    /// Where the shown window is.
+    pub fn url(&self) -> &str {
+        &self.tab.url
+    }
+
+    /// How many windows are open: the shown one and those under it.
+    pub fn windows(&self) -> usize {
+        1 + self.below.len()
+    }
+
+    /// Whether the app should look at this message: replies, the browser's
+    /// own events, and events from the window shown, not from those under it.
+    pub fn shown(&self, message: &Value) -> bool {
+        message.get("id").is_some() || message["sessionId"].as_str().is_none_or(|session| session == self.tab.session)
     }
 
     /// Switch the HTTP cache off if `url` is local, on if not. Call before
     /// going there.
     pub fn cache_for(&mut self, url: &str) {
         let off = is_local(url);
-        if off != self.cache_off {
-            self.cache_off = off;
+        if off != self.tab.cache_off {
+            self.tab.cache_off = off;
             self.send("Network.setCacheDisabled", json!({"cacheDisabled": off}));
         }
     }
@@ -579,6 +625,16 @@ impl Chrome {
                 self.unacked.clear();
                 self.send("Page.stopScreencast", json!({}));
                 self.send("Page.startScreencast", params);
+            }
+            return None;
+        }
+        if let Some(id) = message["id"].as_u64() {
+            if self.history_request == Some(id) {
+                self.history_request = None;
+                self.back_from(&message["result"]);
+            } else if self.window_request.as_ref().is_some_and(|(asked, _)| *asked == id) {
+                let (_, target) = self.window_request.take()?;
+                self.found_window(&target, &message["result"]);
             }
             return None;
         }
@@ -608,49 +664,145 @@ impl Chrome {
                 if frame.get("parentId").is_some() {
                     return None;
                 }
-                self.main_frame = frame["id"].as_str()?.to_owned();
+                self.tab.main_frame = frame["id"].as_str()?.to_owned();
                 let mut url = frame["url"].as_str()?.to_owned();
                 url.push_str(frame["urlFragment"].as_str().unwrap_or(""));
                 // For what loads next: links followed from here aren't seen in advance.
                 self.cache_for(&url);
+                self.tab.url.clone_from(&url);
                 Some(PageEvent::Url(url))
             }
-            "Page.navigatedWithinDocument" if params["frameId"] == self.main_frame.as_str() => {
-                Some(PageEvent::Url(params["url"].as_str()?.to_owned()))
+            "Page.navigatedWithinDocument" if params["frameId"] == self.tab.main_frame.as_str() => {
+                self.tab.url = params["url"].as_str()?.to_owned();
+                Some(PageEvent::Url(self.tab.url.clone()))
             }
-            "Page.frameStartedLoading" if params["frameId"] == self.main_frame.as_str() => {
+            "Page.frameStartedLoading" if params["frameId"] == self.tab.main_frame.as_str() => {
                 Some(PageEvent::Loading(true))
             }
-            "Page.frameStoppedLoading" if params["frameId"] == self.main_frame.as_str() => {
+            "Page.frameStoppedLoading" if params["frameId"] == self.tab.main_frame.as_str() => {
                 Some(PageEvent::Loading(false))
             }
-            "Target.targetCreated" | "Target.targetInfoChanged" => {
-                let created = method == "Target.targetCreated";
-                self.popup(&params["targetInfo"], created);
+            "Target.targetCreated" => {
+                let info = &params["targetInfo"];
+                let id = info["targetId"].as_str()?;
+                // A window a page opened. (A prerendered page isn't one yet.)
+                let known = self.tabs().any(|tab| tab.target == id) || self.opening.contains(id);
+                if info["type"] == "page" && info.get("subtype").is_none() && info["attached"] != true && !known {
+                    self.opening.insert(id.to_owned());
+                    self.send_browser("Target.attachToTarget", json!({"targetId": id, "flatten": true}));
+                }
                 None
             }
-            "Target.targetDestroyed" => {
-                self.popups.remove(params["targetId"].as_str()?);
+            "Target.attachedToTarget" => {
+                let info = &params["targetInfo"];
+                let target = info["targetId"].as_str()?;
+                if !self.opening.remove(target) {
+                    return None;
+                }
+                let session = params["sessionId"].as_str()?.to_owned();
+                self.open(session, target.to_owned(), info["url"].as_str().unwrap_or("").to_owned())
+            }
+            "Target.targetInfoChanged" => {
+                // Pages under the one shown can move on too, such as the one
+                // a sign-in popup signs in; and a window can have loaded its
+                // page before kb attached to it, unseen by its events.
+                let info = &params["targetInfo"];
+                let id = info["targetId"].as_str()?;
+                let url = info["url"].as_str()?;
+                if let Some(tab) = self.below.iter_mut().find(|tab| tab.target == id) {
+                    tab.url = url.to_owned();
+                } else if id == self.tab.target && url != self.tab.url {
+                    self.tab.url = url.to_owned();
+                    return Some(PageEvent::Url(self.tab.url.clone()));
+                }
+                None
+            }
+            "Target.targetDestroyed" | "Target.detachedFromTarget" => {
+                let id = params["targetId"].as_str()?;
+                self.opening.remove(id);
+                self.below.retain(|tab| tab.target != id);
+                if id == self.tab.target {
+                    return self.closed();
+                }
                 None
             }
             _ => None,
         }
     }
 
-    /// Load a page that opened in a new window here instead, and close it.
-    fn popup(&mut self, info: &Value, created: bool) {
-        let Some(id) = info["targetId"].as_str() else { return };
-        if info["type"] != "page" || id == self.target || !(created || self.popups.contains(id)) {
+    fn tabs(&self) -> impl Iterator<Item = &Tab> {
+        std::iter::once(&self.tab).chain(&self.below)
+    }
+
+    /// Show a window a page opened, above the one it opened it from.
+    fn open(&mut self, session: String, target: String, url: String) -> Option<PageEvent> {
+        // The page under it keeps its own screencast stopped until it is
+        // shown again; frames from it need no acknowledging.
+        if self.screencast.is_some() {
+            self.send("Page.stopScreencast", json!({}));
+        }
+        self.unacked.clear();
+        let main_frame = target.clone();
+        let tab = Tab { session, target: target.clone(), main_frame, url: url.clone(), window: None, cache_off: false };
+        self.below.push(std::mem::replace(&mut self.tab, tab));
+        for (method, params) in self.settings.clone() {
+            self.send(method, params);
+        }
+        self.cache_for(&url);
+        let asked = self.tx.send("Browser.getWindowForTarget", json!({"targetId": target}), None);
+        self.window_request = asked.ok().map(|id| (id, target));
+        if let Some(params) = self.screencast.clone() {
+            self.send("Page.startScreencast", params);
+        }
+        Some(PageEvent::Shown(url))
+    }
+
+    /// The window holding a page just shown: fit it to the viewport, as the
+    /// first one is, so its frames are the viewport's size.
+    fn found_window(&mut self, target: &str, reply: &Value) {
+        let bounds = &reply["bounds"];
+        let (Some(id), Some(width), Some(height)) =
+            (reply["windowId"].as_u64(), bounds["width"].as_i64(), bounds["height"].as_i64())
+        else {
+            return;
+        };
+        if self.tab.target != target {
             return;
         }
-        let url = info["url"].as_str().unwrap_or("");
-        if url.is_empty() || url == "about:blank" {
-            self.popups.insert(id.to_owned());
-            return;
+        let mut window = Window::new(id, (width, height));
+        let fit = self.viewport.and_then(|(width, height)| window.resized(None, (width as i64, height as i64)));
+        self.tab.window = Some(window);
+        self.set_window(fit);
+    }
+
+    /// The window shown closed: show the one under it again.
+    fn closed(&mut self) -> Option<PageEvent> {
+        self.tab = self.below.pop()?;
+        self.unacked.clear();
+        if let Some(params) = self.screencast.clone() {
+            self.send("Page.startScreencast", params);
         }
-        self.popups.remove(id);
-        self.navigate(url);
-        self.send_browser("Target.closeTarget", json!({"targetId": id}));
+        Some(PageEvent::Shown(self.tab.url.clone()))
+    }
+
+    /// Go back in the shown window, or, in a window a page opened that has
+    /// nowhere to go back to, close it, showing the one it came from.
+    fn back_from(&mut self, history: &Value) {
+        let index = history["currentIndex"].as_u64().unwrap_or(0) as usize;
+        match index.checked_sub(1).and_then(|before| history["entries"][before]["id"].as_u64()) {
+            Some(entry) => self.send("Page.navigateToHistoryEntry", json!({"entryId": entry})),
+            None => {
+                self.close_window();
+            }
+        }
+    }
+
+    /// Close the window shown, a page's popup or new tab, and return where
+    /// the one under it, shown again once it has closed, is.
+    pub fn close_window(&mut self) -> String {
+        let target = self.tab.target.clone();
+        self.send_browser("Target.closeTarget", json!({"targetId": target}));
+        self.below.last().map(|tab| tab.url.clone()).unwrap_or_default()
     }
 
     pub fn navigate(&mut self, url: &str) {
@@ -668,7 +820,11 @@ impl Chrome {
     }
 
     pub fn back(&mut self) {
-        self.send("Runtime.evaluate", json!({"expression": "history.back()"}));
+        if self.below.is_empty() {
+            self.send("Runtime.evaluate", json!({"expression": "history.back()"}));
+        } else {
+            self.history_request = Some(self.request("Page.getNavigationHistory", json!({})));
+        }
     }
 
     pub fn forward(&mut self) {
@@ -679,7 +835,7 @@ impl Chrome {
     /// launch scale, whatever scale is asked for here, so `scale` should be
     /// the launch scale.
     pub fn resize(&mut self, width: u32, height: u32, scale: f64) {
-        self.send(
+        self.send_to_all(
             "Emulation.setDeviceMetricsOverride",
             json!({
                 "width": width,
@@ -695,12 +851,20 @@ impl Chrome {
         );
         let size = |(width, height): (u32, u32)| (width as i64, height as i64);
         let old = self.viewport.replace((width, height)).map(size);
-        let fit = self.window.as_mut().and_then(|window| window.resized(old, size((width, height))));
+        // Windows under the one shown are fitted now too, ready to be shown.
+        for tab in &mut self.below {
+            let Some(window) = &mut tab.window else { continue };
+            if let Some((width, height)) = window.resized(old, size((width, height))) {
+                let bounds = json!({"windowId": window.id, "bounds": {"width": width, "height": height}});
+                let _ = self.tx.send("Browser.setWindowBounds", bounds, None);
+            }
+        }
+        let fit = self.tab.window.as_mut().and_then(|window| window.resized(old, size((width, height))));
         self.set_window(fit);
     }
 
     fn set_window(&mut self, size: Option<(i64, i64)>) {
-        let (Some(window), Some((width, height))) = (&self.window, size) else { return };
+        let (Some(window), Some((width, height))) = (&self.tab.window, size) else { return };
         let bounds = json!({"windowId": window.id, "bounds": {"width": width, "height": height}});
         self.window_reply = self.tx.send("Browser.setWindowBounds", bounds, None).ok();
     }
@@ -709,7 +873,7 @@ impl Chrome {
     /// Only PNG frames are cut; kb draws JPEG ones only in kb bench.
     fn crop_frame(&self, data: String, metadata: &Value) -> Option<String> {
         let (Some(window), Some((width, height)), Some(css_width), Some(css_height)) =
-            (&self.window, self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
+            (&self.tab.window, self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
         else {
             return Some(data);
         };
@@ -723,7 +887,7 @@ impl Chrome {
     /// Fit the window to the viewport if this frame shows it cropping them.
     fn check_frame_size(&mut self, metadata: &Value) {
         let (Some(window), Some((width, height)), Some(got_width), Some(got_height)) =
-            (&mut self.window, self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
+            (&mut self.tab.window, self.viewport, metadata["deviceWidth"].as_f64(), metadata["deviceHeight"].as_f64())
         else {
             return;
         };
@@ -741,7 +905,7 @@ impl Chrome {
             Some(false) => "light",
             None => "",
         };
-        self.send(
+        self.send_to_all(
             "Emulation.setEmulatedMedia",
             json!({"features": [{"name": "prefers-color-scheme", "value": value}]}),
         );
@@ -758,7 +922,7 @@ impl Chrome {
         let port = ports.lines().next().unwrap_or("").trim();
         let url = format!(
             "http://127.0.0.1:{port}/devtools/inspector.html?ws=127.0.0.1:{port}/devtools/page/{}",
-            self.target
+            self.tab.target
         );
         // The same browser kb runs, as a desktop app: DevTools is Chrome's.
         let bundle = self.binary.ancestors().find(|path| path.extension().is_some_and(|e| e == "app"));
