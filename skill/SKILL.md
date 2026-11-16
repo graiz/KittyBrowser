@@ -106,17 +106,20 @@ kb ctl -i N check                           # exit 1 on console errors, failed r
 kb ctl -i N screenshot --out /tmp/page.png  # or your scratch directory; then read the image
 ```
 
-Then exercise what you changed:
+Then exercise what you changed. `kb ctl -i N html form` shows a form's
+fields with their ids and names, to pick selectors from:
 
 ```sh
-kb ctl -i N click 'text=Save'           # fails if the element is hidden, off screen or covered
 kb ctl -i N type '#email' 'a@b.co' --clear
 kb ctl -i N select '#plan' Pro          # by value or label
-kb ctl -i N press Enter
-kb ctl -i N wait '.toast' --text Saved  # visible text only; --count N, --gone, --visible
-kb ctl -i N console --errors
+kb ctl -i N click 'text=Save'           # fails if the element is hidden, off screen or covered
+kb ctl -i N wait '#result' --text Saved # what the click should show: the element, and words you expect
+kb ctl -i N console --errors            # this page's; --all adds earlier pages'
 kb ctl -i N network --failed
 ```
+
+`wait` matches visible text only, and also takes `--count N`, `--gone` and
+`--visible`.
 
 `click`, `type`, `press` and `select` answer once the page settles, and report
 the console errors and dialogs they caused and any change of page. What
