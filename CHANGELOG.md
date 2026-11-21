@@ -22,6 +22,27 @@ Notable changes to kb. The format follows
 - Files that look like keys, passwords or sign-ins are refused to
   `kb ctl upload`, and the file chooser asks the user a second time before
   sending one.
+- `~/.kittybrowser`, which holds sign-ins, history and the control socket,
+  is made readable only by you, and one an earlier kb left open to others
+  is tightened, as is the control socket. A link in its place is followed,
+  as ssh follows one at `~/.ssh`, but the folder must be yours; run with
+  `sudo` and HOME kept, kb uses yours. On a filesystem that holds no Unix
+  modes kb runs as before, and `kb doctor` says the folder isn't private.
+- Frames passed to the terminal by file go in a private folder with a name
+  no one can guess, made once per run and removed as kb quits, not under a
+  predictable name in the shared temporary directory. A kb that was killed
+  leaves its folder; the next kb to start removes it once it has sat
+  unchanged for ten minutes.
+- `kb ctl screenshot` saves to a folder of your own in the temporary
+  directory (`kb-screenshots-UID`), readable only by you, rather than
+  straight into the temporary directory, which on Linux is shared. The
+  system still clears old ones. `--out` writes as before, as `cp` would;
+  when the image goes to a pipe, a device or `kb ctl`'s own output
+  (`--out /dev/stdout > shot.png`), no path is printed into it.
+- Text from a page (titles, page text, console messages, `eval` results,
+  errors) is printed by `kb ctl`, `kb list` and kb's errors with its control
+  characters shown as �, so a page can't retitle your terminal or write its
+  clipboard through them. The address, find and inspect boxes drop them.
 
 ## 0.2.0 — 2026-11-21
 
