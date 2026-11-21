@@ -262,7 +262,7 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
             // every command would wait on it in vain.
             chrome.close();
             return Err(format!(
-                "Chrome didn't start loading {} within {} s, so kb stopped. On macOS, Chrome is usually waiting \
+                "Chrome didn't start loading {} within {} s, so kb stopped. On macOS, Chrome can be waiting \
                  for the keychain, as when HOME isn't the user's own; see Troubleshooting in kb's README",
                 address.as_deref().unwrap_or(""),
                 FIRST_LOAD.as_secs()

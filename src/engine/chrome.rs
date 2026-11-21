@@ -503,8 +503,8 @@ impl Chrome {
             .arg(format!("--force-device-scale-factor={scale}"))
             .args(["--hide-scrollbars", "--no-first-run", "--no-default-browser-check"])
             .arg("--disable-features=PasswordManagerOnboarding,AutofillServerCommunication")
-            // Otherwise navigator.webdriver is true, which sites such as
-            // Google take as a robot and answer with a captcha.
+            // Otherwise navigator.webdriver is true, which some sites take
+            // as a robot and answer with a captcha.
             .arg("--disable-blink-features=AutomationControlled")
             .args(if devtools {
                 &["--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1"][..]
@@ -557,8 +557,8 @@ impl Chrome {
         let Attached { target, session, window, settings, main_frame } =
             attached.map_err(|error| match stalled.load(Ordering::SeqCst) {
                 true => format!(
-                    "Chrome didn't answer within {} s of starting, so kb stopped it. On macOS it is usually \
-                     waiting for the keychain, as when HOME isn't the user's own; see Troubleshooting in kb's README",
+                    "Chrome didn't answer within {} s of starting, so kb stopped it. On macOS it can be waiting \
+                     for the keychain, as when HOME isn't the user's own; see Troubleshooting in kb's README",
                     STARTUP.as_secs()
                 ),
                 false => error,

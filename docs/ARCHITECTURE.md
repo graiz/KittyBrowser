@@ -42,6 +42,12 @@ the shell when a later step fails. `KB_FORCE=1` skips the question.
 and speaks NUL-terminated JSON on file descriptors 3 and 4. No port is opened
 and no websocket library is needed.
 
+On Apple Silicon, an Intel build of kb runs under Rosetta, and a program it
+starts would too: Chrome's JavaScript, compiled for Intel and then
+translated, runs several times slower. So when kb is translated
+(`sysctl.proc_translated`), it starts Chrome through `arch -arm64 -x86_64`,
+and the client hints give the machine's architecture, not kb's.
+
 `chrome.rs` starts the browser, attaches to its one page, and exposes what the
 app needs: navigate, reload, back, forward, resize, mouse, keys, and a
 `handle` function that digests each incoming message into a `PageEvent`
@@ -319,7 +325,7 @@ minutes without a command (`kb list` asking its status doesn't count), unless
 `KB_HEADLESS_IDLE=0`. If Chrome never starts to load the first page, it
 stops and says why rather than leave every command to time out; and
 `Chrome::launch` stops a Chrome that hasn't answered within 20 s of starting,
-which on macOS is usually one waiting for the keychain.
+as one on macOS can when it waits for the keychain.
 
 Numbers are reused as soon as a kb closes, so each run also gets an id, its
 number and four hex digits (`3-a7f2`). `kb ctl -i ID` asks that socket's kb

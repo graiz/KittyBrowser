@@ -24,8 +24,9 @@ Notable changes to kb. The format follows
   kb click the frame a second time by script.
 - `KB_HEADLESS_IDLE=0` keeps a headless kb running until told to quit.
 - When Chrome doesn't answer within 20 s of starting, or a headless kb's
-  first page never starts to load, kb stops and says why (on macOS, usually
-  the keychain) rather than leave every command to time out after 70 s. A
+  first page never starts to load, kb stops and says why (on macOS, it can
+  be waiting for the keychain) rather than leave every command to time out
+  after 70 s. A
   command Chrome never answers fails after 30 s, saying so.
 - A socket path too long for Unix (a long `HOME`) is refused with a clear
   message. kb's profiles are readable only by the user (0700). A quitting kb
@@ -44,8 +45,8 @@ Notable changes to kb. The format follows
   as the terminal's own scrollback, and a burst of ticks reaches the page
   as one scroll.
 - `kb --headless URL` runs kb in the background without a pane, driven by
-  `kb ctl` alone, with the same profile and commands. It prints its number,
-  `kb ctl -i N quit` stops it (and quits any kb), and it stops by itself
+  `kb ctl` alone, with the same profile and commands. It prints its id,
+  `kb ctl -i ID quit` stops it (and quits any kb), and it stops by itself
   after ten minutes without a command (`KB_HEADLESS_IDLE`). The skill has
   agents finish this way when the user closes their pane to get it out of
   the way. It answers once the first page has loaded, as `kb ctl open`

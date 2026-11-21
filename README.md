@@ -313,7 +313,7 @@ kb's data folder, and prints what to fix.
 - **A kb you can't find:** `kb list` shows the ones running, with the pane
   each is in; quit one with Ctrl+Q in its pane.
 - **"Chrome didn't answer" or "didn't start loading" at start, on macOS:**
-  Chrome is waiting for the keychain, which holds the key it encrypts
+  Chrome may be waiting for the keychain, which holds the key it encrypts
   cookies with. This happens when kb runs with a `HOME` that isn't your own,
   or as a service before you have logged in. Run kb with your own `HOME`,
   from a session that is logged in. `KB_CHROME_ARGS=--use-mock-keychain`

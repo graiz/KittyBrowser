@@ -294,7 +294,7 @@ const SECTION: &str = r#"((scope, want) => {
   head.scrollIntoView({block: 'start', behavior: 'instant'});
   const levelOf = h => +(/^h(\d)$/.exec(h.localName) || [])[1] || +h.getAttribute('aria-level') || 6;
   const level = levelOf(head);
-  // Up past wrappers that hold little but the heading (Wikipedia's [edit] links).
+  // Up past wrappers that hold little but the heading (and, say, an edit link).
   let node = head;
   while (node.parentElement && node.parentElement !== document.body
          && __kb.text(node.parentElement).trim().length <= __kb.label(head).length + 20) node = node.parentElement;

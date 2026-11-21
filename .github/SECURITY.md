@@ -10,16 +10,22 @@ release, with credit if you'd like it.
 ## What kb trusts
 
 - **The control socket.** A running kb listens on a Unix socket in
-  `~/.kittybrowser` (`kb.sock`, `kb-2.sock`, ...), created with mode 0600 so
+  `~/.kittybrowser` (`kb.sock`, `kb-2.sock`, ..., and `kb-NAME.sock` for a
+  kb started with `--name`), created with mode 0600 so
   only your user can connect. Whatever connects can drive the browser,
   including running JavaScript in pages you are logged in to in kb. Any
   program running as your user already has that much access to your
   account, but treat the socket accordingly.
 - **The MCP server** (`kb mcp serve`) forwards an agent's tool calls to that
-  socket. It offers no tools until you run `kb mcp on`.
+  socket. It offers no tools until you run `kb mcp on`. `kb mcp serve -i
+  NAME` reaches only the kb with that name.
+- **Uploads.** `kb ctl upload` (and the MCP tool) reads files from your
+  computer and gives them to the page, which can send them anywhere. An
+  agent that can drive kb can send any file you can read.
 - **Profiles.** Cookies and site data are kept in `~/.kittybrowser/profile`
-  (and `profile-N` for further kbs), separate from your everyday Chrome. kb
-  turns off Chrome's password manager and autofill in them.
+  (`profile-N` for further kbs, `profiles/NAME` for named ones), separate
+  from your everyday Chrome, and readable only by you (mode 0700). kb turns
+  off Chrome's password manager and autofill in them.
 - **DevTools.** Started with `--devtools`, Chrome also listens on a port of
   127.0.0.1 so F12 can open DevTools. Any program on this machine, run by any
   user, can connect to that port and control the browser, so it is off
