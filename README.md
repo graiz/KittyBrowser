@@ -283,7 +283,10 @@ can open. Anything running as you can use it to run JavaScript in pages you
 are logged in to in kb. Such a program could already read your files, but
 it's worth knowing before you turn on the MCP server. `upload` sends files
 from your computer to the page, so an agent driving kb can send any file
-you can read. See
+you can read, except ones that look like keys, passwords or sign-ins
+(`~/.ssh`, `~/.aws`, `.env` files, private keys, browser cookies): those
+only you can send, by choosing them in the page's file chooser, which agents
+can't see or drive. See
 [SECURITY.md](.github/SECURITY.md).
 
 ## Configuration

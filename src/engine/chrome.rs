@@ -649,6 +649,12 @@ impl Chrome {
         self.tx.send(method, params, Some(&self.tabs[self.shown].session)).unwrap_or(0)
     }
 
+    /// Send a command to one window's session, shown or not: the answer
+    /// to a dialog goes to the page that opened it.
+    pub fn request_in(&mut self, session: &str, method: &str, params: Value) -> u64 {
+        self.tx.send(method, params, Some(session)).unwrap_or(0)
+    }
+
     /// Tell every window, and those opened later, the same thing.
     fn send_to_all(&mut self, method: &'static str, params: Value) {
         self.settings.retain(|(sent, _)| *sent != method);

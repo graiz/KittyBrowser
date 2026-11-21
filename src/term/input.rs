@@ -40,7 +40,7 @@ impl Default for Key {
 }
 
 impl Key {
-    fn plain(code: KeyCode) -> Key {
+    pub fn plain(code: KeyCode) -> Key {
         Key { code, ctrl: false, alt: false, shift: false, cmd: false }
     }
 }

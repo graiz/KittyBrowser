@@ -29,6 +29,10 @@ src/main.rs            arguments; dispatches kb, kb ctl, kb mcp, kb list, kb ski
 src/app.rs             the event loop: terminal input, Chrome's messages, drawing
 src/ui.rs              the top bar: buttons, address field, completion, find
 src/history.rs         visited pages, for address completion
+src/modal.rs           boxes drawn over the page: a grid of cells, frames, buttons
+src/dialog.rs          a page's alert, confirm, prompt or leave-site dialog, asked in the pane
+src/picker.rs          the file chooser a page opens, asked in the pane
+src/secrets.rs         which files look like keys or passwords, kept from pages
 src/splash.rs          the logo shown until the first page (assets/logo.svg)
 src/engine/cdp.rs      DevTools protocol over Chrome's debugging pipe
 src/engine/chrome.rs   starts Chrome; commands to the page, events from it
