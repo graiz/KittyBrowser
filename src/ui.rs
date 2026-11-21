@@ -133,7 +133,7 @@ impl AddressBar {
     }
 
     pub fn set_completion(&mut self, completion: Option<String>) {
-        self.completion = completion.unwrap_or_default().chars().collect();
+        self.completion = crate::term::drawable(&completion.unwrap_or_default()).chars().collect();
     }
 
     pub fn focused(&self) -> bool {
@@ -152,8 +152,9 @@ impl AddressBar {
         self.set_text(url);
     }
 
+    /// Show `text`, an address or a find, from the page or the user.
     pub fn set_text(&mut self, text: &str) {
-        self.text = text.chars().collect();
+        self.text = crate::term::drawable(text).chars().collect();
         self.cursor = self.text.len();
         self.scroll = 0;
         self.selected = false;
@@ -174,7 +175,7 @@ impl AddressBar {
             self.cursor = 0;
             self.selected = false;
         }
-        for c in text.chars().filter(|c| !c.is_control()) {
+        for c in crate::term::drawable(text).chars() {
             self.text.insert(self.cursor, c);
             self.cursor += 1;
         }
@@ -394,8 +395,10 @@ pub struct Rect {
 /// dimmed. Returns where the box is, to blank it later with `blank`. Lines
 /// too long for the screen are cut, and lines that don't fit are dropped.
 pub fn render_box(out: &mut Vec<u8>, lines: &[String], cols: u16, rows: u16) -> Rect {
-    let inner = lines.iter().map(|line| unmark(line).chars().count()).max().unwrap_or(0);
-    let width = (inner as u16 + 4).min(cols);
+    // The lines can be the page's: an inspected element.
+    let shown = |line: &str| crate::term::drawable(unmark(line));
+    let inner = lines.iter().map(|line| shown(line).chars().count()).max().unwrap_or(0);
+    let width = inner.saturating_add(4).min(cols as usize) as u16;
     let height = (lines.len() as u16 + 2).min(rows.saturating_sub(1));
     let col = (cols - width) / 2 + 1;
     let row = 2 + (rows.saturating_sub(1) - height) / 2;
@@ -412,7 +415,7 @@ pub fn render_box(out: &mut Vec<u8>, lines: &[String], cols: u16, rows: u16) -> 
             Some('\t') => colors.box_dim.as_str(),
             _ => box_style,
         };
-        let text: String = unmark(line).chars().take(text_width).collect();
+        let text: String = shown(line).chars().take(text_width).collect();
         let pad = text_width - text.chars().count();
         let _ = write!(s, "\x1b[{};{col}H{box_style}│ {style}{text}{:pad$}{box_style} │", row + 1 + n as u16, "");
     }
@@ -568,6 +571,20 @@ mod tests {
         assert_eq!(super::host_of("https://a.com#x@y"), "a.com");
         assert_eq!(super::host_of("file:///tmp/a.html"), "");
         assert_eq!(super::host_of("about:blank"), "");
+    }
+
+    #[test]
+    fn page_text_drawn_in_the_pane_has_no_controls() {
+        let page = "one\x1b]52;c;eA==\x07two\u{85}three\r";
+        let mut out = Vec::new();
+        super::render_box(&mut out, &[page.to_owned(), "x".repeat(70_000)], 80, 20);
+        let drawn = String::from_utf8(out).unwrap();
+        assert!(drawn.contains("one]52;c;eA==twothree "), "{drawn:?}");
+        assert!(!drawn.contains('\x07') && !drawn.contains('\u{85}') && !drawn.contains('\r'));
+        let mut bar = super::AddressBar::default();
+        bar.set_text(page);
+        bar.set_completion(Some(page.to_owned()));
+        assert_eq!(bar.text(), "one]52;c;eA==twothree".repeat(2));
     }
 
     #[test]

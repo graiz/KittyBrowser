@@ -149,7 +149,7 @@ fn main() {
     if let Err(err) = result {
         // An empty error has been explained already, at more length.
         if !err.is_empty() {
-            eprintln!("kb: {err}");
+            eprintln!("kb: {}", term::printable(&err));
         }
         std::process::exit(1);
     }

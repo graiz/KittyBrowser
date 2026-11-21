@@ -126,7 +126,7 @@ impl Canvas {
         }
         let end = self.width.min(col.saturating_add(limit));
         let mut last: Option<usize> = None;
-        for c in text.chars().filter(|c| !c.is_control()) {
+        for c in crate::term::drawable(text).chars() {
             let cell = row * self.width;
             match width(c) {
                 0 => {
@@ -356,7 +356,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     for paragraph in text.split('\n') {
         let mut line = String::new();
         for word in paragraph.split(' ') {
-            let word: String = word.chars().filter(|c| !c.is_control()).collect();
+            let word = crate::term::drawable(word);
             let used = text_width(&line);
             if used > 0 && used + 1 + text_width(&word) <= width {
                 line.push(' ');

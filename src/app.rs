@@ -1460,7 +1460,8 @@ impl App {
 
     /// Show a short note at the right of the bar.
     fn note(&mut self, text: &str) {
-        self.notice = Some((text.to_owned(), Instant::now()));
+        // A note can quote the page.
+        self.notice = Some((term::drawable(text), Instant::now()));
     }
 
     /// Put text on the system clipboard, through the terminal.

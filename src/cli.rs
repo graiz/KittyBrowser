@@ -2,6 +2,7 @@
 
 use crate::commands::{self, COMMANDS};
 use crate::control::{self, Output};
+use crate::term::printable;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -79,12 +80,12 @@ pub fn run(mut words: &[String]) -> i32 {
     let mut args = match command.parse(words) {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("kb ctl: {error}");
+            eprintln!("kb ctl: {}", printable(&error));
             return 2;
         }
     };
     if let Err(error) = command.resolve_files(&mut args) {
-        eprintln!("kb ctl: {error}");
+        eprintln!("kb ctl: {}", printable(&error));
         return 1;
     }
     // Where to save an image is ours to deal with, not the browser's.
@@ -106,7 +107,7 @@ pub fn run(mut words: &[String]) -> i32 {
 
     match control::request(command.name, args) {
         Ok(Output::Text(text)) => {
-            println!("{text}");
+            println!("{}", printable(&text));
             0
         }
         Ok(Output::Image(png)) => {
@@ -124,17 +125,17 @@ pub fn run(mut words: &[String]) -> i32 {
             });
             match saved {
                 Ok(()) => {
-                    println!("{}", path.display());
+                    println!("{}", printable(&path.display().to_string()));
                     0
                 }
                 Err(error) => {
-                    eprintln!("kb ctl: {error}");
+                    eprintln!("kb ctl: {}", printable(&error));
                     1
                 }
             }
         }
         Err(error) => {
-            eprintln!("kb ctl: {error}");
+            eprintln!("kb ctl: {}", printable(&error));
             1
         }
     }
@@ -143,6 +144,11 @@ pub fn run(mut words: &[String]) -> i32 {
 /// `kb list`: the kbs running now, one per line, by number or name.
 /// Returns the exit status.
 pub fn list() -> i32 {
+    // Otherwise a data directory kb refuses would read as no kb running.
+    if let Err(error) = crate::data_dir() {
+        eprintln!("kb: {}", printable(&error));
+        return 1;
+    }
     let running = control::running();
     if running.is_empty() {
         eprintln!("kb: {}", control::NOT_RUNNING);
@@ -161,7 +167,7 @@ pub fn list() -> i32 {
         };
         // The pane tells kbs apart: an agent knows the one it split. The id
         // names this run of it, so a number taken over later isn't mistaken.
-        println!("{instance}\t{page}\t{pane}\t{id}");
+        println!("{}", printable(&format!("{instance}\t{page}\t{pane}\t{id}")));
     }
     0
 }
