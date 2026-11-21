@@ -130,6 +130,9 @@ fn bind(socket: &std::path::Path) -> Result<(UnixListener, Socket), String> {
     // Left behind by a kb that didn't exit cleanly.
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket).map_err(|e| format!("listening on {}: {e}", socket.display()))?;
+    // Whoever can connect can run script in the user's signed-in pages. On
+    // a filesystem that holds no Unix modes this fails, and kb runs anyway,
+    // in a data directory kb doctor says isn't private.
     let _ = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600));
     let inode = std::fs::metadata(socket).map_err(|e| format!("listening on {}: {e}", socket.display()))?.ino();
     Ok((listener, Socket { path: socket.to_owned(), inode }))
@@ -202,8 +205,11 @@ impl Claim {
             (None, Some(1) | None) => dir.join("profile"),
             (None, Some(n)) => dir.join(format!("profile-{n}")),
         };
-        std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
-        let _ = std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700));
+        // data_dir has made itself private already; profiles/ hasn't.
+        if let Some(folder) = profile.parent().filter(|folder| *folder != dir) {
+            crate::files::private_dir(folder)?;
+        }
+        crate::files::private_dir(&profile)?;
         Ok(profile)
     }
 
@@ -461,6 +467,15 @@ mod tests {
     fn long_socket_paths_are_refused_plainly() {
         let long = std::env::temp_dir().join("x".repeat(120)).join("kb.sock");
         assert!(bind(&long).unwrap_err().contains("longer than a Unix socket's path can be"));
+    }
+
+    #[test]
+    fn the_socket_is_private() {
+        let socket = std::env::temp_dir().join(format!("kb-socket-test-{}.sock", std::process::id()));
+        let (_listener, bound) = bind(&socket).unwrap();
+        assert_eq!(std::fs::symlink_metadata(&socket).unwrap().mode() & 0o777, 0o600);
+        bound.remove();
+        assert!(!socket.exists());
     }
 
     fn place(id: &str, pane: &str, session: &str) -> Place {

@@ -190,7 +190,7 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
 fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>) -> Result<String, String> {
     // Its own profile, so that benches can run side by side.
     let profile = crate::data_dir()?.join(format!("profile-bench-{}", std::process::id()));
-    std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
+    crate::files::private_dir(&profile)?;
     let (chrome, mut receiver) = match Chrome::launch(&profile, scale, false) {
         Ok(launched) => launched,
         Err(error) => {

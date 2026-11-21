@@ -182,8 +182,21 @@ pub fn run() -> i32 {
             let probe = dir.join(".doctor");
             match std::fs::write(&probe, "") {
                 Ok(()) => {
+                    use std::os::unix::fs::PermissionsExt;
                     let _ = std::fs::remove_file(&probe);
-                    report.ok("data", &dir.display().to_string());
+                    let mode = std::fs::metadata(&dir).map_or(0o700, |file| file.permissions().mode() & 0o777);
+                    if mode & 0o077 == 0 {
+                        report.ok("data", &dir.display().to_string());
+                    } else {
+                        report.note(
+                            "data",
+                            &format!(
+                                "{} is mode {mode:o}, and this filesystem won't let kb make it private: other \
+                                 users may reach your sign-ins and kb's socket, which runs script in your pages",
+                                dir.display()
+                            ),
+                        );
+                    }
                 }
                 Err(error) => report.fail("data", &format!("can't write in {}: {error}", dir.display())),
             }

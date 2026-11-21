@@ -30,6 +30,7 @@ on kb (`brew uninstall kittybrowser`, or `rm ~/.local/bin/kb`).
 
 ```
 src/main.rs            arguments; dispatches kb, kb ctl, kb mcp, kb list, kb skill, kb doctor, kb bench
+src/files.rs           private folders and files: the data directory, frames, screenshots
 src/app.rs             the event loop: terminal input, Chrome's messages, drawing
 src/ui.rs              the top bar: buttons, address field, completion, find
 src/history.rs         visited pages, for address completion
