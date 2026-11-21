@@ -81,12 +81,30 @@ The skill is compiled into the binary; after changing `skill/SKILL.md`, run
 
 ## Releasing
 
-Bump `version` in Cargo.toml, move the CHANGELOG's Unreleased entries under
-the new version, then tag it: `git tag v0.2.0 && git push --tags`.
-`.github/workflows/release.yml` builds kb for macOS and Linux and attaches
-the archives to a GitHub release, which `install.sh` downloads from. After
-the first release, README.md's Quick start and Install can lead with
-`install.sh` instead of `cargo install`.
+kb is released three ways: archives on a GitHub release (which `install.sh`
+downloads), the `kittybrowser` crate on crates.io, and the `kittybrowser`
+formula in the Homebrew tap at
+[graiz/homebrew-tap](https://github.com/graiz/homebrew-tap). To release:
+
+1. On a branch, bump `version` in Cargo.toml and run `cargo build` so
+   Cargo.lock follows. In CHANGELOG.md, rename `## Unreleased` to
+   `## X.Y.Z — YYYY-MM-DD` and start an empty `## Unreleased` above it.
+   Merge it to main once CI passes.
+2. From main, check the crate: `cargo publish --dry-run`.
+3. Tag main and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+   `.github/workflows/release.yml` builds kb for macOS and Linux, on ARM and
+   Intel, and attaches the archives and their checksums to a GitHub release.
+4. Publish the crate: `cargo publish`. A published version can't be
+   replaced, only yanked, so do this after the release builds succeed.
+5. Update the tap: in a clone of graiz/homebrew-tap, run
+   `./update.sh X.Y.Z`, which puts the new version and the release's
+   checksums in `Formula/kittybrowser.rb`. Commit and push it, then check
+   it installs: `brew update && brew upgrade kittybrowser` (or
+   `brew install graiz/tap/kittybrowser`), then `kb --version`.
+
+Versions follow semantic versioning: before 1.0, a release that changes how
+a command or flag behaves bumps the minor version, and one with only fixes
+bumps the patch.
 
 ## Safety
 

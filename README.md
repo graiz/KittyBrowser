@@ -32,17 +32,17 @@ kb ctl check                    # from another pane: is the page healthy?
 kb skill install                # teach Claude Code (or any agent with skills) to use it
 ```
 
-**Status:** early but usable, version 0.1. Used daily on macOS in Rex and
+**Status:** early but usable, version 0.2. Used daily on macOS in Rex and
 Ghostty; it should work in kitty and WezTerm, and it builds on Linux, but
 those haven't been tested yet. Reports are welcome, and if kb is useful to
 you, a star helps other people find it.
 
 ## Quick start
 
-With [Rust](https://rustup.rs) and Chrome installed:
+With Chrome installed:
 
 ```sh
-cargo install --git https://github.com/graiz/kittybrowser
+brew install graiz/tap/kittybrowser
 kb doctor                  # checks your terminal and Chrome, and says what to fix
 kb news.ycombinator.com
 ```
@@ -51,16 +51,8 @@ Ctrl+/ shows the keys, Ctrl+Q quits (or the ✕ at the right of the bar, which a
 A window a page opens, such as a sign-in popup, is shown over the page;
 ‹ › in the bar switch between open windows, and ✕ closes the one shown.
 
-There is no prebuilt release yet, so kb needs Rust to build. Once releases
-are published, this will install kb without Rust:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/graiz/kittybrowser/main/install.sh | sh
-```
-
-It puts a prebuilt kb in `~/.local/bin` (`KB_INSTALL_DIR` to put it
-elsewhere). Until then, or on a machine with no prebuilt kb, it builds with
-cargo, so it needs Rust too.
+Without Homebrew, see [Install](#install) for the install script and
+`cargo install`.
 
 ## Requirements
 
@@ -71,8 +63,8 @@ cargo, so it needs Rust too.
   screen or Zellij.
 - **Chrome, Chromium, Edge or Brave**, installed where kb can find it, or
   named with `KB_CHROME`.
-- **Rust** (stable, from [rustup](https://rustup.rs)) to build it, until
-  there's a prebuilt release.
+- **Rust** (stable, from [rustup](https://rustup.rs)) only to build it from
+  source; Homebrew and the install script use a prebuilt kb.
 
 `kb doctor` checks the first two. kb itself asks the terminal when it starts,
 and if it can't draw kitty graphics, says so and why instead of showing a
@@ -80,11 +72,26 @@ blank pane; `KB_FORCE=1` skips the question.
 
 ## Install
 
+Each release has a prebuilt kb for macOS and Linux, on Apple Silicon, ARM
+and Intel. Install it whichever way suits you:
+
+```sh
+brew install graiz/tap/kittybrowser     # Homebrew, on macOS or Linux
+
+curl -fsSL https://raw.githubusercontent.com/graiz/kittybrowser/main/install.sh | sh
+
+cargo install kittybrowser              # builds from crates.io; needs Rust
+```
+
+The install script puts kb in `~/.local/bin` (`KB_INSTALL_DIR` to put it
+elsewhere). Where there is no prebuilt kb, such as a Linux that uses musl,
+it builds with cargo instead, so it needs Rust there.
+
 ### macOS
 
 ```sh
-brew install --cask google-chrome                     # if you don't have Chrome
-cargo install --git https://github.com/graiz/kittybrowser   # puts kb in ~/.cargo/bin
+brew install --cask google-chrome       # if you don't have Chrome
+brew install graiz/tap/kittybrowser
 kb https://example.com
 ```
 
@@ -92,10 +99,10 @@ On a non-retina display, start it with `kb --scale 1`.
 
 ### Linux
 
-Install Chrome or Chromium from your distribution or google.com/chrome, then:
+Install Chrome or Chromium from your distribution or google.com/chrome, then
+kb with any of the ways above, and:
 
 ```sh
-cargo install --git https://github.com/graiz/kittybrowser
 kb --scale 2 https://example.com    # --scale 2 on a HiDPI screen; the default is 1
 ```
 
@@ -104,7 +111,15 @@ kb looks for `google-chrome`, `google-chrome-stable`, `chromium`,
 `KB_CHROME=/path/to/browser` for anything else. Linux builds cleanly but is
 untested, so please open an issue with what you find.
 
-### From a clone
+### From source
+
+The latest code on main, not yet released:
+
+```sh
+cargo install --git https://github.com/graiz/kittybrowser
+```
+
+Or from a clone:
 
 ```sh
 git clone https://github.com/graiz/kittybrowser
@@ -121,16 +136,20 @@ Windows). This is untested.
 
 ### Updating
 
-Run the same `cargo install` again (add `--force` if it says kb is already
-installed), or the install script if you used it. If you use the agent
-skill, run `kb skill install` afterwards so it matches the new version.
+Update the way you installed: `brew upgrade kittybrowser`, the install
+script again, or `cargo install kittybrowser` again (add `--force` if it says
+kb is already installed). To hear about new versions, watch the repository
+on GitHub for releases; the [CHANGELOG](CHANGELOG.md) says what changed. If
+you use the agent skill, run `kb skill install` afterwards so it matches the
+new version.
 
 ### Uninstalling
 
 ```sh
 kb skill remove                 # if you installed the agent skill
 kb mcp off                      # if you turned on the MCP server
-cargo uninstall kittybrowser    # or rm ~/.local/bin/kb, from a release
+brew uninstall kittybrowser     # or cargo uninstall kittybrowser,
+                                # or rm ~/.local/bin/kb from the install script
 rm -rf ~/.kittybrowser          # history, profiles and cookies
 ```
 

@@ -6,6 +6,12 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-21
+
+- The first release with prebuilt kbs for macOS and Linux, on ARM and
+  Intel: `brew install graiz/tap/kittybrowser`, the install script, or
+  `cargo install kittybrowser` from crates.io. Only `cargo install` needs
+  Rust.
 - `kb --name NAME` starts a kb that answers to `kb ctl -i NAME` and keeps
   its cookies in a profile of its own (`~/.kittybrowser/profiles/NAME`),
   whatever other kbs are running, so a site signed in to there stays signed
