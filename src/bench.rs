@@ -240,7 +240,7 @@ fn run_modes(
     let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
         ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)
     } else {
-        size::rex_cell().unwrap_or((16, 34))
+        (16, 34)
     };
     let (cols, rows) = (window.cols, window.rows.saturating_sub(1).max(1));
     let (width_px, height_px) = (cols as u32 * cell_w, rows as u32 * cell_h);

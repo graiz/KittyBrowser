@@ -238,10 +238,10 @@ default. Things to try next:
 
 `TIOCGWINSZ` gives columns, rows and, in Rex, pixel dimensions, so the cell
 size is pixels divided by cells. When the pixel fields are zero the app falls
-back to the terminal's reply to `CSI 16 t`, then `rex block call size`, then a
-guess. The app polls the window size every 100 ms rather than handling
-SIGWINCH; a new Rex pane reports 80x24 with no pixels for a moment before it
-is laid out, and the poll picks up the real size.
+back to the terminal's reply to `CSI 16 t`, then a guess. The app polls the
+window size every 100 ms rather than handling SIGWINCH; a new Rex pane
+reports 80x24 for a moment before it is laid out, and the poll picks up the
+real size.
 
 The device pixel ratio is not reported by the terminal: `--scale`, default 2
 on macOS.

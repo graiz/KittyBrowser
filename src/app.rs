@@ -193,8 +193,8 @@ struct App {
     chrome: Chrome,
     scale: f64,
     window: Window,
-    /// Cell size from a terminal query or Rex, for terminals whose window
-    /// size carries no pixels.
+    /// Cell size from the terminal's reply to `CSI 16 t`, for terminals
+    /// whose window size carries no pixels.
     reported_cell: Option<(u32, u32)>,
     pixel_mouse: bool,
     bar: AddressBar,
@@ -348,7 +348,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         chrome,
         scale: options.scale,
         window,
-        reported_cell: size::rex_cell(),
+        reported_cell: None,
         pixel_mouse: false,
         bar: AddressBar::default(),
         find: None,
