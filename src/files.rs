@@ -18,6 +18,13 @@ pub fn private_dir(dir: &Path) -> Result<(), String> {
     make_private(dir, true)
 }
 
+/// Like `private_dir`, for a folder in a directory others share, such as
+/// /tmp, where whoever put a link or a folder there first would choose
+/// where kb's private files go, or could read them: a link isn't followed.
+pub fn private_shared_dir(dir: &Path) -> Result<(), String> {
+    make_private(dir, false)
+}
+
 fn make_private(dir: &Path, follow: bool) -> Result<(), String> {
     let fail = |e: io::Error| format!("making {} private: {e}", dir.display());
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
@@ -124,6 +131,14 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
         private_dir(&link).unwrap();
         assert_eq!(mode(&elsewhere), 0o700);
+        // In a shared folder, a link isn't followed, and what it points to
+        // is left alone.
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = private_shared_dir(&link).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert_eq!(mode(&elsewhere), 0o755);
+        private_shared_dir(&base.join("shared")).unwrap();
+        assert_eq!(mode(&base.join("shared")), 0o700);
         // Nor is a folder another user made, as one could in /tmp. Root
         // owns /; as root, the check would chmod it instead.
         if unsafe { libc::geteuid() } != 0 {
