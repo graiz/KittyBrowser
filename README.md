@@ -303,6 +303,11 @@ kb's data folder, and prints what to fix.
   the protocol either.
 - **The page is blurry or tiny:** set `--scale` to your display's pixel
   ratio.
+- **Pages are slow on Apple Silicon, or a heavy one never finishes
+  loading:** check `kb doctor` for a note that kb is an Intel build. It
+  starts Chrome natively anyway, but reinstall kb for Apple Silicon:
+  `rustup target add aarch64-apple-darwin`, then
+  `cargo install --path . --target aarch64-apple-darwin`.
 - **Sites show their phone layout:** the pane is narrow. Widen it, zoom out
   with Ctrl+-, or have the agent run `kb ctl viewport 1280`.
 - **A kb you can't find:** `kb list` shows the ones running, with the pane

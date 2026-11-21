@@ -168,6 +168,14 @@ pub fn run() -> i32 {
         Ok(path) => report.ok("browser", &path.display().to_string()),
         Err(why) => report.fail("browser", &why),
     }
+    if crate::engine::chrome::translated() {
+        report.note(
+            "rosetta",
+            "this kb is an Intel build running under Rosetta; it starts Chrome natively, but for kb itself \
+             reinstall it for Apple Silicon: rustup target add aarch64-apple-darwin, then cargo install --path . \
+             --target aarch64-apple-darwin",
+        );
+    }
 
     match crate::data_dir() {
         Ok(dir) => {

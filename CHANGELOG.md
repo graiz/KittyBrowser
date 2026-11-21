@@ -32,6 +32,12 @@ Notable changes to kb. The format follows
   frees its number or name at once, and a kb that can't read the terminal
   size no longer leaves its socket behind.
 
+- An Intel build of kb on Apple Silicon starts Chrome natively. It used to
+  start it under Rosetta as well, where JavaScript ran about six times
+  slower, and a page that works hard in script could hold the page's thread
+  until kb's commands timed out. The client hints now give the machine's
+  architecture rather than kb's build's, and `kb doctor` notes an Intel
+  build.
 - Scrolling follows the trackpad: each wheel tick the terminal sends moves
   the page one row of the pane, rather than 60 CSS pixels, which made a
   trackpad several times too fast. A mouse wheel moves as many rows a notch

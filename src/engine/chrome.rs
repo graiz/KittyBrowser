@@ -330,6 +330,8 @@ fn agent_metadata(product: &str, binary: &Path) -> Value {
     let long: Vec<Value> = brands.iter().map(|b| json!({"brand": b.0, "version": b.2})).collect();
     let (platform, architecture) = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => ("macOS", "arm"),
+        // The machine's, not kb's: Chrome runs natively even when kb doesn't.
+        ("macos", _) if translated() => ("macOS", "arm"),
         ("macos", _) => ("macOS", "x86"),
         (_, "aarch64") => ("Linux", "arm"),
         _ => ("Linux", "x86"),
@@ -345,6 +347,24 @@ fn agent_metadata(product: &str, binary: &Path) -> Value {
         "model": "",
         "mobile": false,
     })
+}
+
+/// Whether kb is an Intel build running under Rosetta on Apple Silicon. A
+/// program it starts would run under Rosetta too, and Chrome's JavaScript
+/// would be compiled for Intel and then translated: many times slower, so
+/// much that pages that work hard in script never finish loading.
+#[cfg(target_os = "macos")]
+pub fn translated() -> bool {
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let name = c"sysctl.proc_translated";
+    let got = unsafe { libc::sysctlbyname(name.as_ptr(), (&raw mut value).cast(), &mut len, std::ptr::null_mut(), 0) };
+    got == 0 && value == 1
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn translated() -> bool {
+    false
 }
 
 /// The system's version, as Chrome reports it: macOS's ("26.0.1").
@@ -466,7 +486,16 @@ impl Chrome {
         let (in_fd, out_fd) = (child_in.as_raw_fd(), child_out.as_raw_fd());
 
         quiet_profile(profile);
-        let mut command = Command::new(&binary);
+        // Under Rosetta, ask for Chrome's Apple Silicon half, or its Intel
+        // one if it has no other.
+        let mut command = match translated() {
+            true => {
+                let mut arch = Command::new("/usr/bin/arch");
+                arch.args(["-arm64", "-x86_64"]).arg(&binary);
+                arch
+            }
+            false => Command::new(&binary),
+        };
         command
             .arg("--headless=new")
             .arg("--remote-debugging-pipe")
