@@ -31,9 +31,11 @@ When nobody needs to watch (a CI job, say), a headless tool is fine.
 ## Your kb, in a pane beside yours
 
 Several kbs can run at once. Each has a number and an id (`3-a7f2`); always
-pass your kb's id with `-i`. Without `-i`, commands go to the lowest-numbered
-kb, which may be someone else's; and once a kb closes, its number passes to
-the next kb to start, while its id just stops working. Never drive a kb you
+pass your kb's id with `-i`. Without `-i`, in Rex, commands go to the kb in
+your window, else in your session, and fail with a list if there are several
+there; elsewhere, or with none there, to the lowest-numbered kb, which may be
+someone else's. Once a kb closes, its number passes to the next kb to start,
+while its id just stops working. Never drive a kb you
 didn't open. If one you opened earlier in this conversation is still in
 `kb list`, reuse it.
 

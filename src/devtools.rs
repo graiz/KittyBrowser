@@ -1167,6 +1167,11 @@ impl Devtools {
                         );
                     } else if let Ok(pane) = std::env::var("REX_BLOCK") {
                         let _ = write!(rest, "\npane: {pane}");
+                        // For kb ctl to find the kb beside it when Rex can't
+                        // be asked; nothing an agent reading status needs.
+                        if let (true, Ok(session)) = (flag("listing"), std::env::var("REX_SESSION")) {
+                            let _ = write!(rest, "\nsession: {session}");
+                        }
                     }
                     if width < 600 {
                         rest.push_str(

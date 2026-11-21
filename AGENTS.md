@@ -39,6 +39,7 @@ src/devtools.rs        carries the agent commands out, and the page-side scripts
 src/cli.rs             kb ctl and kb list
 src/doctor.rs          kb doctor, and what kb says in a terminal it can't draw in
 src/mcp.rs             kb mcp
+src/rex.rs             asks Rex which window each pane is in, so kb ctl finds the kb beside it
 src/skill.rs           kb skill; the skill's text is skill/SKILL.md
 src/bench.rs           kb bench
 src/headless.rs        kb --headless: the browser without a pane, for kb ctl alone
