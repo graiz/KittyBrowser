@@ -70,8 +70,10 @@ pub fn enter() -> io::Result<()> {
     Ok(())
 }
 
-/// Undo `enter`. Safe to call more than once, or without `enter`.
+/// Undo `enter`, and remove the frames left for the terminal. Safe to call
+/// more than once, or without `enter`.
 pub fn leave() {
+    graphics::remove_frames();
     if let Some(termios) = ORIGINAL.get() {
         write(LEAVE);
         // Replies to our queries may still be on their way, when kb exits

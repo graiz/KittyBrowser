@@ -2,9 +2,10 @@
 //! the temporary directory. A page kb shows can be signed in, so its frames,
 //! screenshots, profile and the control socket are for the user alone.
 
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Make `dir`, a folder of the user's own such as ~/.kittybrowser, if it
 /// isn't there, readable only by the user, and tighten it to that if an
@@ -48,6 +49,33 @@ fn make_private(dir: &Path, follow: bool) -> Result<(), String> {
 /// of HOME's owner, the user who ran it.
 fn trusted(owner: u32, me: u32, home: Option<u32>) -> bool {
     owner == me || (me == 0 && home == Some(owner))
+}
+
+/// A new folder in the temporary directory, named `prefix` and six
+/// characters no one can guess, that only the user can open.
+pub fn private_temp_dir(prefix: &str) -> io::Result<PathBuf> {
+    let template = std::env::temp_dir().join(format!("{prefix}XXXXXX"));
+    let mut template = std::ffi::CString::new(template.into_os_string().into_vec())?.into_bytes_with_nul();
+    // mkdtemp makes it 0700, whatever the umask.
+    if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    template.pop();
+    Ok(std::ffi::OsString::from_vec(template).into())
+}
+
+/// Write `bytes` to a new file at `path` with `mode` (less the umask),
+/// failing if anything, a link included, is there already, and leaving
+/// nothing behind if the write fails.
+pub fn write_new(path: &Path, bytes: &[u8], mode: u32) -> io::Result<std::fs::File> {
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(path)?;
+    match file.write_all(bytes) {
+        Ok(()) => Ok(file),
+        Err(e) => {
+            let _ = std::fs::remove_file(path);
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

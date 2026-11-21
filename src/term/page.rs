@@ -122,9 +122,8 @@ impl PageImage {
         // screen is in no known state, so it is cleared for the frame whole.
         self.hand_to(out, Drawer::Whole);
         out.extend_from_slice(format!("\x1b[{top};1H").as_bytes());
-        let path = graphics::next_path();
-        match pixels.filter(|pixels| std::fs::write(&path, &pixels.data).is_ok()) {
-            Some(pixels) => {
+        match pixels.and_then(|pixels| graphics::write_frame(&pixels.data).ok().map(|path| (pixels, path))) {
+            Some((pixels, path)) => {
                 graphics::put_file(out, &path, &pixels, cols, rows);
                 // The terminal deletes each file once read; this covers one
                 // it didn't get to.
@@ -186,6 +185,7 @@ mod tests {
         shows(&mut image, &mut screen, &page(16, 0), Route::Layers);
         shows(&mut image, &mut screen, &page(16, 3), Route::Files);
         shows(&mut image, &mut screen, &page(16, 6), Route::Files);
+        graphics::tidy_frames();
     }
 
     #[test]

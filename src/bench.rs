@@ -329,8 +329,7 @@ fn run_modes(
                         Source::Jpeg(_) => graphics::decode_jpeg(&bytes),
                     }
                     .ok_or("couldn't decode a frame")?;
-                    let path = graphics::next_path();
-                    std::fs::write(&path, &pixels.data).map_err(|e| format!("writing {}: {e}", path.display()))?;
+                    let path = graphics::write_frame(&pixels.data).map_err(|e| format!("writing a frame: {e}"))?;
                     graphics::put_file(&mut out, &path, &pixels, cols, rows);
                 }
             }

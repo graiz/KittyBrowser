@@ -223,6 +223,8 @@ struct App {
     frame: Option<String>,
     /// Whether the terminal reads frames from temporary files.
     by_file: bool,
+    /// The file the terminal was asked whether it can read.
+    file_query: Option<std::path::PathBuf>,
     /// The page's image on the screen.
     page: PageImage,
     /// Whether frames go through the pty only whole (`KB_TRANSFER=png`).
@@ -379,6 +381,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         loading: false,
         frame: None,
         by_file: false,
+        file_query: None,
         page: Default::default(),
         png_only: false,
         zoom: 1.0,
@@ -427,7 +430,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     match std::env::var("KB_TRANSFER").as_deref() {
         Ok("png") => app.png_only = true,
         Ok("pty") => {}
-        _ => graphics::ask_about_files(),
+        _ => app.file_query = graphics::ask_about_files(),
     }
     app.chrome.hold_acks();
     app.chrome.start_screencast();
@@ -568,7 +571,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     if id == graphics::FILE_QUERY_ID {
                         app.by_file = ok;
                         // If it said no, it didn't delete the file either.
-                        let _ = std::fs::remove_file(graphics::temp_path(0));
+                        if let Some(path) = app.file_query.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
                     }
                 }
                 Msg::Term(Event::Focus(focused)) => {

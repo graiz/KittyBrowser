@@ -86,8 +86,7 @@ impl Splash {
         }
         out.extend_from_slice(b"\x1b[0m");
 
-        let path = graphics::next_path();
-        if std::fs::write(&path, &pixels.data).is_ok() {
+        if let Ok(path) = graphics::write_frame(&pixels.data) {
             out.extend_from_slice(format!("\x1b[{row};{col}H").as_bytes());
             graphics::put_image_file(out, &path, pixels, ID, width, height);
         }

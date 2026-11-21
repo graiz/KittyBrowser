@@ -103,7 +103,11 @@ There are two ways to send a frame:
 
 - **By file.** The PNG is decoded here, the raw pixels are written to a
   temporary file, and the terminal is given its name (`t=t,f=24`). The
-  terminal reads the file and deletes it. At startup kb asks whether the
+  terminal reads the file and deletes it. The files go in a folder made once
+  per run under the temporary directory (`tty-graphics-protocol-kb-XXXXXX`,
+  by `mkdtemp`), which only the user can open, so on a machine with a shared
+  `/tmp` no one else can read a frame of a signed-in page or plant a file or
+  link where kb will write one; kb removes it as it leaves the terminal. At startup kb asks whether the
   terminal will do this (`a=q` with a one-pixel file); a terminal on another
   machine can't see the file and says no.
 - **Through the pty.** The data goes inside the escapes, in 4096-byte
@@ -113,7 +117,8 @@ There are two ways to send a frame:
   the fallback when a frame can't be drawn that way.
 
 What Rex accepts, found by querying it: raw pixels directly, raw pixels with
-zlib, and raw pixels from a file in a temporary directory. It refuses PNG
+zlib, and raw pixels from a file in a temporary directory or a folder
+under it. It refuses PNG
 from a file, files outside temporary directories, and shared memory.
 
 Measured with `kb bench` in Rex on a 1372x1624 pixel pane, scrolling a
