@@ -187,7 +187,8 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
                 }
                 match request.command.as_str() {
                     "quit" => {
-                        let _ = request.reply.send(Ok(Output::Text("kb is quitting".to_owned())));
+                        let cancelled = devtools.cancel_downloads(&mut chrome);
+                        let _ = request.reply.send(Ok(Output::Text(format!("kb is quitting{cancelled}"))));
                         break;
                     }
                     "window" => {
@@ -277,6 +278,7 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
         }
     }
     socket.remove();
+    devtools.cancel_downloads(&mut chrome);
     chrome.close();
     Ok(())
 }

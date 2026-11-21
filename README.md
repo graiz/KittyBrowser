@@ -50,6 +50,8 @@ kb news.ycombinator.com
 Ctrl+/ shows the keys, Ctrl+Q quits (or the ✕ at the right of the bar, which asks first).
 A window a page opens, such as a sign-in popup, is shown over the page;
 ‹ › in the bar switch between open windows, and ✕ closes the one shown.
+Downloads go where Chrome puts them, usually `~/Downloads`, and the bar
+shows how far one has come while it runs.
 
 Without Homebrew, see [Install](#install) for the install script and
 `cargo install`.
@@ -233,7 +235,7 @@ Any program can drive a running kb with `kb ctl`:
 ```sh
 kb ctl open http://localhost:3000    # waits for the load, reports errors
 kb ctl check                         # exit 1 on console errors, failed requests or an error page
-kb ctl click 'text=Save'             # reports the errors and dialogs it causes
+kb ctl click 'text=Save'             # reports the errors, dialogs and downloads it causes
 kb ctl screenshot --out page.png
 kb ctl viewport 375x800              # a phone width; viewport reset to undo
 kb ctl outline                       # read a page: headings, then...

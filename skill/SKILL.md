@@ -133,7 +133,7 @@ kb ctl -i ID network --failed
 ```
 
 `click`, `type`, `press` and `select` answer once the page settles, with the
-errors and dialogs they caused. What comes later (after a timer or a
+errors, dialogs and downloads they caused. What comes later (after a timer or a
 request) isn't there yet, so please `wait` for it before reading.
 
 - `wait SELECTOR` alone passes as soon as the element exists, even empty;
@@ -196,6 +196,10 @@ k check --ignore optimizely.com,doubleclick.net  # third-party noise doesn't cou
   sets off are asked in the pane; while one waits, commands to its page
   fail saying so, and `status` names it.
   Leave it to the user, or answer it with `dialog accept` or `dismiss`.
+- A download is reported by the command that caused it, with the path it
+  was saved to (Chrome's downloads folder, numbered when a name repeats):
+  read the file there. One still running when the command answers shows in
+  `status`, and `console` records where it was saved when it finishes.
 - `eval` reads what no command does (an order, a count, one value).
 
 ## Reading and research

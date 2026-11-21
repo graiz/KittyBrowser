@@ -43,6 +43,14 @@ Notable changes to kb. The format follows
   errors) is printed by `kb ctl`, `kb list` and kb's errors with its control
   characters shown as �, so a page can't retitle your terminal or write its
   clipboard through them. The address, find and inspect boxes drop them.
+- Downloads are reported by the command that caused them, with where the
+  file was saved: `downloaded report.pdf (240 KB) to ~/Downloads/report.pdf`.
+  They go where Chrome would put them, numbered when a name repeats. While
+  one runs, the bar shows `Downloading 4.2 of 20 MB` and `kb ctl status`
+  says how far it has come; `kb ctl console` records each one that
+  finished. `kb ctl open` on a file to download says so rather than failing
+  with `net::ERR_ABORTED`. Quitting cancels downloads still running, so no
+  part of a file is left behind.
 
 ## 0.2.0 — 2026-11-21
 

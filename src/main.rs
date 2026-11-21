@@ -12,6 +12,7 @@ mod control;
 mod devtools;
 mod dialog;
 mod doctor;
+mod downloads;
 mod engine;
 mod files;
 mod headless;
