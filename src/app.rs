@@ -28,6 +28,9 @@ pub struct Options {
     /// Tell pages to use a dark (true) or light colour scheme, rather than
     /// following the terminal's background.
     pub dark: Option<bool>,
+    /// The name given with --name: the kb answers to it, and keeps its own
+    /// profile, rather than taking a number.
+    pub name: Option<String>,
 }
 
 /// How long a note in the bar stays.
@@ -227,8 +230,8 @@ struct App {
     /// Whether the help is shown, and where it was last drawn.
     help: bool,
     help_rect: Option<ui::Rect>,
-    /// This kb's number among those running, for `kb ctl -i`.
-    instance: u32,
+    /// This kb's id or name, for `kb ctl -i`.
+    instance: String,
     /// The logo, until the first page is ready to draw.
     splash: Option<crate::splash::Splash>,
     /// Whether a page other than the blank one has been committed, so that
@@ -275,17 +278,17 @@ pub fn run(options: Options) -> Result<(), String> {
     // Checked before the terminal is taken over, so the reason is printed
     // plainly instead of behind a blank pane.
     crate::engine::chrome::find_binary().map_err(|why| format!("{why}\nkb doctor checks your setup."))?;
+    let window = size::window().ok_or("can't read the terminal size; to run kb without a pane, use kb --headless")?;
     // Before anything is written to the terminal: a failure after that
     // leaves the terminal's replies to our queries for the shell to read.
-    let claim = control::claim()?;
-    let profile = profile(claim.instance)?;
-    let window = size::window().ok_or("can't read the terminal size")?;
+    let claim = control::claim(options.name.as_deref())?;
+    let profile = claim.profile()?;
 
     // Asked last, just before raw mode, with nothing left that can fail:
     // when the terminal answers too late for the question, kb's input
     // reader takes the replies instead of the shell.
     if std::env::var_os("KB_FORCE").is_none() && term::draws_graphics(crate::doctor::ASK_KB) == Some(false) {
-        let _ = std::fs::remove_file(&claim.socket);
+        claim.socket.remove();
         eprint!("{}", crate::doctor::no_graphics());
         // Explained already; main has nothing to add.
         return Err(String::new());
@@ -298,27 +301,16 @@ pub fn run(options: Options) -> Result<(), String> {
     }));
     let socket = claim.socket.clone();
     let result = browse(options, &profile, window, claim);
-    let _ = std::fs::remove_file(socket);
+    socket.remove();
     term::leave();
     result
 }
 
-/// The profile kb `instance` keeps cookies and site data in. Chrome won't
-/// share a profile between processes, so each kb running beside the first
-/// has its own.
-pub fn profile(instance: u32) -> Result<std::path::PathBuf, String> {
-    let profile = crate::data_dir()?.join(match instance {
-        1 => "profile".to_owned(),
-        n => format!("profile-{n}"),
-    });
-    std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
-    Ok(profile)
-}
-
 fn browse(options: Options, profile: &std::path::Path, window: Window, claim: control::Claim) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
-    let instance = claim.instance;
+    let instance = control::id().unwrap_or_default();
     let commands = tx.clone();
+    let socket = claim.socket.clone();
     claim.listen(move |request| commands.send(Msg::Control(request)).is_ok());
     let input = tx.clone();
     std::thread::spawn(move || {
@@ -560,6 +552,15 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         let _ = request.reply.send(app.set_scheme(request.args["scheme"].as_str().unwrap_or("")));
                         continue;
                     }
+                    if request.command == "window" {
+                        let (answer, event) = crate::devtools::window(&request.args, &mut app.chrome);
+                        let _ = request.reply.send(answer);
+                        if let Some(PageEvent::Shown(url)) = event {
+                            app.shown(url);
+                            redraw = true;
+                        }
+                        continue;
+                    }
                     if request.command == "viewport" {
                         // The one command about the pane rather than the page.
                         let _ = request.reply.send(app.set_viewport(request.args["size"].as_str().unwrap_or("")));
@@ -689,6 +690,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             }
         }
     };
+    socket.remove();
     app.history.save();
     app.page.close();
     app.chrome.close();

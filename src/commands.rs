@@ -14,9 +14,20 @@ pub enum Kind {
     Flag,
 }
 
+/// What an argument's value is, for the MCP tool schema. On the command
+/// line everything is a word; a list is the last positional, taking the
+/// words that are left.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Text,
+    Number,
+    List,
+}
+
 pub struct Param {
     pub name: &'static str,
     pub kind: Kind,
+    pub shape: Shape,
     pub required: bool,
     /// For an option, what its value is called in the help: `--timeout SECONDS`.
     pub value: &'static str,
@@ -30,22 +41,38 @@ pub struct Command {
 }
 
 const fn required(name: &'static str, help: &'static str) -> Param {
-    Param { name, kind: Kind::Positional, required: true, value: "", help }
+    Param { name, kind: Kind::Positional, shape: Shape::Text, required: true, value: "", help }
 }
 
 const fn optional(name: &'static str, help: &'static str) -> Param {
-    Param { name, kind: Kind::Positional, required: false, value: "", help }
+    Param { name, kind: Kind::Positional, shape: Shape::Text, required: false, value: "", help }
+}
+
+/// An optional positional that is a number.
+const fn numbered(name: &'static str, help: &'static str) -> Param {
+    Param { name, kind: Kind::Positional, shape: Shape::Number, required: false, value: "", help }
+}
+
+/// A required positional that takes the rest of the command line as a list.
+const fn list(name: &'static str, help: &'static str) -> Param {
+    Param { name, kind: Kind::Positional, shape: Shape::List, required: true, value: "", help }
 }
 
 const fn option(name: &'static str, value: &'static str, help: &'static str) -> Param {
-    Param { name, kind: Kind::Option, required: false, value, help }
+    Param { name, kind: Kind::Option, shape: Shape::Text, required: false, value, help }
+}
+
+/// An option whose value is a number.
+const fn number(name: &'static str, value: &'static str, help: &'static str) -> Param {
+    Param { name, kind: Kind::Option, shape: Shape::Number, required: false, value, help }
 }
 
 const fn flag(name: &'static str, help: &'static str) -> Param {
-    Param { name, kind: Kind::Flag, required: false, value: "", help }
+    Param { name, kind: Kind::Flag, shape: Shape::Text, required: false, value: "", help }
 }
 
-const SELECTOR: &str = "CSS selector (first match), text=Words, @N from links, or :focus";
+const SELECTOR: &str =
+    "CSS selector (first match; iframe >>> sel looks inside a frame), text=Words, @N from links, or :focus";
 
 pub const COMMANDS: &[Command] = &[
     Command {
@@ -82,6 +109,11 @@ pub const COMMANDS: &[Command] = &[
         params: &[],
     },
     Command { name: "forward", help: "Go forward one page in history.", params: &[] },
+    Command {
+        name: "window",
+        help: "List the windows open in this kb (the page, and any popup or new tab it opened), numbered, with their addresses and which one is shown; or, given a number, show that window in place of the one shown, closing none. Commands act on the window shown. To close a popup, use back on its first page.",
+        params: &[numbered("number", "the window to show, from the list")],
+    },
     Command {
         name: "quit",
         help: "Quit this kb and its browser. In a pane that ran only kb, the pane closes; a headless kb (kb --headless) stops. Cookies and sign-ins are kept in its profile.",
@@ -140,13 +172,13 @@ pub const COMMANDS: &[Command] = &[
         params: &[
             optional("selector", "CSS selector of the parts of the page to list; body for all of it"),
             option("match", "TEXT", "list only those whose text or address contains this"),
-            option("limit", "N", "list at most this many (default 60)"),
+            number("limit", "N", "list at most this many (default 60)"),
         ],
     },
     Command {
         name: "tables",
         help: "List the page's tables with their size, the heading above each, and their first row; or, given a number, print that table with its cells separated by tabs.",
-        params: &[optional("number", "which table to print, from the list"), option("limit", "N", "print at most this many rows (default 200)")],
+        params: &[numbered("number", "which table to print, from the list"), number("limit", "N", "print at most this many rows (default 200)")],
     },
     Command {
         name: "images",
@@ -156,7 +188,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "find",
         help: "Find visible text on the page: lists each place it appears with the words around it and the heading it falls under, and scrolls the window to the first. Not case sensitive.",
-        params: &[required("text", "the words to look for"), option("limit", "N", "show at most this many places (default 10)")],
+        params: &[required("text", "the words to look for"), number("limit", "N", "show at most this many places (default 10)")],
     },
     Command {
         name: "scheme",
@@ -234,6 +266,14 @@ pub const COMMANDS: &[Command] = &[
         params: &[required("selector", SELECTOR), required("option", "the option's value or label")],
     },
     Command {
+        name: "upload",
+        help: "Choose files for a file field, as a user would in the file chooser. Given the <input type=file> itself (it may be hidden), sets its files; given anything else, such as a \"Select video\" button or a drop zone, clicks it and answers the file chooser it opens. The page gets input and change events, as when a user chooses. Answers with each file's name and size as the page sees them, and any console errors it caused. Fails if a file doesn't exist, if several are given for a field that takes one, or if the click opens no file chooser. The files are read from this computer and sent to the page, so choose only files meant for it.",
+        params: &[
+            required("selector", SELECTOR),
+            list("files", "paths of the files to choose; relative ones are from the current directory"),
+        ],
+    },
+    Command {
         name: "press",
         help: "Press a key. It goes to whatever has focus (click or type into an element first). Keys: Enter, Tab, Escape, Backspace, Delete, Space, ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Home, End, PageUp, PageDown, F1 to F12, or one character. Modifiers: Ctrl+, Alt+, Shift+, as in Ctrl+a or Shift+Tab. There is no Cmd or Meta; Ctrl+a selects all. PageDown, PageUp, Home and End scroll the page when no field has focus; arrow keys don't change a <select> (use select).",
         params: &[required("key", "key name")],
@@ -245,9 +285,9 @@ pub const COMMANDS: &[Command] = &[
             required("selector", "CSS selector; any match counts"),
             option("text", "TEXT", "wait until a matching element's text (or a field's value) contains this"),
             flag("gone", "wait until nothing matches the selector"),
-            option("count", "N", "wait until at least N elements match"),
+            number("count", "N", "wait until at least N elements match"),
             flag("visible", "wait until a matching element is shown, not merely present"),
-            option("timeout", "SECONDS", "how long to wait before failing (default 10, at most 60)"),
+            number("timeout", "SECONDS", "how long to wait before failing (default 10, at most 60; to wait longer, wait again)"),
         ],
     },
 ];
@@ -267,6 +307,7 @@ impl Command {
         let mut text = self.name.to_owned();
         for param in self.params {
             let shown = match param.kind {
+                Kind::Positional if param.shape == Shape::List => format!("<{}>...", param.name),
                 Kind::Positional => format!("<{}>", param.name),
                 Kind::Option => format!("--{} {}", param.name, param.value),
                 Kind::Flag => format!("--{}", param.name),
@@ -281,6 +322,7 @@ impl Command {
         let mut text = format!("usage: kb ctl {}\n\n{}\n", self.synopsis(), self.help);
         for param in self.params {
             let shown = match param.kind {
+                Kind::Positional if param.shape == Shape::List => format!("<{}>...", param.name),
                 Kind::Positional => format!("<{}>", param.name),
                 Kind::Option => format!("--{} {}", param.name, param.value),
                 Kind::Flag => format!("--{}", param.name),
@@ -323,6 +365,10 @@ impl Command {
         for (index, param) in slots.iter().enumerate() {
             let last = index + 1 == slots.len();
             let value = match positional.get(index..) {
+                Some(words @ [_, ..]) if param.shape == Shape::List => {
+                    args.insert(param.name.to_owned(), json!(words));
+                    continue;
+                }
                 Some([_, rest @ ..]) if last && !rest.is_empty() => positional[index..].join(" "),
                 Some([first, ..]) => (*first).to_owned(),
                 _ if param.required => {
@@ -342,13 +388,53 @@ impl Command {
         Ok(Value::Object(args))
     }
 
+    /// Make the paths in the command's file lists absolute, and check each
+    /// is a file: kb's working directory isn't the caller's. Over MCP a
+    /// single path may come as a string rather than a list.
+    pub fn resolve_files(&self, args: &mut Value) -> Result<(), String> {
+        for param in self.params.iter().filter(|param| param.shape == Shape::List) {
+            let paths: Vec<String> = match args[param.name].take() {
+                Value::Null => continue,
+                Value::String(path) => vec![path],
+                Value::Array(paths) => paths
+                    .into_iter()
+                    .map(|path| path.as_str().map(str::to_owned))
+                    .collect::<Option<_>>()
+                    .ok_or(format!("{} takes a list of paths, as strings", param.name))?,
+                _ => return Err(format!("{} takes a list of paths", param.name)),
+            };
+            if paths.is_empty() {
+                return Err(format!("{} needs at least one path", param.name));
+            }
+            let mut absolute = Vec::new();
+            for path in paths {
+                let full = std::fs::canonicalize(&path).map_err(|_| {
+                    format!("no such file: {}", std::env::current_dir().unwrap_or_default().join(&path).display())
+                })?;
+                if !full.is_file() {
+                    return Err(format!("{} is a folder, not a file", full.display()));
+                }
+                absolute.push(full.display().to_string());
+            }
+            args[param.name] = json!(absolute);
+        }
+        Ok(())
+    }
+
     /// The command as an MCP tool definition.
     pub fn tool(&self) -> Value {
         let mut properties = Map::new();
         let mut required = Vec::new();
         for param in self.params.iter().filter(|param| param.name != OUT) {
-            let kind = if param.kind == Kind::Flag { "boolean" } else { "string" };
-            properties.insert(param.name.to_owned(), json!({"type": kind, "description": param.help}));
+            let schema = match (param.kind, param.shape) {
+                (Kind::Flag, _) => json!({"type": "boolean"}),
+                (_, Shape::Number) => json!({"type": "number"}),
+                (_, Shape::List) => json!({"type": "array", "items": {"type": "string"}}),
+                (_, Shape::Text) => json!({"type": "string"}),
+            };
+            let mut schema = schema;
+            schema["description"] = json!(param.help);
+            properties.insert(param.name.to_owned(), schema);
             if param.required {
                 required.push(param.name);
             }
@@ -391,6 +477,7 @@ mod tests {
     #[test]
     fn missing_and_extra_arguments() {
         assert!(parse("open").unwrap_err().contains("needs <url>"));
+        assert!(parse("upload #file").unwrap_err().contains("needs <files>"));
         assert!(parse("type #name").unwrap_err().contains("needs <text>"));
         assert!(parse("wait #x --timeout").unwrap_err().contains("needs a value"));
         assert!(parse("reload now").unwrap_err().contains("takes no arguments"));
@@ -412,7 +499,31 @@ mod tests {
         assert!(shot.tool()["inputSchema"]["properties"].get("out").is_none());
         let tool = wait.tool();
         assert_eq!(tool["inputSchema"]["required"], json!(["selector"]));
-        assert_eq!(tool["inputSchema"]["properties"]["timeout"]["type"], "string");
+        assert_eq!(tool["inputSchema"]["properties"]["timeout"]["type"], "number");
+        assert_eq!(tool["inputSchema"]["properties"]["text"]["type"], "string");
         assert_eq!(find("console").unwrap().tool()["inputSchema"]["properties"]["errors"]["type"], "boolean");
+    }
+
+    #[test]
+    fn files_are_a_list() {
+        assert_eq!(parse("upload #f a.mp4 b c").unwrap(), json!({"selector": "#f", "files": ["a.mp4", "b", "c"]}));
+        let upload = find("upload").unwrap().tool();
+        assert_eq!(upload["inputSchema"]["properties"]["files"]["type"], "array");
+        assert_eq!(upload["inputSchema"]["required"], json!(["selector", "files"]));
+    }
+
+    #[test]
+    fn file_paths_are_made_absolute_and_checked() {
+        let upload = find("upload").unwrap();
+        let here = std::env::current_dir().unwrap();
+        let mut args = json!({"selector": "#f", "files": "Cargo.toml"});
+        upload.resolve_files(&mut args).unwrap();
+        assert_eq!(args["files"], json!([here.join("Cargo.toml").canonicalize().unwrap().display().to_string()]));
+        let mut missing = json!({"selector": "#f", "files": ["Cargo.toml", "nothere.mp4"]});
+        assert!(upload.resolve_files(&mut missing).unwrap_err().starts_with("no such file: "));
+        let mut folder = json!({"selector": "#f", "files": ["src"]});
+        assert!(upload.resolve_files(&mut folder).unwrap_err().contains("is a folder"));
+        let mut none = json!({"selector": "#f", "files": []});
+        assert!(upload.resolve_files(&mut none).is_err());
     }
 }

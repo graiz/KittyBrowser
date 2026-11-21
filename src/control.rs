@@ -7,7 +7,7 @@
 
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -43,18 +43,95 @@ fn instance_socket(n: u32) -> Result<PathBuf, String> {
     Ok(crate::data_dir()?.join(name))
 }
 
-/// The instance asked for with `kb ctl -i N` or KB_INSTANCE, if any: a
-/// number, or an id (`3-a7f2`), which names one run of that kb only.
-fn chosen_instance() -> Result<Option<(u32, Option<String>)>, String> {
+/// The socket of the kb started with `--name NAME`.
+fn named_socket(name: &str) -> Result<PathBuf, String> {
+    Ok(crate::data_dir()?.join(format!("kb-{name}.sock")))
+}
+
+/// Whether `name` can name a kb: it becomes part of a file name, and must
+/// not look like a number or an id, which start with a digit.
+pub fn check_name(name: &str) -> Result<(), String> {
+    let fits = name.len() <= 32
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    match fits {
+        true => Ok(()),
+        false => Err(format!(
+            "{name:?} can't name a kb: use up to 32 lower-case letters, digits, - and _, starting with a letter"
+        )),
+    }
+}
+
+/// Which kb a client means.
+#[derive(Debug, PartialEq)]
+enum Chosen {
+    /// A number, and an id (`3-a7f2`) if given, which names one run of that
+    /// kb only.
+    Number(u32, Option<String>),
+    /// A kb started with `--name`.
+    Name(String),
+}
+
+/// The kb asked for with `kb ctl -i N|ID|NAME` or KB_INSTANCE, if any.
+fn chosen_instance() -> Result<Option<Chosen>, String> {
     let Ok(text) = std::env::var("KB_INSTANCE") else { return Ok(None) };
+    choose(&text).map(Some)
+}
+
+fn choose(text: &str) -> Result<Chosen, String> {
+    if check_name(text).is_ok() {
+        return Ok(Chosen::Name(text.to_owned()));
+    }
     let (number, id) = match text.split_once('-') {
-        Some((number, _)) => (number, Some(text.clone())),
-        None => (text.as_str(), None),
+        Some((number, _)) => (number, Some(text.to_owned())),
+        None => (text, None),
     };
     match number.parse::<u32>() {
-        Ok(n) if (1..=MAX_INSTANCES).contains(&n) => Ok(Some((n, id))),
-        _ => Err(format!("{text:?} isn't a kb's number or id; kb list shows the ones running")),
+        Ok(n) if (1..=MAX_INSTANCES).contains(&n) => Ok(Chosen::Number(n, id)),
+        _ => Err(format!("{text:?} isn't a kb's number, id or name; kb list shows the ones running")),
     }
+}
+
+/// The longest path a Unix socket can have, less its terminating zero.
+fn longest_socket_path() -> usize {
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_path.len() - 1
+}
+
+/// The socket a kb answers on. It is removed as the kb quits, before
+/// Chrome has closed, so that a kb started meanwhile can take its place;
+/// and then only while it is still this kb's.
+#[derive(Clone, Debug)]
+pub struct Socket {
+    path: PathBuf,
+    inode: u64,
+}
+
+impl Socket {
+    pub fn remove(&self) {
+        if std::fs::metadata(&self.path).is_ok_and(|file| file.ino() == self.inode) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Listen on `socket`, readable only by the user.
+fn bind(socket: &std::path::Path) -> Result<(UnixListener, Socket), String> {
+    let length = socket.as_os_str().len();
+    if length > longest_socket_path() {
+        return Err(format!(
+            "kb's socket would be {}, which at {length} bytes is longer than a Unix socket's path can be ({}); \
+             run kb with a shorter HOME",
+            socket.display(),
+            longest_socket_path()
+        ));
+    }
+    // Left behind by a kb that didn't exit cleanly.
+    let _ = std::fs::remove_file(socket);
+    let listener = UnixListener::bind(socket).map_err(|e| format!("listening on {}: {e}", socket.display()))?;
+    let _ = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600));
+    let inode = std::fs::metadata(socket).map_err(|e| format!("listening on {}: {e}", socket.display()))?.ino();
+    Ok((listener, Socket { path: socket.to_owned(), inode }))
 }
 
 /// A name for one run of a kb, which unlike its number the next kb to start
@@ -69,46 +146,66 @@ pub fn id() -> Option<String> {
     std::env::var("KB_ID").ok()
 }
 
-/// A running kb's place among the others: its number, and the socket it
-/// answers on.
+/// A running kb's place among the others: its number or name, and the
+/// socket it answers on.
 pub struct Claim {
-    /// 1 for the first kb running, 2 for one started beside it, and so on.
-    pub instance: u32,
-    pub socket: PathBuf,
+    /// The number of a kb started without a name: 1 for the first kb
+    /// running, 2 for one started beside it, and so on.
+    instance: Option<u32>,
+    name: Option<String>,
+    pub socket: Socket,
     listener: UnixListener,
 }
 
-/// Take the lowest instance number no running kb holds, and its socket.
-pub fn claim() -> Result<Claim, String> {
+/// Take the socket of the kb named `name`, or without one, the lowest
+/// instance number no running kb holds.
+pub fn claim(name: Option<&str>) -> Result<Claim, String> {
     // Held until this returns, so two kbs starting together can't both
-    // take the same number.
+    // take the same number or name.
     let lock = std::fs::File::create(crate::data_dir()?.join("kb.lock")).map_err(|e| format!("locking: {e}"))?;
     unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
 
-    let fixed = std::env::var_os("KB_SOCKET").map(PathBuf::from);
-    let candidates: Vec<(u32, PathBuf)> = match fixed {
-        Some(path) => vec![(1, path)],
-        None => (1..=MAX_INSTANCES).map(|n| Ok((n, instance_socket(n)?))).collect::<Result<_, String>>()?,
-    };
-    for (instance, socket) in candidates {
+    if let Some(name) = name {
+        check_name(name)?;
+        let socket = named_socket(name)?;
+        if UnixStream::connect(&socket).is_ok() {
+            return Err(format!("a kb named {name} is already running; kb ctl -i {name} quit stops it"));
+        }
+        let (listener, socket) = bind(&socket)?;
+        // Read back by status, from this process only. A name is its own
+        // id: no other kb can take it while this one runs.
+        std::env::set_var("KB_ID", name);
+        return Ok(Claim { instance: None, name: Some(name.to_owned()), socket, listener });
+    }
+    for instance in 1..=MAX_INSTANCES {
+        let socket = instance_socket(instance)?;
         if UnixStream::connect(&socket).is_ok() {
             continue;
         }
-        // Left behind by a kb that didn't exit cleanly.
-        let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).map_err(|e| format!("listening on {}: {e}", socket.display()))?;
-        let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
-        // Read back by status, from this process only.
+        let (listener, socket) = bind(&socket)?;
         std::env::set_var("KB_ID", new_id(instance));
-        return Ok(Claim { instance, socket, listener });
+        return Ok(Claim { instance: Some(instance), name: None, socket, listener });
     }
-    Err(match std::env::var_os("KB_SOCKET") {
-        Some(_) => "another kb is already using the socket named by KB_SOCKET".to_owned(),
-        None => format!("{MAX_INSTANCES} kbs are already running; quit one first"),
-    })
+    Err(format!("{MAX_INSTANCES} kbs are already running; quit one first"))
 }
 
 impl Claim {
+    /// The profile this kb keeps cookies and site data in. Chrome won't
+    /// share a profile between processes, so each kb running beside the
+    /// first has its own, and a named kb always has the same one. It holds
+    /// live sign-ins, so only the user can read it.
+    pub fn profile(&self) -> Result<PathBuf, String> {
+        let dir = crate::data_dir()?;
+        let profile = match (&self.name, self.instance) {
+            (Some(name), _) => dir.join("profiles").join(name),
+            (None, Some(1) | None) => dir.join("profile"),
+            (None, Some(n)) => dir.join(format!("profile-{n}")),
+        };
+        std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
+        let _ = std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700));
+        Ok(profile)
+    }
+
     /// Start accepting clients. Each request is handed to `deliver`, which
     /// returns false once the app has gone.
     pub fn listen(self, deliver: impl Fn(Request) -> bool + Send + Clone + 'static) {
@@ -123,14 +220,16 @@ impl Claim {
     }
 }
 
-/// Connect to the kb that commands are meant for: the one named by
-/// KB_SOCKET or KB_INSTANCE, else the lowest-numbered one running.
+/// Connect to the kb that commands are meant for: the one KB_INSTANCE
+/// names, else the lowest-numbered one running.
 fn connect() -> Result<UnixStream, String> {
-    if let Some(path) = std::env::var_os("KB_SOCKET") {
-        return UnixStream::connect(path).map_err(|_| NOT_RUNNING.to_owned());
+    let gone = |name: &str| format!("kb {name} isn't running; kb list shows the ones that are");
+    if let Some(Chosen::Name(name)) = chosen_instance()? {
+        return UnixStream::connect(named_socket(&name)?).map_err(|_| {
+            format!("{}; start it with: kb --headless --name {name} [URL], or kb --name {name} in a pane", gone(&name))
+        });
     }
-    if let Some((n, id)) = chosen_instance()? {
-        let gone = |name: &str| format!("kb {name} isn't running; kb list shows the ones that are");
+    if let Some(Chosen::Number(n, id)) = chosen_instance()? {
         let socket = instance_socket(n)?;
         if let Some(id) = id {
             // The number may have passed to a kb started since: only the
@@ -153,11 +252,46 @@ fn connect() -> Result<UnixStream, String> {
     Err(NOT_RUNNING.to_owned())
 }
 
-/// The instance numbers of the kbs running now.
-pub fn running() -> Vec<u32> {
-    (1..=MAX_INSTANCES)
+/// The kbs running now, as `kb ctl -i` takes them: the numbered ones in
+/// order, then the named ones by name.
+pub fn running() -> Vec<String> {
+    let mut found: Vec<String> = (1..=MAX_INSTANCES)
         .filter(|n| instance_socket(*n).is_ok_and(|socket| UnixStream::connect(socket).is_ok()))
-        .collect()
+        .map(|n| n.to_string())
+        .collect();
+    let mut names: Vec<String> = crate::data_dir()
+        .ok()
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.file_name().into_string().ok()?;
+            let name = file.strip_prefix("kb-")?.strip_suffix(".sock")?.to_owned();
+            check_name(&name).ok()?;
+            UnixStream::connect(entry.path()).is_ok().then_some(name)
+        })
+        .collect();
+    names.sort();
+    found.append(&mut names);
+    found
+}
+
+const STALLED: &str = "kb dropped the command unanswered: Chrome didn't answer within 30 s, or kb was quitting. \
+     The page may be stuck in a script (try kb ctl reload), or Chrome itself stalled; if every command does this, \
+     quit kb and start it again, and run kb doctor";
+
+/// A request's arguments as the commands read them: numbers as the words
+/// `kb ctl` would send. MCP clients send `{"timeout": 30}`.
+fn words(mut args: Value) -> Value {
+    if let Some(args) = args.as_object_mut() {
+        for value in args.values_mut() {
+            if let Value::Number(number) = value {
+                *value = json!(number.to_string());
+            }
+        }
+    }
+    args
 }
 
 fn serve(mut stream: UnixStream, deliver: impl Fn(Request) -> bool) -> io::Result<()> {
@@ -167,14 +301,17 @@ fn serve(mut stream: UnixStream, deliver: impl Fn(Request) -> bool) -> io::Resul
             Ok(mut request) => {
                 let (reply, answer) = mpsc::channel();
                 let command = request["command"].as_str().unwrap_or("").to_owned();
-                if !deliver(Request { command, args: request["args"].take(), reply }) {
+                let args = words(request["args"].take());
+                if !deliver(Request { command, args, reply }) {
                     return Ok(());
                 }
                 match answer.recv_timeout(REPLY_TIMEOUT) {
                     Ok(Ok(Output::Text(text))) => json!({"ok": true, "text": text}),
                     Ok(Ok(Output::Image(png))) => json!({"ok": true, "image": png}),
                     Ok(Err(error)) => json!({"ok": false, "error": error}),
-                    Err(_) => json!({"ok": false, "error": "kb did not answer in time"}),
+                    // The command was dropped unanswered: Chrome never replied.
+                    Err(mpsc::RecvTimeoutError::Disconnected) => json!({"ok": false, "error": STALLED}),
+                    Err(mpsc::RecvTimeoutError::Timeout) => json!({"ok": false, "error": "kb did not answer in time"}),
                 }
             }
             Err(error) => json!({"ok": false, "error": format!("bad request: {error}")}),
@@ -199,5 +336,38 @@ fn exchange(mut stream: UnixStream, command: &str, args: Value) -> Result<Output
         (Value::String(text), _) => Ok(Output::Text(text)),
         (_, Value::String(png)) => Ok(Output::Image(png)),
         _ => Err(response["error"].as_str().unwrap_or("kb sent an empty answer").to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_numbers_and_ids() {
+        assert_eq!(choose("2"), Ok(Chosen::Number(2, None)));
+        assert_eq!(choose("3-a7f2"), Ok(Chosen::Number(3, Some("3-a7f2".to_owned()))));
+        assert_eq!(choose("posting"), Ok(Chosen::Name("posting".to_owned())));
+        assert_eq!(choose("tik-tok_2"), Ok(Chosen::Name("tik-tok_2".to_owned())));
+        assert!(choose("0").is_err());
+        assert!(choose("99").is_err());
+        assert!(choose("Posting").is_err());
+        assert!(choose("").is_err());
+        assert!(check_name("2fast").is_err());
+        assert!(check_name("has space").is_err());
+        assert!(check_name("../up").is_err());
+        assert!(check_name(&"a".repeat(33)).is_err());
+    }
+
+    #[test]
+    fn numbers_become_words() {
+        let args = words(json!({"timeout": 2, "count": 1.5, "text": "done", "full": true}));
+        assert_eq!(args, json!({"timeout": "2", "count": "1.5", "text": "done", "full": true}));
+    }
+
+    #[test]
+    fn long_socket_paths_are_refused_plainly() {
+        let long = std::env::temp_dir().join("x".repeat(120)).join("kb.sock");
+        assert!(bind(&long).unwrap_err().contains("longer than a Unix socket's path can be"));
     }
 }

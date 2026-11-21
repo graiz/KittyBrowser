@@ -4,9 +4,9 @@
 //!
 //! `kb --headless URL` starts a copy of itself in the background, in a
 //! session of its own so it outlives the shell that started it, and prints
-//! the new kb's number once it answers `kb ctl`. `kb ctl -i N quit` stops it.
+//! the new kb's id once it answers `kb ctl`. `kb ctl -i ID quit` stops it.
 //! Nobody sees one that is forgotten, so it also quits by itself after
-//! `idle()` without a command.
+//! `idle()` without a command, unless told never to.
 
 use crate::app::Options;
 use crate::control::{self, Output, Request};
@@ -26,10 +26,28 @@ const CHILD: &str = "KB_HEADLESS";
 const VIEWPORT: (u32, u32) = (1280, 800);
 
 /// How long a headless kb waits for a command before quitting by itself:
-/// ten minutes, or KB_HEADLESS_IDLE seconds.
-pub fn idle() -> Duration {
-    let seconds = std::env::var("KB_HEADLESS_IDLE").ok().and_then(|s| s.parse().ok());
-    Duration::from_secs(seconds.unwrap_or(10 * 60))
+/// ten minutes, or KB_HEADLESS_IDLE seconds, where 0 means it never does,
+/// for a kb kept running as a service.
+pub fn idle() -> Option<Duration> {
+    idle_from(std::env::var("KB_HEADLESS_IDLE").ok().as_deref())
+}
+
+fn idle_from(setting: Option<&str>) -> Option<Duration> {
+    match setting.and_then(|s| s.trim().parse::<u64>().ok()) {
+        Some(0) => None,
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+        None => Some(Duration::from_secs(10 * 60)),
+    }
+}
+
+/// When a headless kb quits by itself, in words: "it quits after 10
+/// minutes without a command".
+pub fn idle_note() -> String {
+    match idle().map(|idle| idle.as_secs()) {
+        None => "it runs until told to quit, as KB_HEADLESS_IDLE=0 asks".to_owned(),
+        Some(seconds) if seconds % 60 == 0 => format!("it quits after {} minutes without a command", seconds / 60),
+        Some(seconds) => format!("it quits after {seconds} seconds without a command"),
+    }
 }
 
 /// How long the starting kb waits for the first page to load before
@@ -39,10 +57,10 @@ const FIRST_LOAD: Duration = Duration::from_secs(15);
 /// How often waits are checked, as in a pane.
 const TICK: Duration = Duration::from_millis(100);
 
-/// What the starting kb is told this one is called: its id, which no later
-/// kb takes.
-fn ready_name(instance: u32) -> String {
-    crate::control::id().unwrap_or_else(|| instance.to_string())
+/// What the starting kb is told this one is called: its id or name, which
+/// no other kb takes while it runs.
+fn ready_name() -> String {
+    crate::control::id().unwrap_or_default()
 }
 
 /// Whether this kb runs headless: `status` says so in place of a pane.
@@ -50,7 +68,7 @@ pub fn running() -> bool {
     std::env::var_os(CHILD).is_some()
 }
 
-/// Start a headless kb in the background and print its number.
+/// Start a headless kb in the background and print its id.
 pub fn start(args: &[String]) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("finding kb itself: {e}"))?;
     let mut command = Command::new(exe);
@@ -75,8 +93,9 @@ pub fn start(args: &[String]) -> Result<(), String> {
     let _ = BufReader::new(child.stdout.take().ok_or("no output from kb")?).read_line(&mut first);
     let mut words = first.split_whitespace();
     let name = words.next().unwrap_or("").to_owned();
-    match name.split('-').next().unwrap_or("").parse::<u32>() {
-        Ok(_) => {
+    // It says nothing on its output unless it started.
+    match name.is_empty() {
+        false => {
             println!("kb {name}, headless");
             if words.next() == Some("loading") {
                 println!(
@@ -84,14 +103,10 @@ pub fn start(args: &[String]) -> Result<(), String> {
                     FIRST_LOAD.as_secs()
                 );
             }
-            println!(
-                "kb ctl -i {name} ... drives it, and kb ctl -i {name} quit stops it (it stops by itself after {} \
-                 minutes without a command)",
-                idle().as_secs() / 60
-            );
+            println!("kb ctl -i {name} ... drives it, and kb ctl -i {name} quit stops it ({})", idle_note());
             Ok(())
         }
-        Err(_) => {
+        true => {
             let mut why = String::new();
             if let Some(stderr) = child.stderr.take() {
                 let _ = BufReader::new(stderr).read_line(&mut why);
@@ -109,22 +124,20 @@ enum Msg {
     ChromeClosed,
 }
 
-/// Run the browser, in the background copy. Prints the kb's number once it
+/// Run the browser, in the background copy. Prints the kb's id once it
 /// answers `kb ctl`.
 pub fn run(options: Options) -> Result<(), String> {
     crate::engine::chrome::find_binary()?;
-    let claim = control::claim()?;
-    let instance = claim.instance;
+    let claim = control::claim(options.name.as_deref())?;
     let socket = claim.socket.clone();
-    let profile = crate::app::profile(instance)?;
+    let profile = claim.profile()?;
     let result = browse(options, &profile, claim);
-    let _ = std::fs::remove_file(socket);
+    socket.remove();
     result
 }
 
 fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
-    let instance = claim.instance;
     let (chrome, mut receiver) = Chrome::launch(profile, options.scale, options.devtools)?;
     let mut chrome = chrome;
     let messages = tx.clone();
@@ -136,6 +149,7 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
         }
         let _ = messages.send(Msg::ChromeClosed);
     });
+    let socket = claim.socket.clone();
     claim.listen(move |request| tx.send(Msg::Control(request)).is_ok());
 
     let mut viewport = VIEWPORT;
@@ -155,14 +169,14 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
     let started = std::time::Instant::now();
     let mut announced = address.is_none();
     if announced {
-        println!("{}", ready_name(instance));
+        println!("{}", ready_name());
     }
     let mut seen_loading = false;
 
     let idle = idle();
     let mut last_command = std::time::Instant::now();
     loop {
-        if last_command.elapsed() > idle {
+        if idle.is_some_and(|idle| last_command.elapsed() > idle) {
             break;
         }
         match rx.recv_timeout(TICK) {
@@ -175,6 +189,14 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
                     "quit" => {
                         let _ = request.reply.send(Ok(Output::Text("kb is quitting".to_owned())));
                         break;
+                    }
+                    "window" => {
+                        let (answer, event) = crate::devtools::window(&request.args, &mut chrome);
+                        let _ = request.reply.send(answer);
+                        if let Some(PageEvent::Shown(now)) = event {
+                            url = if now == "about:blank" { String::new() } else { now };
+                            loading = false;
+                        }
                     }
                     "viewport" => {
                         let size = request.args["size"].as_str().unwrap_or("");
@@ -235,11 +257,23 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
             Err(RecvTimeoutError::Disconnected) => break,
         }
         devtools.tick(&mut chrome);
+        if !announced && !seen_loading && started.elapsed() > FIRST_LOAD {
+            // Not slow but stuck: Chrome never began to load the page, and
+            // every command would wait on it in vain.
+            chrome.close();
+            return Err(format!(
+                "Chrome didn't start loading {} within {} s, so kb stopped. On macOS, Chrome is usually waiting \
+                 for the keychain, as when HOME isn't the user's own; see Troubleshooting in kb's README",
+                address.as_deref().unwrap_or(""),
+                FIRST_LOAD.as_secs()
+            ));
+        }
         if !announced && ((seen_loading && !loading) || started.elapsed() > FIRST_LOAD) {
             announced = true;
-            println!("{}{}", ready_name(instance), if loading || !seen_loading { " loading" } else { "" });
+            println!("{}{}", ready_name(), if loading { " loading" } else { "" });
         }
     }
+    socket.remove();
     chrome.close();
     Ok(())
 }
@@ -264,6 +298,15 @@ fn set_viewport(viewport: &mut (u32, u32), size: &str) -> Result<(u32, u32), Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn idle_times() {
+        use std::time::Duration;
+        assert_eq!(super::idle_from(None), Some(Duration::from_secs(600)));
+        assert_eq!(super::idle_from(Some("90")), Some(Duration::from_secs(90)));
+        assert_eq!(super::idle_from(Some("0")), None);
+        assert_eq!(super::idle_from(Some("soon")), Some(Duration::from_secs(600)));
+    }
+
     #[test]
     fn viewports() {
         let mut viewport = super::VIEWPORT;
