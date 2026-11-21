@@ -184,6 +184,9 @@ change at once.
 - **Several kbs** can run at once, one per pane, and `kb list` numbers them.
   Chrome won't share a profile, so the second and later ones have their own
   cookies (`profile-2`, ...); history is shared.
+- **A named kb**, `kb --name work`, answers to `kb ctl -i work` and always
+  keeps its cookies in `~/.kittybrowser/profiles/work`, however many other
+  kbs are running: sign in there once and it stays signed in.
 - **Copying** goes through the terminal (OSC 52), so it reaches your
   clipboard even over SSH. It catches what pages copy themselves, such as a
   code block's copy button.
@@ -223,6 +226,12 @@ closed), `kb --headless URL` runs the same browser in the background
 without a pane and prints its id; `kb ctl -i ID quit` stops it, and it
 stops by itself after ten minutes without a command.
 
+For a browser that runs unattended, as a service or for a scheduled agent,
+give it a name: `kb --headless --name bot URL` keeps its own profile, so a
+site signed in to once stays signed in, and never touches your own kbs.
+`KB_HEADLESS_IDLE=0` keeps it running until `kb ctl -i bot quit`. To sign
+in by hand first, run `kb --name bot` in a pane, sign in, and quit it.
+
 `kb ctl --help` lists every command and `kb ctl <command> --help` describes
 one:
 
@@ -230,24 +239,30 @@ one:
 - **Reading:** outline, text (the main content, an element, or
   `--section HEADING`), find, links, tables, images, html, screenshot
   (`--size small|normal|sharp|WIDTH`).
-- **Acting:** click (`--double`, `--at X,Y`), hover, type, select, press,
-  scroll, wait, dialog, throttle, scheme (dark or light mode).
+- **Acting:** click (`--double`, `--at X,Y`), hover, type, select, upload
+  (files for a file field, or the chooser a button opens), press, scroll,
+  wait, dialog, window (list a page's popups and switch between them),
+  throttle, scheme (dark or light mode).
 - **Debugging:** console, network, eval, style (`--why` explains which CSS
   rule won), box, listeners, storage.
 
-Selectors are CSS (reaching into shadow DOM), `text=Some words`, `@N` from
+Selectors are CSS (reaching into shadow DOM, and with `iframe >>> sel`
+into a frame from the same site), `text=Some words`, `@N` from
 `kb ctl links`, or `:focus`. With several kbs running, pick one with
-`kb ctl -i N` (its number in `kb list`) or `-i ID` (its id, such as `3-a7f2`,
-which unlike the number isn't reused by a kb started later).
+`kb ctl -i N` (its number in `kb list`), `-i ID` (its id, such as `3-a7f2`,
+which unlike the number isn't reused by a kb started later), or `-i NAME`.
 
 The same commands are available as an MCP server, which is off until you turn
 it on: `kb mcp on` (it prints how to register it with Claude Code), `kb mcp
-off`, `kb mcp status`.
+off`, `kb mcp status`. `kb mcp serve -i NAME` drives only the kb with that
+name, so an agent given it can't reach the kbs in your panes.
 
 **Security:** kb listens on a socket in `~/.kittybrowser` that only your user
 can open. Anything running as you can use it to run JavaScript in pages you
 are logged in to in kb. Such a program could already read your files, but
-it's worth knowing before you turn on the MCP server. See
+it's worth knowing before you turn on the MCP server. `upload` sends files
+from your computer to the page, so an agent driving kb can send any file
+you can read. See
 [SECURITY.md](.github/SECURITY.md).
 
 ## Configuration
@@ -256,6 +271,7 @@ it's worth knowing before you turn on the MCP server. See
 | --- | --- |
 | `--scale N` | Device pixels per CSS pixel: 2 by default on macOS, 1 elsewhere |
 | `--dark`, `--light` | The colour scheme pages are told you prefer; by default, the terminal's |
+| `--name NAME` | Answer to `kb ctl -i NAME` and keep a profile of its own, `~/.kittybrowser/profiles/NAME` |
 | `--devtools` | Serve Chrome DevTools on a port of 127.0.0.1, for F12 (any program on this machine can then reach the browser) |
 | `~/.kittybrowser/keys` | Key bindings; `kb keys` shows the format and what's bound |
 | `KB_CHROME` | The browser to run, if kb doesn't find one |
@@ -263,7 +279,7 @@ it's worth knowing before you turn on the MCP server. See
 | `KB_TRANSFER=pty` | Always send frames through the terminal, never by file |
 | `KB_TRANSFER=png` | Through the terminal, and each frame whole as a PNG: for a terminal that shows kb's page broken over ssh |
 | `KB_FORCE` | Start without asking the terminal whether it draws kitty graphics |
-| `KB_HEADLESS_IDLE` | Seconds a headless kb (`kb --headless`) waits for a command before quitting by itself; default 600 |
+| `KB_HEADLESS_IDLE` | Seconds a headless kb (`kb --headless`) waits for a command before quitting by itself; default 600, and 0 for never |
 | `KB_LOG` | A file to append diagnostics to (sizes, frames, clicks) |
 
 ## Troubleshooting
@@ -291,6 +307,16 @@ kb's data folder, and prints what to fix.
   with Ctrl+-, or have the agent run `kb ctl viewport 1280`.
 - **A kb you can't find:** `kb list` shows the ones running, with the pane
   each is in; quit one with Ctrl+Q in its pane.
+- **"Chrome didn't answer" or "didn't start loading" at start, on macOS:**
+  Chrome is waiting for the keychain, which holds the key it encrypts
+  cookies with. This happens when kb runs with a `HOME` that isn't your own,
+  or as a service before you have logged in. Run kb with your own `HOME`,
+  from a session that is logged in. `KB_CHROME_ARGS=--use-mock-keychain`
+  also works, but then cookies are stored with a fixed key, readable by
+  anyone who can read the profile.
+- **"longer than a Unix socket's path can be":** kb's socket lives in
+  `~/.kittybrowser`, and Unix sockets allow about 100 characters of path.
+  Run kb with a shorter `HOME`.
 
 ## Documentation
 

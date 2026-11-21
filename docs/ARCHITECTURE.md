@@ -295,15 +295,23 @@ kb mcp ──┘   one JSON line each way
 parser, its help, and the MCP tool list are all generated from it, so the two
 front ends can't drift apart. `kb mcp serve` is a thin JSON-RPC wrapper that
 forwards each tool call over the same socket; it lists no tools unless
-`~/.kittybrowser/mcp-enabled` exists (`kb mcp on`).
+`~/.kittybrowser/mcp-enabled` exists (`kb mcp on`). `kb mcp serve -i NAME`
+sets `KB_INSTANCE`, so every call goes to that kb and none other. Parameters
+are typed in the table (text, number, or a list of words), which becomes the
+tool schema; the control thread turns numbers back into the words `kb ctl`
+would send, so commands read one form.
 
 `headless.rs` runs the same Chrome, profile and `Devtools` without a
 terminal, for `kb ctl` alone: no screencast, a desktop viewport, and a
 small loop of its own rather than the app's, which is built around the
 pane. `kb --headless` starts a copy of itself in a session of its own, so
-it outlives the shell that started it, and prints its number once the copy
+it outlives the shell that started it, and prints its id once the copy
 answers. Nobody sees a headless kb that is forgotten, so it quits after ten
-minutes without a command; `kb list` asking its status doesn't count.
+minutes without a command (`kb list` asking its status doesn't count), unless
+`KB_HEADLESS_IDLE=0`. If Chrome never starts to load the first page, it
+stops and says why rather than leave every command to time out; and
+`Chrome::launch` stops a Chrome that hasn't answered within 20 s of starting,
+which on macOS is usually one waiting for the keychain.
 
 Numbers are reused as soon as a kb closes, so each run also gets an id, its
 number and four hex digits (`3-a7f2`). `kb ctl -i ID` asks that socket's kb
@@ -314,8 +322,13 @@ holding an old id is told its kb has gone rather than driving another.
 socket to match: `~/.kittybrowser/kb.sock` for the first, `kb-2.sock` and so
 on after it (mode 0600). The number is taken before anything is written to
 the terminal, under a file lock so two kbs starting together can't take the
-same one. Clients go to the lowest-numbered kb unless `kb ctl -i N` or
-`KB_INSTANCE` names another. Each client gets a thread that turns a request
+same one. A kb started with `--name NAME` takes no number: its socket is
+`kb-NAME.sock`, its profile `profiles/NAME` whatever else is running, and
+its name is its id. Names start with a letter, so they can't be mistaken
+for numbers or ids. As a kb quits it removes its socket at once, before
+Chrome has closed, so the same name can start again straight away; and only
+if the socket is still its own, by inode. Clients go to the lowest-numbered
+kb unless `kb ctl -i N|ID|NAME` or `KB_INSTANCE` names another. Each client gets a thread that turns a request
 line into a `Request` carrying a reply channel, hands it to the app loop, and
 writes back whatever arrives.
 
@@ -366,9 +379,22 @@ clicks the element by script and says so. If it comes back, the bare
 reproduction is the place to start: log in on the-internet.herokuapp.com by
 clicking the submit button, then click Logout.
 
-**Decisions on the remaining requests.** Iframes are not entered: selectors
-and reading stop at the top document, and a selector that matches nothing
-on a page with iframes says so (open the frame's address instead). There is
+**Uploads.** Chrome runs headless, so a file chooser has nowhere to show:
+every window intercepts them (`Page.setInterceptFileChooserDialog`). `upload`
+sets a file field's files with `DOM.setFileInputFiles`, over the pipe like
+everything else, so no port is opened. Given anything other than a file
+field, it clicks it through the same path as `click` and answers the
+`Page.fileChooserOpened` that follows, by its `backendNodeId`; a chooser
+that opens with no upload waiting is reported like a dialog.
+
+**Decisions on the remaining requests.** Iframes are entered only when a
+selector asks, with `iframe >>> sel`, the syntax that already crosses shadow
+roots; reading commands stop at the top document. Only frames from the same
+site can be entered (their `contentDocument`); one from another site runs in
+another process, and reaching it would mean attaching to its target. A
+click's position adds the offsets of the frames the element is in, and the
+check that a click landed listens in the element's frame, and in the frame
+itself when the element is one. There is
 no JSON output: answers are written for agents to read, and scripts use exit
 status, `check`, `wait` and exact `text`. `style --why` uses the CSS domain
 (enabled on first use) to explain the cascade; `throttle` uses
