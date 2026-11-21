@@ -7,12 +7,13 @@
 //! reply with that id comes past in `observe`.
 
 use crate::control::{Output, Reply, Request};
-use crate::engine::chrome::Chrome;
+use crate::engine::chrome::{Chrome, PageEvent};
 use crate::term::input::{Key, KeyCode};
 use crate::ui;
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Console messages kept, across pages.
@@ -39,6 +40,8 @@ const SETTLE: Duration = Duration::from_millis(250);
 /// But a page that never goes quiet gets its answer after this long.
 const SETTLE_LIMIT: Duration = Duration::from_millis(1500);
 const DEFAULT_WAIT: f64 = 10.0;
+/// How long `upload` waits, once its click is done, for the file chooser.
+const CHOOSER_WAIT: Duration = Duration::from_secs(3);
 /// What `style` prints when no property is named, as a JavaScript array.
 const COMMON_STYLES: &str = "['display', 'position', 'width', 'height', 'margin', 'padding', 'border', \
      'left', 'top', 'z-index', 'visibility', 'opacity', 'color', 'background-color', 'font-family', 'font-size', \
@@ -69,10 +72,20 @@ const LIB: &str = r#"globalThis.__kb = {
     if (m) return this.byText(m[1]);
     if (sel.includes('>>>')) {
       let scope = [document];
-      for (const part of sel.split('>>>')) scope = scope.flatMap(s => this.query(s.shadowRoot || s, part.trim()));
+      for (const part of sel.split('>>>')) scope = scope.flatMap(s => this.query(this.inside(s), part.trim()));
       return scope;
     }
     return this.roots().flatMap(r => this.query(r, sel));
+  },
+  // What `a >>> b` looks for b in: a's shadow root, or the page in frame a.
+  inside(el) {
+    if (el.shadowRoot) return el.shadowRoot;
+    if (el.localName !== 'iframe' && el.localName !== 'frame') return el;
+    let doc = null;
+    try { doc = el.contentDocument; } catch (e) {}
+    if (!doc) throw new Error('the frame ' + this.name(el) + ' holds a page from another site (' + (el.src || 'no address') +
+      '), which kb can\'t reach into; open that address to work in it');
+    return doc;
   },
   find(sel) { return this.all(sel)[0] || null; },
   get(sel) {
@@ -83,8 +96,8 @@ const LIB: &str = r#"globalThis.__kb = {
     if (sel === ':focus') throw new Error('nothing has focus');
     if (/^[\w' ]+$/.test(sel) && sel.includes(' ')) throw new Error('no element matches ' + sel + '; to find one by its text, use text=' + sel);
     const frames = document.querySelectorAll('iframe').length;
-    if (frames) throw new Error('no element matches ' + sel + ' (the page has ' + frames + (frames === 1 ? ' iframe' : ' iframes') +
-      ', and kb does not look inside them; open the frame\'s own address to work in it)');
+    if (frames && !sel.includes('>>>')) throw new Error('no element matches ' + sel + ' (the page has ' + frames +
+      (frames === 1 ? ' iframe' : ' iframes') + ', which kb looks inside only when asked: iframe >>> ' + sel + ')');
     throw new Error('no element matches ' + sel);
   },
   focused() {
@@ -134,8 +147,20 @@ const LIB: &str = r#"globalThis.__kb = {
     }
     return t;
   },
-  at(x, y) {
-    let hit = document.elementFromPoint(x, y);
+  // Where an element is in the window: its own rectangle, moved by the
+  // frames it is inside.
+  box(el) {
+    const r = el.getBoundingClientRect();
+    let x = r.left, y = r.top;
+    for (let w = el.ownerDocument.defaultView; w && w.frameElement; w = w.parent) {
+      const f = w.frameElement, b = f.getBoundingClientRect(), s = f.ownerDocument.defaultView.getComputedStyle(f);
+      x += b.left + f.clientLeft + parseFloat(s.paddingLeft);
+      y += b.top + f.clientTop + parseFloat(s.paddingTop);
+    }
+    return {x, y, width: r.width, height: r.height};
+  },
+  at(x, y, doc = document) {
+    let hit = doc.elementFromPoint(x, y);
     while (hit && hit.shadowRoot) {
       const inner = hit.shadowRoot.elementFromPoint(x, y);
       if (!inner || inner === hit) break;
@@ -397,13 +422,20 @@ const NAME_OF: &str = "(e => '<' + e.localName + (e.id ? '#' + e.id : '') + \
      (e.classList.length ? '.' + [...e.classList].join('.') : '') + '>')";
 
 /// For `locate`, before a click: listen for it, to tell afterwards whether
-/// it reached the page.
-const HEAR: &str = "globalThis.__kbHeard = false; \
-     addEventListener('mousedown', () => { globalThis.__kbHeard = true; }, {capture: true, once: true});";
+/// it reached the page: in the element's own frame, and in the frame it is,
+/// if it is one. Inside a frame from another site nothing can listen, so
+/// the click is taken as heard.
+const HEAR: &str = "{ globalThis.__kbHeard = false; \
+     const hear = () => { globalThis.__kbHeard = true; }; \
+     const windows = [window, el.ownerDocument.defaultView]; \
+     if (el.localName === 'iframe' || el.localName === 'frame') windows.push(el.contentWindow); \
+     for (const w of new Set(windows)) { \
+       try { w.addEventListener('mousedown', hear, {capture: true, once: true}); } \
+       catch (e) { globalThis.__kbHeard = true; } } }";
 
 /// For `locate`, before a click: refuse if the click would land elsewhere.
 const CLICKABLE: &str = "{ const b = el.getBoundingClientRect(); \
-     const hit = b.width > 0 && b.height > 0 ? __kb.at(b.left + b.width / 2, b.top + b.height / 2) : el; \
+     const hit = b.width > 0 && b.height > 0 ? __kb.at(b.left + b.width / 2, b.top + b.height / 2, el.ownerDocument) : el; \
      if (!hit) throw new Error('the element is off screen, at ' + Math.round(b.left) + ',' + Math.round(b.top) + \
        ' in the window, and can\\'t be scrolled into view, so it can\\'t be clicked; see: kb ctl box'); \
      const labels = el.labels ? [...el.labels] : []; \
@@ -413,7 +445,7 @@ const CLICKABLE: &str = "{ const b = el.getBoundingClientRect(); \
 
 /// Where an element is on the page, without moving the page, for a screenshot.
 const SHOT_RECT: &str = "(sel => { const el = __kb.get(sel); \
-     const r = el.getBoundingClientRect(), x = r.left + scrollX, y = r.top + scrollY; \
+     const r = __kb.box(el), x = r.x + scrollX, y = r.y + scrollY; \
      if (r.width <= 0 || r.height <= 0) throw new Error('the element has no size, so there is nothing to capture'); \
      if (x + r.width <= 0 || y + r.height <= 0) throw new Error('the element is outside the page, at ' + \
        Math.round(x) + ',' + Math.round(y) + ', so there is nothing to capture; see: kb ctl box'); \
@@ -434,7 +466,7 @@ const BOX: &str = "(sel => { const el = __kb.get(sel); \
        'rendered: ' + (hidden ? 'no (' + hidden + ')' : 'yes'), \
        'in the window: ' + (outside ? 'no (' + outside + ')' : 'yes')]; \
      if (!hidden && !outside) { \
-       const hit = __kb.at(r.left + r.width / 2, r.top + r.height / 2); \
+       const hit = __kb.at(r.left + r.width / 2, r.top + r.height / 2, el.ownerDocument); \
        const covered = hit && hit !== el && !__kb.within(el, hit) && !__kb.within(hit, el); \
        lines.push('covered: ' + (covered ? 'yes, by ' + NAME(hit) + ' at its centre' : 'no')); } \
      return lines.join('\\n'); })";
@@ -681,6 +713,105 @@ enum Pending {
     Acted(Reply, Baseline),
     /// One check of a `wait`; the number identifies the wait.
     WaitCheck(u64),
+    /// For `upload`: the element by reference, then what kind it is, then
+    /// its files being set, then the files it has. The element is named by
+    /// its selector, or once a chooser has opened, by the click that did.
+    UploadTo(Reply, String, Vec<String>),
+    UploadKind(Reply, String, Vec<String>, String),
+    UploadSet(Reply, String, Option<String>, Option<u64>),
+    UploadNode(Reply, String),
+    UploadRead(Reply, String, Baseline),
+}
+
+/// An `upload` that clicked something, waiting for the file chooser it
+/// opens.
+struct Choosing {
+    reply: Reply,
+    selector: String,
+    files: Vec<String>,
+    /// The click's answer: an error means it didn't happen.
+    clicked: mpsc::Receiver<Result<Output, String>>,
+    /// Once the click is done, how long the chooser has to open.
+    deadline: Option<Instant>,
+}
+
+/// Script function: the element's name and the files it holds, as the page
+/// sees them.
+const FILES: &str = "function() { return {name: NAME(this), \
+     files: [...this.files].map(f => f.name + ' (' + f.size.toLocaleString('en') + ' bytes)')}; }";
+
+/// Script function: whether the element is a file field, and how many files
+/// it takes.
+const FILE_FIELD: &str = "function() { return {file: this.localName === 'input' && this.type === 'file', \
+     multiple: !!this.multiple, disabled: !!this.disabled, name: NAME(this)}; }";
+
+/// The files of an `upload`, checked again here: a client may not have.
+fn upload_files(args: &Value) -> Result<Vec<String>, String> {
+    let files: Vec<String> = match &args["files"] {
+        Value::String(path) => vec![path.clone()],
+        Value::Array(paths) => paths.iter().filter_map(|path| path.as_str().map(str::to_owned)).collect(),
+        _ => Vec::new(),
+    };
+    if files.is_empty() {
+        return Err("upload needs files: the paths of the files to choose".to_owned());
+    }
+    for file in &files {
+        let path = std::path::Path::new(file);
+        if !path.is_absolute() {
+            return Err(format!("{file} isn't an absolute path; kb ctl makes paths absolute, so send them so"));
+        }
+        if !path.is_file() {
+            return Err(format!("no such file: {file}"));
+        }
+        std::fs::File::open(path).map_err(|e| format!("can't read {file}: {e}"))?;
+    }
+    Ok(files)
+}
+
+/// `window [N]`: list the windows open, or show window N. Returns the
+/// answer, and the event to handle if another window is shown now.
+pub fn window(args: &Value, chrome: &mut Chrome) -> (Result<Output, String>, Option<PageEvent>) {
+    let list = |chrome: &Chrome| {
+        let (shown, _) = chrome.windows();
+        let mut out = String::new();
+        for (at, url) in chrome.window_urls().iter().enumerate() {
+            let url = if url.is_empty() { "about:blank" } else { url };
+            let what = match at + 1 {
+                n if n == shown => " (shown)",
+                _ => "",
+            };
+            let _ = writeln!(out, "{}. {url}{what}", at + 1);
+        }
+        out
+    };
+    let open = chrome.windows().1;
+    let number = match &args["number"] {
+        Value::String(n) if !n.is_empty() => n.parse::<usize>().ok().filter(|n| *n > 0),
+        _ => {
+            let more = match open {
+                1 => "one window is open; a popup or new tab the page opens is listed here too",
+                _ => "kb ctl window N shows one; back on a popup's first page closes it",
+            };
+            return (Ok(Output::Text(format!("{}{more}", list(chrome)))), None);
+        }
+    };
+    match number {
+        Some(n) if n == chrome.windows().0 => {
+            (Ok(Output::Text(format!("window {n} is shown already: {}", chrome.url()))), None)
+        }
+        Some(n) if n <= open => {
+            let event = chrome.show_window(n);
+            (Ok(Output::Text(format!("showing window {n} of {open}: {}", chrome.url()))), event)
+        }
+        _ => (
+            Err(format!(
+                "there is no window {}; these are open:\n{}",
+                args["number"].as_str().unwrap_or(""),
+                list(chrome).trim_end()
+            )),
+            None,
+        ),
+    }
 }
 
 /// A `wait` in progress, checked on every tick so that it survives the page
@@ -750,6 +881,8 @@ pub struct Devtools {
     /// this text typed into prompts if given.
     dismiss: bool,
     prompt_text: Option<String>,
+    /// An `upload` waiting for the file chooser its click opens.
+    choosing: Option<Choosing>,
 }
 
 fn text(reply: &Reply, text: impl Into<String>) {
@@ -892,7 +1025,7 @@ fn locate(selector: &str, prepare: &str) -> String {
     format!(
         "{LIB}\n(() => {{ const el = __kb.get({sel}); \
          el.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}}); \
-         let landed = ''; {prepare} const r = el.getBoundingClientRect(); \
+         let landed = ''; {prepare} const r = __kb.box(el); \
          return {{x: r.x, y: r.y, width: r.width, height: r.height, landed, target: {sel}}}; }})()",
         sel = quote(selector),
     )
@@ -1160,11 +1293,7 @@ impl Devtools {
                         let _ = write!(rest, "\nid: {id}");
                     }
                     if crate::headless::running() {
-                        let _ = write!(
-                            rest,
-                            "\npane: none (headless; it quits after {} minutes without a command)",
-                            crate::headless::idle().as_secs() / 60
-                        );
+                        let _ = write!(rest, "\npane: none (headless; {})", crate::headless::idle_note());
                     } else if let Ok(pane) = std::env::var("REX_BLOCK") {
                         let _ = write!(rest, "\npane: {pane}");
                     }
@@ -1455,6 +1584,16 @@ impl Devtools {
                     let prepare = format!("{} {FOCUS} {clear}", names(CLICKABLE).replace("clicked", "typed into"));
                     self.evaluate(chrome, &locate(selector, &prepare), Pending::Rect(reply.clone(), then));
                 }
+                "upload" => {
+                    let selector = need("selector")?;
+                    let files = upload_files(&args)?;
+                    let id = chrome.request(
+                        "Runtime.evaluate",
+                        json!({"expression": format!("{LIB}\n__kb.get({})", quote(selector))}),
+                    );
+                    self.park(id, Pending::UploadTo(reply.clone(), selector.to_owned(), files));
+                }
+                "window" => return Err("window is carried out by the app".to_owned()),
                 "press" => {
                     let name = need("key")?;
                     let key = parse_key(name).ok_or(format!(
@@ -1599,6 +1738,34 @@ impl Devtools {
                     self.sheets.insert(id.to_owned(), (url, start, header["isInline"] == true));
                 }
             }
+            "Page.fileChooserOpened" => match self.choosing.take() {
+                Some(choosing) => {
+                    let node = params["backendNodeId"].as_u64();
+                    let single = params["mode"] == "selectSingle";
+                    let Choosing { reply, selector, files, .. } = choosing;
+                    match node {
+                        None => fail(
+                            &reply,
+                            format!("clicking {selector} opened a file chooser that isn't for a file field, which kb can't answer"),
+                        ),
+                        Some(_) if single && files.len() > 1 => fail(
+                            &reply,
+                            format!("the file chooser {selector} opened takes one file, and {} were given", files.len()),
+                        ),
+                        Some(node) => {
+                            let id = chrome.request("DOM.setFileInputFiles", json!({"files": files, "backendNodeId": node}));
+                            let how = format!("the file chooser clicking {selector} opened");
+                            self.park(id, Pending::UploadSet(reply, how, None, Some(node)));
+                        }
+                    }
+                }
+                None => self.log(
+                    DIALOG,
+                    "a file chooser, which kb can't show; to choose files, use kb ctl upload with the same selector"
+                        .to_owned(),
+                    String::new(),
+                ),
+            },
             "Page.javascriptDialogOpening" => {
                 // Answered at once: an open dialog freezes the page, and with
                 // it every command.
@@ -2096,6 +2263,102 @@ impl Devtools {
                 }),
                 Err(error) => fail(&reply, error),
             },
+            Pending::UploadTo(reply, selector, files) => match evaluated(result) {
+                Ok(object) => {
+                    let object_id = object["objectId"].as_str().unwrap_or("").to_owned();
+                    let id = chrome.request(
+                        "Runtime.callFunctionOn",
+                        json!({"objectId": object_id, "returnByValue": true, "functionDeclaration": names(FILE_FIELD)}),
+                    );
+                    self.park(id, Pending::UploadKind(reply, selector, files, object_id));
+                }
+                Err(error) if error.starts_with("no element matches") => fail(
+                    &reply,
+                    format!("{error}; upload takes the <input type=file>, or what a user clicks to choose files"),
+                ),
+                Err(error) => fail(&reply, error),
+            },
+            Pending::UploadKind(reply, selector, files, object_id) => {
+                let field = match evaluated(result) {
+                    Ok(object) => object["value"].clone(),
+                    Err(error) => return fail(&reply, error),
+                };
+                let name = field["name"].as_str().unwrap_or("the element").to_owned();
+                if field["file"] != true {
+                    // A button or drop zone: click it, and answer the chooser it opens.
+                    if self.choosing.is_some() {
+                        return fail(&reply, "another upload is waiting for its file chooser; try again in a moment");
+                    }
+                    let (clicked, answer) = mpsc::channel();
+                    self.choosing =
+                        Some(Choosing { reply, selector: selector.clone(), files, clicked: answer, deadline: None });
+                    let prepare = format!("{} {HEAR}", clickable(None));
+                    self.evaluate(
+                        chrome,
+                        &locate(&selector, &prepare),
+                        Pending::Rect(clicked, Then::Click(selector, 1, None)),
+                    );
+                    return;
+                }
+                if field["disabled"] == true {
+                    return fail(&reply, format!("{name} is disabled, so files can't be chosen for it now"));
+                }
+                if files.len() > 1 && field["multiple"] != true {
+                    return fail(&reply, format!("{name} takes one file, and {} were given", files.len()));
+                }
+                let id = chrome.request("DOM.setFileInputFiles", json!({"files": files, "objectId": object_id}));
+                self.park(id, Pending::UploadSet(reply, name, Some(object_id), None));
+            }
+            Pending::UploadSet(reply, name, object_id, node) => {
+                if let Err(error) = result {
+                    return fail(&reply, format!("Chrome couldn't set the files of {name}: {error}"));
+                }
+                let since = self.baseline(chrome.session());
+                match (object_id, node) {
+                    (Some(object_id), _) => {
+                        let id = chrome.request(
+                            "Runtime.callFunctionOn",
+                            json!({"objectId": object_id, "returnByValue": true, "functionDeclaration": names(FILES)}),
+                        );
+                        self.park(id, Pending::UploadRead(reply, String::new(), since));
+                    }
+                    (None, Some(node)) => {
+                        let id = chrome.request("DOM.resolveNode", json!({"backendNodeId": node}));
+                        self.park(id, Pending::UploadNode(reply, name));
+                    }
+                    (None, None) => text(&reply, format!("chose the files for {name}")),
+                }
+            }
+            Pending::UploadNode(reply, name) => match result {
+                Ok(node) => {
+                    let id = chrome.request(
+                        "Runtime.callFunctionOn",
+                        json!({
+                            "objectId": node["object"]["objectId"], "returnByValue": true,
+                            "functionDeclaration": names(FILES),
+                        }),
+                    );
+                    let since = self.baseline(chrome.session());
+                    self.park(id, Pending::UploadRead(reply, name, since));
+                }
+                Err(_) => text(&reply, format!("chose the files for {name}")),
+            },
+            Pending::UploadRead(reply, how, since) => match evaluated(result) {
+                Ok(object) => {
+                    let field = &object["value"];
+                    let files: Vec<&str> =
+                        field["files"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                    let how = if how.is_empty() { how } else { format!(" ({how})") };
+                    let message = format!(
+                        "chose {} for {}{how}: {}",
+                        plural(files.len(), "file"),
+                        field["name"].as_str().unwrap_or("the field"),
+                        files.join(", ")
+                    );
+                    self.settling.push(Settling { reply, message, since, at: Instant::now(), verify: None });
+                }
+                Err(error) => fail(&reply, error),
+            },
             Pending::WaitCheck(id) => {
                 let found = evaluated(result).is_ok_and(|object| object["value"] == true);
                 if let Some(at) = self.waits.iter().position(|wait| wait.id == id) {
@@ -2170,7 +2433,7 @@ impl Devtools {
                 let shown = match chrome.windows() {
                     (_, 1) => "its window closed, and the page is shown again".to_owned(),
                     (at, n) => format!(
-                        "another window is shown now, {at} of {n} (kb ctl back on a window's first page closes it)"
+                        "another window is shown now, {at} of {n} (kb ctl window lists them; back on a window's first page closes it)"
                     ),
                 };
                 text(&action.reply, format!("{}; {shown}: {}", action.message, chrome.url()));
@@ -2187,6 +2450,36 @@ impl Devtools {
             } else {
                 text(&action.reply, format!("{}{}", action.message, self.fallout(&action.since)));
             }
+        }
+
+        if let Some(choosing) = &mut self.choosing {
+            match choosing.clicked.try_recv() {
+                Ok(Ok(_)) => choosing.deadline = Some(now + CHOOSER_WAIT),
+                Ok(Err(error)) => {
+                    let choosing = self.choosing.take().expect("checked above");
+                    fail(
+                        &choosing.reply,
+                        format!("couldn't click {} to open its file chooser: {error}", choosing.selector),
+                    );
+                }
+                Err(mpsc::TryRecvError::Disconnected) if choosing.deadline.is_none() => {
+                    let choosing = self.choosing.take().expect("checked above");
+                    fail(&choosing.reply, format!("clicking {} got no answer from Chrome", choosing.selector));
+                }
+                Err(_) => {}
+            }
+        }
+        if self.choosing.as_ref().is_some_and(|choosing| choosing.deadline.is_some_and(|deadline| deadline <= now)) {
+            let choosing = self.choosing.take().expect("checked above");
+            fail(
+                &choosing.reply,
+                format!(
+                    "clicking {} opened no file chooser; give upload the <input type=file> itself (it may be \
+                     hidden: try kb ctl html, or eval \"document.querySelectorAll('input[type=file]')\"), or what \
+                     a user clicks to choose files",
+                    choosing.selector
+                ),
+            );
         }
 
         let mut checks = Vec::new();

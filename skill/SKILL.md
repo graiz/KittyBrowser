@@ -19,7 +19,8 @@ work as well as to do it.
   they sign in once and stay signed in, popups like "Continue with Google"
   included. Only the first kb running has it; one opened beside it starts
   fresh, so to use their sign-ins, reuse their kb if they say so, or ask them
-  to close it.
+  to close it. A kb the user named (`kb --name work`) always has its own
+  profile; reach it with `-i work` when they say to.
 - **Sites work as in any browser,** including ones some extensions don't
   support, such as Reddit or LinkedIn. kb gets around nothing: a site's terms
   apply, and you act for the user, at a person's pace.
@@ -91,7 +92,8 @@ for a command that was running as the pane closed.
 
 `kb --headless URL` runs a kb in the background, with the same commands, and
 prints its id first (`kb 3-a7f2, headless`): that's yours. Like any kb, it
-has the signed-in profile only if no other kb is running. It has a desktop
+has the signed-in profile only if no other kb is running; `--name NAME`
+gives it a profile of its own, kept for next time. It has a desktop
 viewport (1280x800) and no pane. Stop it with `kb ctl -i ID quit` when
 you're done; one left behind quits after ten minutes without a command. `kb
 list` marks headless kbs, and shows "(not answering)" for a moment while a
@@ -100,8 +102,9 @@ kb starts or quits.
 ## Selectors
 
 CSS (the first visible match; it reaches into shadow DOM, and `a >>> b`
-picks `b` inside `a`'s shadow root), `text=Some words` (the element showing
-them), `@N` (a number from `links`), or `:focus`.
+picks `b` inside `a`'s shadow root, or inside the page in iframe `a`),
+`text=Some words` (the element showing them), `@N` (a number from `links`),
+or `:focus`.
 
 ## Testing your own pages
 
@@ -123,6 +126,7 @@ shows only what's visible:
 ```sh
 kb ctl -i ID type '#email' 'a@b.co' --clear
 kb ctl -i ID select '#plan' Pro  # by value or label
+kb ctl -i ID upload '#avatar' me.png # the file field, or the button that opens its chooser
 kb ctl -i ID click 'text=Save'   # fails if hidden, off screen or covered
 kb ctl -i ID wait '#result' --text Saved # the element the click should change, and words you expect
 kb ctl -i ID console --errors    # this page's; --all adds earlier pages'
@@ -224,11 +228,12 @@ kb ctl -i ID images                         # alt text, size, caption and source
 - One page per kb, no tabs; open a second pane to compare two pages.
 - A window the page opens (a sign-in popup, a new tab) is shown in its
   place; click and type in it as on any page. `click` says when one opens
-  or closes, and `status` counts them.
+  or closes; `window` lists them, and `window N` shows another.
 - A popup that finishes closes itself. To dismiss one, run `back` while it
   shows the page it opened with; that closes it.
 - Screenshots are one image pixel per CSS pixel. `--size small` halves
   that, `--size sharp` gives device pixels, `--size 800` a set width.
   Prefer `--selector CSS` for one element; `--full` pages stop at 8000
   pixels tall.
-- kb doesn't look inside iframes; open the frame's own address instead.
+- Commands look inside an iframe only when asked: `iframe#pay >>> #card`.
+  A frame from another site can't be reached; open its address instead.

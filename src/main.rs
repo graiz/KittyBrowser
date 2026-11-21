@@ -22,8 +22,8 @@ mod term;
 mod ui;
 
 const USAGE: &str = "\
-usage: kb [--scale N] [--dark | --light] [--devtools] [URL]
-       kb list             the kbs running now, numbered
+usage: kb [--name NAME] [--headless] [--scale N] [--dark | --light] [--devtools] [URL]
+       kb list             the kbs running now, numbered or named
        kb doctor           check this terminal and machine can run kb, and what to fix
        kb keys             the key bindings, and how to change them
        kb ctl <command>    control a running kb; see kb ctl --help
@@ -37,8 +37,10 @@ usage: kb [--scale N] [--dark | --light] [--devtools] [URL]
   --devtools       serve Chrome DevTools on a local port, so F12 can open it;
                    any program on this machine can then reach the browser
   --headless       run in the background without a pane, for kb ctl alone; prints
-                   its number. kb ctl -i N quit stops it, and it stops by itself
-                   after 10 minutes without a command
+                   its id. kb ctl -i ID quit stops it, and it stops by itself
+                   after 10 minutes without a command (KB_HEADLESS_IDLE=0: never)
+  --name NAME      answer to kb ctl -i NAME rather than taking a number, and keep
+                   sign-ins in a profile of its own, the same each time
 
 keys (kb keys lists them all; Ctrl+/ in kb shows them):
   Cmd+L or Ctrl+L   edit the address
@@ -90,6 +92,7 @@ fn main() {
         scale: if cfg!(target_os = "macos") { 2.0 } else { 1.0 },
         devtools: false,
         dark: None,
+        name: None,
     };
     let mut address = Vec::new();
     let mut headless = false;
@@ -109,6 +112,13 @@ fn main() {
             "--headless" => headless = true,
             "--dark" => options.dark = Some(true),
             "--light" => options.dark = Some(false),
+            "--name" => match args.next() {
+                Some(name) => match control::check_name(&name) {
+                    Ok(()) => options.name = Some(name),
+                    Err(error) => usage_error(&error),
+                },
+                None => usage_error("--name needs a name"),
+            },
             "--scale" => {
                 let scale = args.next().and_then(|s| s.parse::<f64>().ok());
                 match scale.filter(|s| s.is_finite() && *s > 0.0) {

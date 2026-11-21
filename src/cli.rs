@@ -10,15 +10,16 @@ fn usage() -> String {
         "usage: kb ctl <command> [arguments]\n\n\
          Controls the kb browser running in a terminal pane: what you do here\n\
          happens on the page the user is looking at. With several kbs running,\n\
-         kb ctl -i N <command> picks one (kb list numbers them); the default is\n\
-         the lowest-numbered.\n\n",
+         kb ctl -i ID <command> picks one, by the number, id or name kb list\n\
+         shows; the default is the lowest-numbered.\n\n",
     );
     for command in COMMANDS {
         text.push_str(&format!("  {}\n      {}\n", command.synopsis(), command.help));
     }
     text.push_str(
         "\nA <selector> is a CSS selector (the first match is used; it also finds\n\
-         elements inside shadow DOM, and a >>> b picks b inside a's shadow root),\n\
+         elements inside shadow DOM, and a >>> b picks b inside a's shadow root,\n\
+         or inside the page in iframe a, if it is from the same site),\n\
          or text=Some words for the element showing that text, or @N for link N\n\
          from kb ctl links, or :focus for whatever has focus.\n\
          kb ctl <command> --help describes one command and its arguments.\n\
@@ -52,9 +53,9 @@ fn looks_like_a_file(address: &str) -> bool {
 /// Run `kb ctl` with the words after it. Returns the exit status.
 pub fn run(mut words: &[String]) -> i32 {
     // Which kb, when several are running.
-    if let [flag, number, rest @ ..] = words {
+    if let [flag, which, rest @ ..] = words {
         if flag == "-i" || flag == "--instance" {
-            std::env::set_var("KB_INSTANCE", number);
+            std::env::set_var("KB_INSTANCE", which);
             words = rest;
         }
     }
@@ -81,6 +82,10 @@ pub fn run(mut words: &[String]) -> i32 {
             return 2;
         }
     };
+    if let Err(error) = command.resolve_files(&mut args) {
+        eprintln!("kb ctl: {error}");
+        return 1;
+    }
     // Where to save an image is ours to deal with, not the browser's.
     let out = args.as_object_mut().and_then(|args| args.remove(commands::OUT));
     let out = out.as_ref().and_then(|out| out.as_str()).map(PathBuf::from);
@@ -134,8 +139,8 @@ pub fn run(mut words: &[String]) -> i32 {
     }
 }
 
-/// `kb list`: the kbs running now, one per line, numbered. Returns the
-/// exit status.
+/// `kb list`: the kbs running now, one per line, by number or name.
+/// Returns the exit status.
 pub fn list() -> i32 {
     let running = control::running();
     if running.is_empty() {
@@ -143,7 +148,7 @@ pub fn list() -> i32 {
         return 1;
     }
     for instance in running {
-        std::env::set_var("KB_INSTANCE", instance.to_string());
+        std::env::set_var("KB_INSTANCE", &instance);
         let (page, pane, id) = match control::request("status", json!({"listing": true})) {
             Ok(Output::Text(status)) => {
                 let field =
