@@ -51,6 +51,11 @@ Notable changes to kb. The format follows
   finished. `kb ctl open` on a file to download says so rather than failing
   with `net::ERR_ABORTED`. Quitting cancels downloads still running, so no
   part of a file is left behind.
+- `kb ctl click` on a link whose text wraps onto two lines clicks the
+  link's text. It used to click the middle of the link's box, which can be
+  empty space beside the text, miss, and still answer `clicked`. A click
+  whose point lands on empty space around an element now fails and says
+  so.
 
 ## 0.2.0 — 2026-11-21
 

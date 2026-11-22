@@ -160,6 +160,14 @@ const LIB: &str = r#"globalThis.__kb = {
     }
     return {x, y, width: r.width, height: r.height};
   },
+  // Where a click aims, from the element's top left: its middle, or for
+  // text that wraps onto several lines (an inline link) the middle of its
+  // longest line, as the middle of the whole box can be beside the text.
+  middle(el) {
+    const b = el.getBoundingClientRect(), lines = [...el.getClientRects()];
+    const line = lines.length > 1 ? lines.reduce((a, c) => (c.width * c.height > a.width * a.height ? c : a)) : b;
+    return {x: line.left - b.left + line.width / 2, y: line.top - b.top + line.height / 2};
+  },
   at(x, y, doc = document) {
     let hit = doc.elementFromPoint(x, y);
     while (hit && hit.shadowRoot) {
@@ -434,14 +442,21 @@ const HEAR: &str = "{ globalThis.__kbHeard = false; \
        try { w.addEventListener('mousedown', hear, {capture: true, once: true}); } \
        catch (e) { globalThis.__kbHeard = true; } } }";
 
-/// For `locate`, before a click: refuse if the click would land elsewhere.
-const CLICKABLE: &str = "{ const b = el.getBoundingClientRect(); \
-     const hit = b.width > 0 && b.height > 0 ? __kb.at(b.left + b.width / 2, b.top + b.height / 2, el.ownerDocument) : el; \
+/// For `locate`, before a click: refuse if the click would land elsewhere:
+/// on something covering the element, or on empty space in one around it
+/// (beside text that wraps), unless the element lets clicks through to it
+/// (`pointer-events: none`) or it is the element's label.
+const CLICKABLE: &str = "{ const b = el.getBoundingClientRect(), m = __kb.middle(el); \
+     const hit = b.width > 0 && b.height > 0 ? __kb.at(b.left + m.x, b.top + m.y, el.ownerDocument) : el; \
      if (!hit) throw new Error('the element is off screen, at ' + Math.round(b.left) + ',' + Math.round(b.top) + \
        ' in the window, and can\\'t be scrolled into view, so it can\\'t be clicked; see: kb ctl box'); \
      const labels = el.labels ? [...el.labels] : []; \
      if (hit !== el && !__kb.within(el, hit) && !__kb.within(hit, el) && !labels.some(label => __kb.within(label, hit))) \
        throw new Error('the element is covered by ' + NAME(hit) + ', which would get the click instead; see: kb ctl box'); \
+     const passes = getComputedStyle(el).pointerEvents === 'none' || labels.some(label => __kb.within(label, hit)); \
+     if (hit !== el && __kb.within(hit, el) && !passes) \
+       throw new Error('the click would land on empty space in ' + NAME(hit) + ' around the element, not on it; ' + \
+         'click a point on it with --at X,Y; see: kb ctl box'); \
      if (hit !== el && __kb.within(el, hit)) landed = NAME(hit); }";
 
 /// Where an element is on the page, without moving the page, for a screenshot.
@@ -506,9 +521,7 @@ const CONTENTS: &str = "function() { \
 fn clickable(at: Option<(f64, f64)>) -> String {
     let template = names(CLICKABLE);
     match at {
-        Some((x, y)) => template
-            .replace("b.left + b.width / 2", &format!("b.left + {x}"))
-            .replace("b.top + b.height / 2", &format!("b.top + {y}")),
+        Some((x, y)) => template.replace("m = __kb.middle(el)", &format!("m = {{x: {x}, y: {y}}}")),
         None => template,
     }
 }
@@ -1133,8 +1146,8 @@ fn locate(selector: &str, prepare: &str) -> String {
     format!(
         "{LIB}\n(() => {{ const el = __kb.get({sel}); \
          el.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}}); \
-         let landed = ''; {prepare} const r = __kb.box(el); \
-         return {{x: r.x, y: r.y, width: r.width, height: r.height, landed, target: {sel}}}; }})()",
+         let landed = ''; {prepare} const r = __kb.box(el), middle = __kb.middle(el); \
+         return {{x: r.x, y: r.y, width: r.width, height: r.height, middle, landed, target: {sel}}}; }})()",
         sel = quote(selector),
     )
 }
@@ -2426,6 +2439,9 @@ impl Devtools {
                 };
                 let number = |name: &str| rect[name].as_f64().unwrap_or(0.0);
                 let (x, y, width, height) = (number("x"), number("y"), number("width"), number("height"));
+                // Where a click aims: see `middle` in LIB.
+                let aim = |axis: &str, size: f64| rect["middle"][axis].as_f64().unwrap_or(size / 2.0);
+                let middle = (x + aim("x", width), y + aim("y", height));
                 if width <= 0.0 || height <= 0.0 {
                     return fail(
                         &reply,
@@ -2438,7 +2454,7 @@ impl Devtools {
                         let since = self.baseline(chrome.session());
                         let id = chrome.request(
                             "Input.dispatchMouseEvent",
-                            json!({"type": "mouseMoved", "x": x + width / 2.0, "y": y + height / 2.0}),
+                            json!({"type": "mouseMoved", "x": middle.0, "y": middle.1}),
                         );
                         self.park(id, Pending::Done(reply, format!("the mouse is over {selector}"), since, None));
                     }
@@ -2446,7 +2462,7 @@ impl Devtools {
                         let since = self.baseline(chrome.session());
                         let (x, y) = match at {
                             Some((dx, dy)) => (x + dx, y + dy),
-                            None => (x + width / 2.0, y + height / 2.0),
+                            None => middle,
                         };
                         // Clicking a container hits whatever is in its middle.
                         let selector = match rect["landed"].as_str() {
@@ -2978,6 +2994,14 @@ mod tests {
         let Ok(Ok(Output::Text(out))) = answer.recv() else { panic!() };
         assert!(out.len() < MAX_OUTPUT + 100);
         assert!(out.ends_with(&format!("({} more characters not shown)", MAX_OUTPUT / 2)));
+    }
+
+    #[test]
+    fn clicks_aim_at_the_middle_or_where_asked() {
+        assert!(clickable(None).contains("m = __kb.middle(el)"));
+        let at = clickable(Some((10.0, 20.5)));
+        assert!(at.contains("m = {x: 10, y: 20.5}"), "{at}");
+        assert!(!at.contains("__kb.middle"), "{at}");
     }
 
     #[test]
