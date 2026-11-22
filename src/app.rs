@@ -37,6 +37,9 @@ pub struct Options {
 
 /// How long a note in the bar stays.
 const NOTICE: Duration = Duration::from_millis(2500);
+/// How old the shadow's copy of the page may get while the page moves
+/// under a box: its colour, darkened, changes too little to see sooner.
+const SHADE_AGE: Duration = Duration::from_millis(500);
 
 /// Find the element under a point and the pointer it calls for, as CSS
 /// names it: what the page asks for, or where it says `auto`, a text cursor
@@ -281,9 +284,11 @@ struct App {
     modal_rects: Vec<ui::Rect>,
     /// The folder the file chooser was last left in, to open there next.
     last_folder: Option<std::path::PathBuf>,
-    /// The frame decoded, for the shadow the boxes cast on the page, and
-    /// which frame it was (where its text was, and how long).
-    shade: Option<((usize, usize), crate::modal::Shade)>,
+    /// Frames from Chrome so far, to tell one from the next.
+    frames: u64,
+    /// The frame decoded, for the shadow the boxes cast on the page: which
+    /// frame it was, and when it was decoded.
+    shade: Option<(u64, Instant, crate::modal::Shade)>,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -406,6 +411,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         picker: None,
         modal_rects: Vec::new(),
         last_folder: None,
+        frames: 0,
         shade: None,
     };
     if let Some(dark) = options.dark {
@@ -644,6 +650,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                             // frame again is nothing to draw.
                             if fits && app.frame.as_deref() != Some(png.as_str()) {
                                 app.frame = Some(png);
+                                app.frames += 1;
                                 // The blank page that comes first stays under the logo.
                                 new_frame = app.splash.is_none() || app.committed;
                             }
@@ -1152,7 +1159,7 @@ impl App {
             return;
         }
         self.update_shade();
-        let shade = self.shade.as_ref().map(|(_, shade)| shade);
+        let shade = self.shade.as_ref().map(|(_, _, shade)| shade);
         let mut cursor = None;
         if let Some(picker) = &mut self.picker {
             let (rect, at) = picker.render(out, cols, rows, shade);
@@ -1173,20 +1180,31 @@ impl App {
         }
     }
 
-    /// Decode the page's frame for the boxes' shadow, if it is a new one.
+    /// Decode the page's frame for the boxes' shadow when a box opens, and
+    /// again for a newer frame at most every SHADE_AGE: a page that moves
+    /// under the file chooser would otherwise be decoded on every frame, on
+    /// the thread that must never wait, for a colour no one sees change.
     /// None before the first frame, and while the logo shows.
     fn update_shade(&mut self) {
         let Some(frame) = self.frame.as_deref().filter(|_| self.splash.is_none()) else {
             self.shade = None;
             return;
         };
-        let which = (frame.as_ptr() as usize, frame.len());
         let page = ui::Rect { col: 1, row: 2, width: self.shown.0, height: self.shown.1 };
         match &mut self.shade {
-            Some((seen, shade)) if *seen == which => shade.page = page,
+            Some((seen, when, shade)) if *seen == self.frames || when.elapsed() < SHADE_AGE => shade.page = page,
             _ => {
+                let started = Instant::now();
                 let pixels = crate::base64::decode(frame).and_then(|bytes| graphics::decode_png(&bytes, Vec::new()));
-                self.shade = pixels.map(|pixels| (which, crate::modal::Shade { pixels, page }));
+                if let Some(pixels) = &pixels {
+                    log(format_args!(
+                        "decoded the frame for the shadow, {}x{}, in {:?}",
+                        pixels.width,
+                        pixels.height,
+                        started.elapsed()
+                    ));
+                }
+                self.shade = pixels.map(|pixels| (self.frames, started, crate::modal::Shade { pixels, page }));
             }
         }
     }
