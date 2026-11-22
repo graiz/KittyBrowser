@@ -279,9 +279,11 @@ off`, `kb mcp status`. `kb mcp serve -i NAME` drives only the kb with that
 name, so an agent given it can't reach the kbs in your panes.
 
 **Security:** kb listens on a socket in `~/.kittybrowser` that only your user
-can open. Anything running as you can use it to run JavaScript in pages you
-are logged in to in kb. Such a program could already read your files, but
-it's worth knowing before you turn on the MCP server. `upload` sends files
+can open. Anything running as you can use that socket to run JavaScript in
+pages you are logged in to in kb. Such a program could already read your
+files, but it's worth knowing before you turn on the MCP server. The folder
+and its profiles are yours alone, as are the screenshots and frames kb
+leaves in the temporary directory. `upload` sends files
 from your computer to the page, so an agent driving kb can send any file
 you can read, except ones that look like keys, passwords or sign-ins
 (`~/.ssh`, `~/.aws`, `.env` files, private keys, browser cookies): those

@@ -103,7 +103,15 @@ There are two ways to send a frame:
 
 - **By file.** The PNG is decoded here, the raw pixels are written to a
   temporary file, and the terminal is given its name (`t=t,f=24`). The
-  terminal reads the file and deletes it. At startup kb asks whether the
+  terminal reads the file and deletes it. The files go in a folder made once
+  per run under the temporary directory (`tty-graphics-protocol-kb-PID-XXXXXX`,
+  by `mkdtemp`), which only the user can open, so on a machine with a shared
+  `/tmp` no one else can read a frame of a signed-in page or plant a file or
+  link where kb will write one. kb removes it as it leaves the terminal; a
+  kb that was killed can't, so before making its own, kb removes the user's
+  folders whose process has gone and that have sat unchanged for ten
+  minutes (a kb in a container sharing `/tmp` has process ids of its own).
+  At startup kb asks whether the
   terminal will do this (`a=q` with a one-pixel file); a terminal on another
   machine can't see the file and says no.
 - **Through the pty.** The data goes inside the escapes, in 4096-byte
@@ -113,7 +121,8 @@ There are two ways to send a frame:
   the fallback when a frame can't be drawn that way.
 
 What Rex accepts, found by querying it: raw pixels directly, raw pixels with
-zlib, and raw pixels from a file in a temporary directory. It refuses PNG
+zlib, and raw pixels from a file in a temporary directory or a folder
+under it. It refuses PNG
 from a file, files outside temporary directories, and shared memory.
 
 Measured with `kb bench` in Rex on a 1372x1624 pixel pane, scrolling a
@@ -315,6 +324,18 @@ are typed in the table (text, number, or a list of words), which becomes the
 tool schema; the control thread turns numbers back into the words `kb ctl`
 would send, so commands read one form.
 
+Answers carry whatever the page put in them, escape sequences included.
+`kb ctl`, `kb list` and kb's errors print them through `term::printable`,
+which shows every control character but newline and tab as �, so a page
+can't retitle the caller's terminal or write its clipboard. MCP answers are
+JSON and go out as they are. A screenshot is saved by `kb ctl` itself, not
+the browser (`cli.rs`). With `--out`, it is written as `cp` would write
+it: a file replaced, a link followed, a pipe or a device written into; the
+path is printed only for a file other than `kb ctl`'s own output, so
+`--out /dev/stdout > shot.png` holds just the image. Without it, it goes in `kb-screenshots-UID` in the temporary
+directory, where the system clears old ones, or in a new folder no one can
+guess if another user made that first. Over MCP it comes back as an image.
+
 `headless.rs` runs the same Chrome, profile and `Devtools` without a
 terminal, for `kb ctl` alone: no screencast, a desktop viewport, and a
 small loop of its own rather than the app's, which is built around the
@@ -334,7 +355,15 @@ holding an old id is told its kb has gone rather than driving another.
 
 `control.rs` gives each running kb a number, the lowest not in use, and a
 socket to match: `~/.kittybrowser/kb.sock` for the first, `kb-2.sock` and so
-on after it (mode 0600). The number is taken before anything is written to
+on after it (mode 0600). `~/.kittybrowser` itself, and each profile in it,
+is made 0700 (`private_dir` in `files.rs`), and an earlier kb's 0755 one is
+tightened. A link in its place is followed, as ssh follows `~/.ssh`, but
+a folder another user owns is refused rather than used (run as root with
+HOME kept, the folders of HOME's owner are used). In the shared temporary
+directory, where refusing links is the convention, `private_shared_dir`
+doesn't follow them. On a filesystem that holds no Unix modes the chmods fail and kb
+runs anyway, as Chrome does with its profile; `kb doctor` says so. The
+number is taken before anything is written to
 the terminal, under a file lock so two kbs starting together can't take the
 same one. A kb started with `--name NAME` takes no number: its socket is
 `kb-NAME.sock`, its profile `profiles/NAME` whatever else is running, and

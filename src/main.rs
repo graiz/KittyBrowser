@@ -13,6 +13,7 @@ mod devtools;
 mod dialog;
 mod doctor;
 mod engine;
+mod files;
 mod headless;
 mod history;
 mod keys;
@@ -61,11 +62,13 @@ fn usage_error(message: &str) -> ! {
     std::process::exit(2);
 }
 
-/// Where kb keeps its profile, history, and control socket.
+/// Where kb keeps its profile, history, and control socket. Only the user
+/// can open it: the profile holds live sign-ins, and the socket runs script
+/// in them.
 pub fn data_dir() -> Result<std::path::PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let dir = std::path::PathBuf::from(home).join(".kittybrowser");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    files::private_dir(&dir)?;
     Ok(dir)
 }
 
@@ -146,7 +149,7 @@ fn main() {
     if let Err(err) = result {
         // An empty error has been explained already, at more length.
         if !err.is_empty() {
-            eprintln!("kb: {err}");
+            eprintln!("kb: {}", term::printable(&err));
         }
         std::process::exit(1);
     }

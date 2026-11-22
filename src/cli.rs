@@ -2,8 +2,9 @@
 
 use crate::commands::{self, COMMANDS};
 use crate::control::{self, Output};
+use crate::term::printable;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn usage() -> String {
     let mut text = String::from(
@@ -79,12 +80,12 @@ pub fn run(mut words: &[String]) -> i32 {
     let mut args = match command.parse(words) {
         Ok(args) => args,
         Err(error) => {
-            eprintln!("kb ctl: {error}");
+            eprintln!("kb ctl: {}", printable(&error));
             return 2;
         }
     };
     if let Err(error) = command.resolve_files(&mut args) {
-        eprintln!("kb ctl: {error}");
+        eprintln!("kb ctl: {}", printable(&error));
         return 1;
     }
     // Where to save an image is ours to deal with, not the browser's.
@@ -106,43 +107,114 @@ pub fn run(mut words: &[String]) -> i32 {
 
     match control::request(command.name, args) {
         Ok(Output::Text(text)) => {
-            println!("{text}");
+            println!("{}", printable(&text));
             0
         }
         Ok(Output::Image(png)) => {
-            let path = out.unwrap_or_else(|| {
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |elapsed| elapsed.as_millis());
-                std::env::temp_dir().join(format!("kb-screenshot-{stamp}.png"))
-            });
-            let saved = crate::base64::decode(&png).ok_or("kb sent a damaged image".to_owned()).and_then(|bytes| {
-                if let Some(folder) = path.parent().filter(|folder| !folder.as_os_str().is_empty()) {
-                    let _ = std::fs::create_dir_all(folder);
-                }
-                std::fs::write(&path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
-            });
+            let saved = crate::base64::decode(&png)
+                .ok_or("kb sent a damaged image".to_owned())
+                .and_then(|bytes| save_image(out.as_deref(), &bytes));
             match saved {
-                Ok(()) => {
-                    println!("{}", path.display());
+                Ok(path) => {
+                    if let Some(path) = path {
+                        println!("{}", printable(&path.display().to_string()));
+                    }
                     0
                 }
                 Err(error) => {
-                    eprintln!("kb ctl: {error}");
+                    eprintln!("kb ctl: {}", printable(&error));
                     1
                 }
             }
         }
         Err(error) => {
-            eprintln!("kb ctl: {error}");
+            eprintln!("kb ctl: {}", printable(&error));
             1
         }
     }
 }
 
+/// Save a screenshot at `out`, or without it in a folder of the user's own
+/// in the temporary directory, which the system clears of old files, and
+/// return where, if it is a file. Only the user can read one saved there:
+/// it can show whatever a signed-in page does.
+fn save_image(out: Option<&Path>, bytes: &[u8]) -> Result<Option<PathBuf>, String> {
+    match out {
+        Some(out) => save_out(out, bytes),
+        None => {
+            let folder = screenshot_folder(&std::env::temp_dir(), unsafe { libc::geteuid() })?;
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis());
+            save_new(&folder, stamp, bytes).map(Some)
+        }
+    }
+}
+
+/// The folder in `temp` that screenshots go in: kb-screenshots-UID, named
+/// for the user as /tmp is shared on Linux. Should another user have made
+/// it first, a new one with a name no one can guess.
+fn screenshot_folder(temp: &Path, uid: u32) -> Result<PathBuf, String> {
+    let folder = temp.join(format!("kb-screenshots-{uid}"));
+    match crate::files::private_shared_dir(&folder) {
+        Ok(()) => Ok(folder),
+        // A new one each time while the name is taken; the system clears
+        // them with the rest of the temporary directory.
+        Err(_) => crate::files::private_temp_dir(&format!("kb-screenshots-{uid}-"))
+            .map_err(|e| format!("making a folder for the screenshot: {e}")),
+    }
+}
+
+/// Save `bytes` in a new file in `folder`, named for `stamp`, and a number
+/// after it should two screenshots come in the same millisecond.
+fn save_new(folder: &Path, stamp: u128, bytes: &[u8]) -> Result<PathBuf, String> {
+    for n in 0..100 {
+        let name = match n {
+            0 => format!("kb-screenshot-{stamp}.png"),
+            n => format!("kb-screenshot-{stamp}-{n}.png"),
+        };
+        let path = folder.join(name);
+        match crate::files::write_new(&path, bytes, 0o600) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            result => return result.map(|_| path.clone()).map_err(|e| format!("writing {}: {e}", path.display())),
+        }
+    }
+    Err(format!("couldn't find a free name for a screenshot in {}", folder.display()))
+}
+
+/// Save `bytes` at `path` as cp or curl -o would: a file there is
+/// replaced, a link followed, and a pipe or a device written into. Returns
+/// the path to print if the image went to a file, and not to a pipe, a
+/// device or kb ctl's own output (--out /dev/stdout > shot.png), where the
+/// path would land in the image.
+fn save_out(path: &Path, bytes: &[u8]) -> Result<Option<PathBuf>, String> {
+    use std::io::Write;
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    if path.is_dir() {
+        return Err(format!("{} is a folder; give a file name", path.display()));
+    }
+    if let Some(folder) = path.parent().filter(|folder| !folder.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(folder);
+    }
+    let fail = |e: std::io::Error| format!("writing {}: {e}", path.display());
+    let mut file = std::fs::File::create(path).map_err(fail)?;
+    file.write_all(bytes).map_err(fail)?;
+    let written = file.metadata().map_err(fail)?;
+    let output =
+        std::io::stdout().as_fd().try_clone_to_owned().ok().and_then(|out| std::fs::File::from(out).metadata().ok());
+    let ours = output.is_some_and(|out| (out.dev(), out.ino()) == (written.dev(), written.ino()));
+    Ok((written.is_file() && !ours).then(|| path.to_owned()))
+}
+
 /// `kb list`: the kbs running now, one per line, by number or name.
 /// Returns the exit status.
 pub fn list() -> i32 {
+    // Otherwise a data directory kb refuses would read as no kb running.
+    if let Err(error) = crate::data_dir() {
+        eprintln!("kb: {}", printable(&error));
+        return 1;
+    }
     let running = control::running();
     if running.is_empty() {
         eprintln!("kb: {}", control::NOT_RUNNING);
@@ -161,7 +233,7 @@ pub fn list() -> i32 {
         };
         // The pane tells kbs apart: an agent knows the one it split. The id
         // names this run of it, so a number taken over later isn't mistaken.
-        println!("{instance}\t{page}\t{pane}\t{id}");
+        println!("{}", printable(&format!("{instance}\t{page}\t{pane}\t{id}")));
     }
     0
 }
@@ -169,6 +241,117 @@ pub fn list() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let folder = std::env::temp_dir().join(format!("kb-cli-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir(&folder).unwrap();
+        folder
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn screenshots_are_private_and_new() {
+        let folder = scratch("new");
+        let first = save_new(&folder, 1700000000000, b"one").unwrap();
+        assert_eq!(first, folder.join("kb-screenshot-1700000000000.png"));
+        assert_eq!(mode(&first), 0o600);
+        // The same millisecond again: another file, not the first replaced.
+        let second = save_new(&folder, 1700000000000, b"two").unwrap();
+        assert_eq!(second, folder.join("kb-screenshot-1700000000000-1.png"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+        // A link planted where the next would go isn't written through.
+        let target = folder.join("target");
+        std::fs::write(&target, "untouched").unwrap();
+        std::os::unix::fs::symlink(&target, folder.join("kb-screenshot-5.png")).unwrap();
+        assert_eq!(save_new(&folder, 5, b"three").unwrap(), folder.join("kb-screenshot-5-1.png"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn out_writes_as_cp_would() {
+        let folder = scratch("out");
+        // A link is followed, as cp follows one.
+        let target = folder.join("target");
+        std::fs::write(&target, "old").unwrap();
+        let out = folder.join("shot.png");
+        std::os::unix::fs::symlink(&target, &out).unwrap();
+        assert_eq!(save_image(Some(&out), b"frame").unwrap(), Some(out.clone()));
+        assert_eq!(std::fs::read(&target).unwrap(), b"frame");
+        assert!(std::fs::symlink_metadata(&out).unwrap().file_type().is_symlink());
+        // A new file is made as any of the user's is, not private: it may
+        // be meant for a server or a container to read.
+        let new = folder.join("new.png");
+        save_image(Some(&new), b"frame").unwrap();
+        std::fs::write(folder.join("plain"), "").unwrap();
+        assert_eq!(mode(&new), mode(&folder.join("plain")));
+        // A file is replaced, into a folder made for it.
+        let nested = folder.join("a/b/shot.png");
+        save_image(Some(&nested), b"first, longer").unwrap();
+        save_image(Some(&nested), b"second").unwrap();
+        assert_eq!(std::fs::read(&nested).unwrap(), b"second");
+        assert_eq!(std::fs::read_dir(folder.join("a/b")).unwrap().count(), 1);
+        // A folder in the way is an error.
+        let error = save_image(Some(&folder.join("a")), b"x").unwrap_err();
+        assert!(error.contains("is a folder"), "{error}");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn out_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = scratch("mode");
+        let out = folder.join("shot.png");
+        std::fs::write(&out, "old").unwrap();
+        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o640)).unwrap();
+        save_image(Some(&out), b"new").unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"new");
+        assert_eq!(mode(&out), 0o640);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn out_writes_into_a_pipe_or_a_link_to_one() {
+        let folder = scratch("pipe");
+        let pipe = folder.join("pipe");
+        let name = std::ffi::CString::new(pipe.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // As /dev/stdout is a link to the process's output.
+        let link = folder.join("stdout");
+        std::os::unix::fs::symlink(&pipe, &link).unwrap();
+        for out in [&pipe, &link] {
+            let reader = {
+                let pipe = pipe.clone();
+                std::thread::spawn(move || std::fs::read(pipe).unwrap())
+            };
+            // No path to print: the pipe has the image.
+            assert_eq!(save_image(Some(out), b"png bytes").unwrap(), None);
+            assert_eq!(reader.join().unwrap(), b"png bytes");
+        }
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn screenshots_go_elsewhere_if_their_folder_is_taken() {
+        let temp = scratch("taken");
+        assert_eq!(screenshot_folder(&temp, 4242).unwrap(), temp.join("kb-screenshots-4242"));
+        // Another user's, or a link in its place, as one could plant in /tmp.
+        std::fs::remove_dir(temp.join("kb-screenshots-4242")).unwrap();
+        std::os::unix::fs::symlink(&temp, temp.join("kb-screenshots-4242")).unwrap();
+        let instead = screenshot_folder(&temp, 4242).unwrap();
+        let name = instead.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("kb-screenshots-4242-") && name.len() == "kb-screenshots-4242-".len() + 6);
+        assert_eq!(mode(&instead), 0o700);
+        std::fs::remove_dir(&instead).unwrap();
+        std::fs::remove_dir_all(&temp).unwrap();
+    }
 
     #[test]
     fn files_and_hosts() {

@@ -190,7 +190,7 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
 fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str>) -> Result<String, String> {
     // Its own profile, so that benches can run side by side.
     let profile = crate::data_dir()?.join(format!("profile-bench-{}", std::process::id()));
-    std::fs::create_dir_all(&profile).map_err(|e| format!("creating {}: {e}", profile.display()))?;
+    crate::files::private_dir(&profile)?;
     let (chrome, mut receiver) = match Chrome::launch(&profile, scale, false) {
         Ok(launched) => launched,
         Err(error) => {
@@ -329,8 +329,7 @@ fn run_modes(
                         Source::Jpeg(_) => graphics::decode_jpeg(&bytes),
                     }
                     .ok_or("couldn't decode a frame")?;
-                    let path = graphics::next_path();
-                    std::fs::write(&path, &pixels.data).map_err(|e| format!("writing {}: {e}", path.display()))?;
+                    let path = graphics::write_frame(&pixels.data).map_err(|e| format!("writing a frame: {e}"))?;
                     graphics::put_file(&mut out, &path, &pixels, cols, rows);
                 }
             }

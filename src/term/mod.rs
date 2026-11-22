@@ -38,6 +38,31 @@ pub fn copy(text: &str) {
     write(format!("\x1b]52;c;{}\x1b\\", crate::base64::encode(text.as_bytes())).as_bytes());
 }
 
+/// `text` made safe to print to a terminal: newlines and tabs kept, every
+/// other control character (C1 too) shown as �. Page text, titles, console
+/// messages and errors carry whatever a page put in them, and printed raw,
+/// an escape sequence in them could retitle the terminal, write its
+/// clipboard, or worse. A carriage return just before a newline is kept:
+/// it can't overwrite anything there, and text from forms and the network
+/// often ends its lines so.
+pub fn printable(text: &str) -> String {
+    let mut chars = text.chars().peekable();
+    let mut shown = String::with_capacity(text.len());
+    while let Some(c) = chars.next() {
+        let kept = !c.is_control() || c == '\n' || c == '\t' || (c == '\r' && chars.peek() == Some(&'\n'));
+        shown.push(if kept { c } else { '\u{fffd}' });
+    }
+    shown
+}
+
+/// `text` to draw in the pane, with its control characters dropped. Page
+/// text there (an address, an inspected element, a note quoting the page)
+/// is laid out cell by cell, and a control character in it would be sent
+/// to the terminal as one.
+pub fn drawable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
 pub fn write(bytes: &[u8]) {
     let mut out = io::stdout().lock();
     let _ = out.write_all(bytes);
@@ -70,8 +95,10 @@ pub fn enter() -> io::Result<()> {
     Ok(())
 }
 
-/// Undo `enter`. Safe to call more than once, or without `enter`.
+/// Undo `enter`, and remove the frames left for the terminal. Safe to call
+/// more than once, or without `enter`.
 pub fn leave() {
+    graphics::remove_frames();
     if let Some(termios) = ORIGINAL.get() {
         write(LEAVE);
         // Replies to our queries may still be on their way, when kb exits
@@ -153,7 +180,24 @@ fn graphics_answer(replies: &[u8]) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::graphics_answer;
+    use super::{graphics_answer, printable};
+
+    #[test]
+    fn page_text_cant_drive_the_terminal() {
+        assert_eq!(printable("line one\n\tline two"), "line one\n\tline two");
+        assert_eq!(printable("a\x1b[2Jb"), "a\u{fffd}[2Jb");
+        assert_eq!(printable("over\rwrite"), "over\u{fffd}write");
+        assert_eq!(printable("crlf\r\nlines\r\n\r"), "crlf\r\nlines\r\n\u{fffd}");
+        assert_eq!(printable("next\u{85}line, \u{9b}31m"), "next\u{fffd}line, \u{fffd}31m");
+        assert_eq!(printable("bell\x07 del\x7f"), "bell\u{fffd} del\u{fffd}");
+        // Writing the clipboard: nothing of the sequence's controls survives.
+        let osc52 = "copied \x1b]52;c;cm0gLXJmIH4=\x07 or \x1b]52;c;cm0gLXJmIH4=\x1b\\";
+        let shown = printable(osc52);
+        assert!(!shown.contains(|c: char| c.is_control()), "{shown:?}");
+        assert_eq!(shown, "copied \u{fffd}]52;c;cm0gLXJmIH4=\u{fffd} or \u{fffd}]52;c;cm0gLXJmIH4=\u{fffd}\\");
+        // Other scripts and symbols are left as they are.
+        assert_eq!(printable("café ✕ 日本"), "café ✕ 日本");
+    }
 
     #[test]
     fn reads_whether_the_terminal_draws_graphics() {

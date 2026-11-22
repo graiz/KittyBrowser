@@ -98,20 +98,132 @@ pub fn decode_jpeg(bytes: &[u8]) -> Option<Pixels> {
     })
 }
 
-/// Where to put frame number `seq` for the terminal to read. The protocol
-/// wants a temporary directory and this phrase in the name before it will
-/// read, then delete, a file.
-pub fn temp_path(seq: u64) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("tty-graphics-protocol-kb-{}-{seq}", std::process::id()))
+/// Where frames wait for the terminal to read them. The protocol wants them
+/// under the temporary directory, with `tty-graphics-protocol` in the path,
+/// before it will read, then delete, a file. That directory is shared on
+/// Linux, so frames go in a folder of their own made once per run: only the
+/// user can open it, and its name can't be guessed, so no one else can read
+/// a frame of a signed-in page or put a file or link where kb will write
+/// one.
+struct Frames {
+    folder: Option<std::path::PathBuf>,
+    next: u64,
 }
 
-/// A `temp_path` no other frame or tile has used.
-pub fn next_path() -> std::path::PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    temp_path(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+impl Frames {
+    const fn new() -> Frames {
+        Frames { folder: None, next: 1 }
+    }
+
+    /// Save `bytes` in a new file for the terminal, and return its path.
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+        let mut again = true;
+        loop {
+            let folder = match &self.folder {
+                Some(folder) => folder,
+                None => {
+                    sweep(&std::env::temp_dir());
+                    let prefix = format!("{FRAMES_PREFIX}{}-", std::process::id());
+                    self.folder.insert(crate::files::private_temp_dir(&prefix)?)
+                }
+            };
+            let path = folder.join(format!("tty-graphics-protocol-{}", self.next));
+            self.next += 1;
+            match crate::files::write_new(&path, bytes, 0o600) {
+                // The folder went, taken by something clearing the
+                // temporary directory: make another, once.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && std::mem::take(&mut again) => {
+                    self.folder = None;
+                }
+                result => return result.map(|_| path),
+            }
+        }
+    }
+
+    /// Remove the folder and whatever the terminal left in it.
+    fn remove(&mut self) {
+        if let Some(folder) = self.folder.take() {
+            let _ = std::fs::remove_dir_all(folder);
+        }
+    }
 }
 
-/// Append the escape that draws the pixels saved at `path` (see `temp_path`)
+/// What frame folders and files are named for: this phrase, then the
+/// process id of the kb that wrote them, so the next kb can tell whose run
+/// is over.
+const FRAMES_PREFIX: &str = "tty-graphics-protocol-kb-";
+
+/// Remove from `dir` the frames of kbs no longer running: the folders of
+/// ones that were killed, or whose pane closed, before they could remove
+/// their own, and the files earlier kbs wrote straight into it. Only the
+/// user's own, and nothing a running kb is using: a kb in a container
+/// sharing /tmp has process ids of its own, so a folder written to in the
+/// last `SWEEP_AFTER` is left too.
+fn sweep(dir: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let me = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(run_of) else { continue };
+        // Of the entry itself, not of what a link names.
+        let Ok(file) = entry.metadata() else { continue };
+        let unchanged = file.modified().ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age >= SWEEP_AFTER);
+        if file.uid() != me || !unchanged || running(pid) {
+            continue;
+        }
+        let _ = match file.is_dir() {
+            true => std::fs::remove_dir_all(entry.path()),
+            false => std::fs::remove_file(entry.path()),
+        };
+    }
+}
+
+/// How long frames sit unchanged before the sweep takes them.
+const SWEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The process id in a frame folder or file's name, if it is one.
+fn run_of(name: &str) -> Option<i32> {
+    let pid: i32 = name.strip_prefix(FRAMES_PREFIX)?.split('-').next()?.parse().ok()?;
+    (pid > 0).then_some(pid)
+}
+
+/// Whether process `pid` is running, someone else's included.
+fn running(pid: i32) -> bool {
+    pid as u32 == std::process::id()
+        || unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+static FRAMES: std::sync::Mutex<Frames> = std::sync::Mutex::new(Frames::new());
+
+/// Save a frame's pixels for the terminal to read (see `Frames`), and
+/// return the file's path.
+pub fn write_frame(bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    FRAMES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).write(bytes)
+}
+
+/// Remove the frames' folder, as kb leaves the terminal.
+pub fn remove_frames() {
+    // Not waited for: leave runs from the panic hook too, and a panic while
+    // writing a frame holds the lock. Then the next kb's sweep removes them.
+    match FRAMES.try_lock() {
+        Ok(mut frames) => frames.remove(),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner().remove(),
+        Err(std::sync::TryLockError::WouldBlock) => {}
+    }
+}
+
+/// Remove the frames' folder once it is empty: tests draw at the same time,
+/// and one finishing mustn't take the folder from under another.
+#[cfg(test)]
+pub fn tidy_frames() {
+    let mut frames = FRAMES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if frames.folder.as_ref().is_some_and(|folder| std::fs::remove_dir(folder).is_ok()) {
+        frames.folder = None;
+    }
+}
+
+/// Append the escape that draws the pixels saved at `path` (see `write_frame`)
 /// at the cursor, scaled to fill `cols` x `rows` cells. The terminal reads
 /// the file itself and deletes it, so nothing but its name crosses the pty.
 pub fn put_file(out: &mut Vec<u8>, path: &std::path::Path, pixels: &Pixels, cols: u16, rows: u16) {
@@ -235,8 +347,7 @@ impl Tiles {
             for id in self.overlaid.drain(..) {
                 out.extend_from_slice(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes());
             }
-            let path = next_path();
-            std::fs::write(&path, &new.data).ok()?;
+            let path = write_frame(&new.data).ok()?;
             out.extend_from_slice(format!("\x1b[{top};1H").as_bytes());
             put_raw_file(out, &path, (new.width, new.height), new.alpha, IMAGE_ID, PAGE_Z, cols, rows);
             self.last.push(path);
@@ -245,8 +356,7 @@ impl Tiles {
             for &(id, col, row, tile_cols, tile_rows) in &changed {
                 let (x, y) = (col as u32 * cell.0, row as u32 * cell.1);
                 let tile = cut(&new, x, y, tile_cols as u32 * cell.0, tile_rows as u32 * cell.1);
-                let path = next_path();
-                std::fs::write(&path, &tile.data).ok()?;
+                let path = write_frame(&tile.data).ok()?;
                 out.extend_from_slice(format!("\x1b[{};{}H", top + row, col + 1).as_bytes());
                 let size = (tile.width, tile.height);
                 put_raw_file(out, &path, size, new.alpha, id, TILE_Z, tile_cols, tile_rows);
@@ -300,13 +410,13 @@ pub const FILE_QUERY_ID: u32 = 2;
 /// Ask the terminal whether it will read pixels from a temporary file,
 /// which is far quicker than sending them through the pty. The answer
 /// arrives as an `input::Event::Graphics` with `FILE_QUERY_ID`. A terminal
-/// on another machine can't see our files and says no.
-pub fn ask_about_files() {
-    let path = temp_path(0);
-    if std::fs::write(&path, [0, 0, 0]).is_ok() {
-        let name = crate::base64::encode(path.as_os_str().as_encoded_bytes());
-        super::write(format!("\x1b_Ga=q,i={FILE_QUERY_ID},f=24,s=1,v=1,t=t;{name}\x1b\\").as_bytes());
-    }
+/// on another machine can't see our files and says no. Returns the file
+/// asked about, to remove should the terminal not.
+pub fn ask_about_files() -> Option<std::path::PathBuf> {
+    let path = write_frame(&[0, 0, 0]).ok()?;
+    let name = crate::base64::encode(path.as_os_str().as_encoded_bytes());
+    super::write(format!("\x1b_Ga=q,i={FILE_QUERY_ID},f=24,s=1,v=1,t=t;{name}\x1b\\").as_bytes());
+    Some(path)
 }
 
 /// Width and height of a base64 PNG, read from its header. For diagnostics.
@@ -398,6 +508,84 @@ mod tests {
         for path in tiles.last.drain(..) {
             let _ = std::fs::remove_file(path);
         }
+        tidy_frames();
+    }
+
+    #[test]
+    fn frames_are_private_and_go_with_their_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &std::path::Path| path.metadata().unwrap().permissions().mode() & 0o777;
+        let mut frames = Frames::new();
+        let first = frames.write(b"first").unwrap();
+        let second = frames.write(b"second").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+        assert_eq!(mode(&first), 0o600);
+        let folder = first.parent().unwrap();
+        assert_eq!(mode(folder), 0o700);
+        // Where the terminal will read them: under the temporary directory,
+        // with the protocol's phrase in the name.
+        assert!(folder.starts_with(std::env::temp_dir()));
+        assert!(first.to_str().unwrap().contains("tty-graphics-protocol"));
+        // Another run's folder is another name.
+        let mut other = Frames::new();
+        assert_ne!(other.write(b"").unwrap().parent(), Some(folder));
+        other.remove();
+        // Something clearing the temporary directory takes the folder: the
+        // next frame goes in a new one.
+        std::fs::remove_dir_all(folder).unwrap();
+        let third = frames.write(b"third").unwrap();
+        assert_ne!(third.parent(), Some(folder));
+        assert_eq!(std::fs::read(&third).unwrap(), b"third");
+        frames.remove();
+        assert!(!first.exists() && !second.exists() && !third.exists());
+        assert!(!folder.exists());
+    }
+
+    #[test]
+    fn leaving_while_a_frame_is_written_doesnt_wait() {
+        // As when the panic hook runs inside Frames::write.
+        let held = FRAMES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        remove_frames();
+        drop(held);
+    }
+
+    #[test]
+    fn frames_of_runs_that_are_over_are_swept() {
+        assert_eq!(run_of("tty-graphics-protocol-kb-123-aZ09xy"), Some(123));
+        assert_eq!(run_of("tty-graphics-protocol-kb-123-7"), Some(123));
+        assert_eq!(run_of("tty-graphics-protocol-kb-0-7"), None);
+        assert_eq!(run_of("tty-graphics-protocol-kb-99999999999-7"), None);
+        assert_eq!(run_of("tty-graphics-protocol-other-1"), None);
+        assert_eq!(run_of("kb-history"), None);
+
+        let dir = std::env::temp_dir().join(format!("kb-sweep-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let gone = child.id();
+        child.wait().unwrap();
+        let mine = std::process::id();
+        let killed = dir.join(format!("tty-graphics-protocol-kb-{gone}-AbC123"));
+        std::fs::create_dir(&killed).unwrap();
+        std::fs::write(killed.join("tty-graphics-protocol-4"), "frame").unwrap();
+        let old = dir.join(format!("tty-graphics-protocol-kb-{gone}-17"));
+        std::fs::write(&old, "frame").unwrap();
+        let live = dir.join(format!("tty-graphics-protocol-kb-{mine}-XyZ789"));
+        std::fs::create_dir(&live).unwrap();
+        let other = dir.join("tty-graphics-protocol-other");
+        std::fs::write(&other, "").unwrap();
+        // Written to just now, perhaps by a kb in a container.
+        let fresh = dir.join(format!("tty-graphics-protocol-kb-{gone}-FrEsH1"));
+        std::fs::create_dir(&fresh).unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for path in [&killed, &old, &live, &other] {
+            std::fs::File::open(path).unwrap().set_modified(hour_ago).unwrap();
+        }
+        sweep(&dir);
+        assert!(!killed.exists() && !old.exists());
+        assert!(live.exists() && other.exists() && fresh.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
