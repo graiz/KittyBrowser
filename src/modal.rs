@@ -69,6 +69,11 @@ impl Canvas {
                 0 => {
                     if let Some(last) = last {
                         self.cells[cell + last].0.push(c);
+                        // ❤ with VS16 is drawn as the two-cell emoji.
+                        if c == VS16 && last + 1 == at && at < end {
+                            self.set(cell + at, String::new(), style);
+                            at += 1;
+                        }
                     }
                 }
                 wide => {
@@ -120,7 +125,10 @@ impl Canvas {
         }
         self.put(top + h - 1, side, &format!("╰{}╯", "─".repeat(w - 2)), Style::Plain);
         if !title.is_empty() {
-            self.put_limited(top, side + 2, &format!(" {title} "), Style::Title, w.saturating_sub(4));
+            // In the middle of the top edge, as dialog(1) and whiptail set it.
+            let title = format!(" {title} ");
+            let col = side + 2 + w.saturating_sub(4 + text_width(&title)) / 2;
+            self.put_limited(top, col, &title, Style::Accent, w.saturating_sub(4));
         }
     }
 
@@ -131,13 +139,14 @@ impl Canvas {
         }
     }
 
-    /// A button, "[ label ]"-shaped but drawn as a filled block. Returns the
+    /// A button, "< label >" as in dialog(1): filled in the accent colour
+    /// when Enter presses it, plain on the box otherwise. Returns the
     /// columns it covers.
     pub fn button(&mut self, row: usize, col: usize, label: &str, default: bool) -> std::ops::Range<usize> {
-        let text = format!("  {label}  ");
+        let text = format!("< {label} >");
         // Never over the frame at the right edge.
         let limit = self.width.saturating_sub(1).saturating_sub(col);
-        let end = self.put_limited(row, col, &text, if default { Style::Default } else { Style::Field }, limit);
+        let end = self.put_limited(row, col, &text, if default { Style::Default } else { Style::Plain }, limit);
         col..end
     }
 
@@ -159,7 +168,8 @@ impl Canvas {
     }
 
     /// Draw the canvas centred in a `cols` x `rows` screen below the top
-    /// bar. Returns where it went.
+    /// bar, with a shadow on the page below it and to its right where there
+    /// is room. Returns where it went, shadow included.
     pub fn draw(&self, out: &mut Vec<u8>, cols: u16, rows: u16) -> Rect {
         let width = (self.width as u16).min(cols);
         let height = (self.height as u16).min(rows.saturating_sub(1));
@@ -191,9 +201,24 @@ impl Canvas {
                 s.push_str(text);
             }
         }
+        // Two columns at the right and one row below, offset down and
+        // right, as a terminal dialog's shadow: cells are twice as tall as
+        // they are wide.
+        let mut rect = Rect { col, row, width, height };
+        let room_right = col + width < cols;
+        let room_below = row + height <= rows;
+        if room_right && room_below && height > 1 {
+            s.push_str(&colors.shadow);
+            for y in row + 1..row + height {
+                let _ = write!(s, "\x1b[{y};{}H  ", col + width);
+            }
+            let _ = write!(s, "\x1b[{};{}H{}", row + height, col + 2, " ".repeat(width as usize));
+            rect.width += 2;
+            rect.height += 1;
+        }
         s.push_str("\x1b[0m");
         out.extend_from_slice(s.as_bytes());
-        Rect { col, row, width, height }
+        rect
     }
 
     /// The text of a row, for tests.
@@ -213,8 +238,11 @@ pub fn inside(rect: Rect, col: usize, row: usize) -> Option<(usize, usize)> {
 
 /// How many cells a character takes in a terminal: 2 for East Asian wide
 /// characters and emoji, 0 for marks combined with the one before, else 1.
+/// Emoji sequences are approximate: a skin tone joins the emoji before it,
+/// and VS16 (U+FE0F) widens a narrow one, but ZWJ sequences count each part.
 pub fn width(c: char) -> usize {
     match c as u32 {
+        0x1F3FB..=0x1F3FF => 0,
         0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05BD | 0x0610..=0x061A | 0x064B..=0x065F => 0,
         0x0E31 | 0x0E34..=0x0E3A | 0x0E47..=0x0E4E | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF => 0,
         0x200B..=0x200F | 0x20D0..=0x20FF | 0x3099..=0x309A | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F => 0,
@@ -241,8 +269,19 @@ pub fn width(c: char) -> usize {
 
 /// How many cells `text` takes.
 pub fn text_width(text: &str) -> usize {
-    text.chars().map(width).sum()
+    let mut last = 0;
+    text.chars()
+        .map(|c| {
+            // VS16 asks for the emoji form, two cells wide.
+            let wide = if c == VS16 && last == 1 { 1 } else { width(c) };
+            last = if wide == 0 { last } else { wide };
+            wide
+        })
+        .sum()
 }
+
+/// Variation selector 16, which asks for a character's emoji form.
+const VS16: char = '\u{FE0F}';
 
 /// Break `text` into lines at most `width` cells long, at spaces where it
 /// can and mid-word where it must, keeping the lines it already has.
@@ -303,6 +342,10 @@ mod tests {
     fn wide_characters_take_two_cells() {
         assert_eq!(text_width("保存しました"), 12);
         assert_eq!(text_width("📁 a"), 4);
+        assert_eq!(text_width("👍🏽"), 2);
+        assert_eq!(text_width("❤\u{FE0F}x"), 3);
+        let mut canvas = Canvas::new(4, 1);
+        assert_eq!(canvas.put(0, 0, "❤\u{FE0F}x", Style::Text), 3);
         // A decomposed é, as macOS names files, is one cell.
         assert_eq!(text_width("cafe\u{301}"), 4);
         assert_eq!(cut("保存しました", 5), "保存");
@@ -326,7 +369,7 @@ mod tests {
     fn frame_and_title() {
         let mut canvas = Canvas::new(12, 3);
         canvas.frame("Hi");
-        assert_eq!(canvas.line(0), "╭─ Hi ─────╮");
+        assert_eq!(canvas.line(0), "╭─── Hi ───╮");
         assert_eq!(canvas.line(1), "│          │");
         assert_eq!(canvas.line(2), "╰──────────╯");
     }

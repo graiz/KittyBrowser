@@ -308,6 +308,8 @@ pub(crate) struct Palette {
     pub box_text: String,
     /// A text field in a box: sunk to the terminal's background.
     pub input: String,
+    /// The shadow a box casts on the page.
+    pub shadow: String,
 }
 
 static PALETTE: std::sync::RwLock<Option<Palette>> = std::sync::RwLock::new(None);
@@ -325,6 +327,7 @@ pub(crate) fn palette() -> Palette {
         box_accent: "\x1b[0;48;5;236;38;5;141;1m".into(),
         box_text: "\x1b[0;48;5;236;38;5;231m".into(),
         input: "\x1b[0;48;5;233;38;5;231m".into(),
+        shadow: "\x1b[0;48;5;232m".into(),
     })
 }
 
@@ -361,6 +364,8 @@ pub fn use_terminal_colors(fg: Rgb, bg: Rgb) {
         box_accent: style(bar, art, ";1"),
         box_text: style(bar, fg, ""),
         input: style(bg, fg, ""),
+        // Darker than the terminal, so it reads as a shadow on light and dark.
+        shadow: style(mix(bg, (0, 0, 0), if is_dark(bg) { 0.6 } else { 0.35 }), fg, ""),
     };
     if let Ok(mut current) = PALETTE.write() {
         *current = Some(palette);

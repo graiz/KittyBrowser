@@ -1244,7 +1244,9 @@ mod tests {
         picker.wheel(3);
         let (canvas, _) = picker.layout(100, 30);
         assert_eq!((picker.selected, picker.scroll), (0, 3));
-        assert!(canvas.line(picker.drawn.list_top).contains("file000"));
+        // The list's top row is the fourth entry, past "..", archive and Photos.
+        let top = canvas.line(picker.drawn.list_top);
+        assert!(top.contains(&picker.entries[3].name) && !top.contains("archive"), "{top}");
         // A key brings the selection back into view.
         press(&mut picker, KeyCode::Down);
         picker.layout(100, 30);

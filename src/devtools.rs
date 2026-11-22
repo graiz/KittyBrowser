@@ -933,7 +933,9 @@ pub enum Asking {
 /// Whether pages at `a` and `b` may run on one thread, so that a dialog in
 /// one freezes the other: Chrome puts a page and the popups it opens in one
 /// process when they are on the same site, and every file in one. Unless
-/// both sites are known and differ, they may.
+/// both sites are known and differ, they may. The site is taken as the last
+/// two labels of the host, so two pages under one public suffix (a.co.uk
+/// and b.co.uk) count as one: that blocks too much, never too little.
 fn may_share_thread(a: &str, b: &str) -> bool {
     fn site(url: &str) -> Option<String> {
         if url.starts_with("file:") {
@@ -964,9 +966,10 @@ fn may_share_thread(a: &str, b: &str) -> bool {
 const ANSWER_IT: &str = "kb ctl dialog accept (or dismiss) answers it";
 
 impl Question {
-    /// The window that asked, numbered as kb ctl window lists them.
-    fn window(&self, chrome: &Chrome) -> usize {
-        chrome.window_sessions().iter().position(|session| *session == self.session).map_or(0, |at| at + 1)
+    /// The window that asked, numbered as kb ctl window lists them, if it
+    /// is still open.
+    fn window(&self, chrome: &Chrome) -> Option<usize> {
+        chrome.window_sessions().iter().position(|session| *session == self.session).map(|at| at + 1)
     }
 
     /// The dialog, as it is named to agents: a confirm "Sure?" from example.com.
@@ -1411,7 +1414,10 @@ impl Devtools {
                         );
                     }
                     for waiting in &self.questions {
-                        let _ = write!(rest, "\nwaiting: {} in window {}", waiting.describe(), waiting.window(chrome));
+                        let _ = write!(rest, "\nwaiting: {}", waiting.describe());
+                        if let Some(window) = waiting.window(chrome) {
+                            let _ = write!(rest, " in window {window}");
+                        }
                         if matches!(waiting.asking, Asking::Dialog { .. }) {
                             let _ = write!(rest, "; the user can answer it in the pane, or {ANSWER_IT}");
                         }
