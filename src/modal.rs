@@ -3,7 +3,8 @@
 //! (picker.rs). Both are laid out on a `Canvas` of cells, then drawn as
 //! ordinary text above the page image, the way the help box is.
 
-use crate::ui::{self, AddressBar, Rect};
+use crate::term::graphics::Pixels;
+use crate::ui::{self, AddressBar, Rect, Rgb};
 use std::fmt::Write;
 
 /// The look of a run of cells.
@@ -25,6 +26,68 @@ pub enum Style {
     Focused,
     /// The button Enter presses.
     Default,
+}
+
+/// The page as last drawn, decoded, to cast a shadow on: a cell can't
+/// darken what is under it, only cover it, so the shadow is the page's own
+/// colours, darker.
+pub struct Shade {
+    pub pixels: Pixels,
+    /// The cells the page image covers, from the top left below the bar.
+    pub page: Rect,
+}
+
+impl Shade {
+    /// The page's colours in the top and bottom halves of a cell of the
+    /// pane (from 1), or None off the page.
+    fn at(&self, col: u16, row: u16) -> Option<[Rgb; 2]> {
+        let page = self.page;
+        if !(page.col..page.col + page.width).contains(&col) || !(page.row..page.row + page.height).contains(&row) {
+            return None;
+        }
+        let (width, height) = (self.pixels.width as usize, self.pixels.height as usize);
+        let channels = if self.pixels.alpha { 4 } else { 3 };
+        let span = |at: u16, start: u16, cells: u16, pixels: usize| {
+            let (at, cells) = ((at - start) as usize, cells.max(1) as usize);
+            let from = at * pixels / cells;
+            (from, ((at + 1) * pixels / cells).clamp(from + 1, pixels.max(from + 1)))
+        };
+        let (x0, x1) = span(col, page.col, page.width, width);
+        let (y0, y1) = span(row, page.row, page.height, height);
+        let middle = (y0 + y1).div_ceil(2);
+        // A few samples across each half are enough for its colour.
+        let average = |top: usize, bottom: usize| -> Rgb {
+            let (mut sum, mut n) = ([0usize; 3], 0);
+            let step = |a: usize, b: usize| (b.saturating_sub(a) / 4).max(1);
+            for y in (top..bottom.max(top + 1)).step_by(step(top, bottom)) {
+                for x in (x0..x1).step_by(step(x0, x1)) {
+                    let at = (y * width + x) * channels;
+                    if let Some(pixel) = self.pixels.data.get(at..at + 3) {
+                        sum = [sum[0] + pixel[0] as usize, sum[1] + pixel[1] as usize, sum[2] + pixel[2] as usize];
+                        n += 1;
+                    }
+                }
+            }
+            let n = n.max(1);
+            ((sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8)
+        };
+        Some([average(y0, middle), average(middle, y1)])
+    }
+}
+
+/// A colour in shadow.
+fn darken((r, g, b): Rgb) -> Rgb {
+    let dim = |c: u8| (c as f64 * 0.45) as u8;
+    (dim(r), dim(g), dim(b))
+}
+
+/// A cell drawn as an upper half block in `top` over `bottom`.
+fn halves(s: &mut String, col: u16, row: u16, top: Rgb, bottom: Rgb) {
+    let _ = write!(
+        s,
+        "\x1b[{row};{col}H\x1b[0;38;2;{};{};{};48;2;{};{};{}m▀",
+        top.0, top.1, top.2, bottom.0, bottom.1, bottom.2
+    );
 }
 
 /// A grid of cells to lay a box out on before drawing it. A cell holds a
@@ -168,9 +231,9 @@ impl Canvas {
     }
 
     /// Draw the canvas centred in a `cols` x `rows` screen below the top
-    /// bar, with a shadow on the page below it and to its right where there
-    /// is room. Returns where it went, shadow included.
-    pub fn draw(&self, out: &mut Vec<u8>, cols: u16, rows: u16) -> Rect {
+    /// bar, with a shadow below it and to its right where it falls on the
+    /// page `shade` holds. Returns where it went, shadow included.
+    pub fn draw(&self, out: &mut Vec<u8>, cols: u16, rows: u16, shade: Option<&Shade>) -> Rect {
         let width = (self.width as u16).min(cols);
         let height = (self.height as u16).min(rows.saturating_sub(1));
         let col = (cols - width) / 2 + 1;
@@ -201,21 +264,23 @@ impl Canvas {
                 s.push_str(text);
             }
         }
-        // Two columns at the right and one row below, offset down and
-        // right, as a terminal dialog's shadow: cells are twice as tall as
-        // they are wide.
-        let mut rect = Rect { col, row, width, height };
-        let room_right = col + width < cols;
-        let room_below = row + height <= rows;
-        if room_right && room_below && height > 1 {
-            s.push_str(&colors.shadow);
-            for y in row + 1..row + height {
-                let _ = write!(s, "\x1b[{y};{}H  ", col + width);
+        // A column at the right and half a row below, offset down and
+        // right: about as thick both ways, cells being twice as tall as
+        // wide. Only on the page: off it, it would hang over nothing.
+        let (right, below) = (col + width, row + height);
+        if let Some(shade) = shade {
+            for y in row + 1..below {
+                if let Some([top, bottom]) = shade.at(right, y) {
+                    halves(&mut s, right, y, darken(top), darken(bottom));
+                }
             }
-            let _ = write!(s, "\x1b[{};{}H{}", row + height, col + 2, " ".repeat(width as usize));
-            rect.width += 2;
-            rect.height += 1;
+            for x in col + 1..=right {
+                if let Some([top, bottom]) = shade.at(x, below) {
+                    halves(&mut s, x, below, darken(top), bottom);
+                }
+            }
         }
+        let rect = Rect { col, row, width: (width + 1).min(cols + 1 - col), height: (height + 1).min(rows + 1 - row) };
         s.push_str("\x1b[0m");
         out.extend_from_slice(s.as_bytes());
         rect
@@ -372,6 +437,25 @@ mod tests {
         assert_eq!(canvas.line(0), "╭─── Hi ───╮");
         assert_eq!(canvas.line(1), "│          │");
         assert_eq!(canvas.line(2), "╰──────────╯");
+    }
+
+    #[test]
+    fn the_shadow_is_the_page_darker() {
+        // A page 4 cells wide and 2 high, 2x4 pixels a cell: white above
+        // the middle of each cell, black below.
+        let (width, height) = (8, 8);
+        let mut data = Vec::new();
+        for y in 0..height {
+            let value = if y % 4 < 2 { 255 } else { 0 };
+            data.extend(std::iter::repeat_n(value, width * 3));
+        }
+        let pixels = Pixels { width: width as u32, height: height as u32, alpha: false, data };
+        let shade = Shade { pixels, page: Rect { col: 1, row: 2, width: 4, height: 2 } };
+        assert_eq!(shade.at(1, 2), Some([(255, 255, 255), (0, 0, 0)]));
+        assert_eq!(shade.at(4, 3), Some([(255, 255, 255), (0, 0, 0)]));
+        assert_eq!(shade.at(5, 2), None);
+        assert_eq!(shade.at(1, 1), None);
+        assert_eq!(darken((200, 100, 0)), (90, 45, 0));
     }
 
     #[test]

@@ -709,9 +709,15 @@ impl Picker {
 
     /// Draw the window over the page. Returns where it went and where the
     /// cursor belongs (column, row of the pane).
-    pub fn render(&mut self, out: &mut Vec<u8>, cols: u16, rows: u16) -> (Rect, Option<(u16, u16)>) {
+    pub fn render(
+        &mut self,
+        out: &mut Vec<u8>,
+        cols: u16,
+        rows: u16,
+        shade: Option<&crate::modal::Shade>,
+    ) -> (Rect, Option<(u16, u16)>) {
         let (canvas, cursor) = self.layout(cols as usize, rows as usize);
-        let rect = canvas.draw(out, cols, rows);
+        let rect = canvas.draw(out, cols, rows, shade);
         self.drawn.rect = Some(rect);
         let cursor = cursor.map(|(row, col)| (rect.col + col as u16, rect.row + row as u16));
         (rect, cursor)
@@ -1217,7 +1223,7 @@ mod tests {
     fn clicks_select_and_double_clicks_open() {
         let scratch = Scratch::new("clicks");
         let mut picker = Picker::new(1, true, "", "https://a.com/", &scratch.0);
-        let (rect, _) = picker.render(&mut Vec::new(), 120, 30);
+        let (rect, _) = picker.render(&mut Vec::new(), 120, 30, None);
         let col = rect.col as usize + picker.drawn.list_cols.start + 4;
         let top = rect.row as usize + picker.drawn.list_top;
         let row = |n: usize| top + n;

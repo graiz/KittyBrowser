@@ -281,6 +281,9 @@ struct App {
     modal_rects: Vec<ui::Rect>,
     /// The folder the file chooser was last left in, to open there next.
     last_folder: Option<std::path::PathBuf>,
+    /// The frame decoded, for the shadow the boxes cast on the page, and
+    /// which frame it was (where its text was, and how long).
+    shade: Option<((usize, usize), crate::modal::Shade)>,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -403,6 +406,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         picker: None,
         modal_rects: Vec::new(),
         last_folder: None,
+        shade: None,
     };
     if let Some(dark) = options.dark {
         app.chrome.color_scheme(Some(dark));
@@ -1142,14 +1146,21 @@ impl App {
             ui::blank(out, rect);
         }
         let (cols, rows) = (self.window.cols, self.window.rows);
+        if self.picker.is_none() && self.dialog.is_none() {
+            // Not kept while nothing needs it: a frame is megabytes decoded.
+            self.shade = None;
+            return;
+        }
+        self.update_shade();
+        let shade = self.shade.as_ref().map(|(_, shade)| shade);
         let mut cursor = None;
         if let Some(picker) = &mut self.picker {
-            let (rect, at) = picker.render(out, cols, rows);
+            let (rect, at) = picker.render(out, cols, rows, shade);
             self.modal_rects.push(rect);
             cursor = at;
         }
         if let Some(dialog) = &mut self.dialog {
-            let (rect, at) = dialog.render(out, cols, rows);
+            let (rect, at) = dialog.render(out, cols, rows, shade);
             self.modal_rects.push(rect);
             cursor = at;
         }
@@ -1159,6 +1170,24 @@ impl App {
         match cursor {
             Some((col, row)) => out.extend_from_slice(format!("\x1b[{row};{col}H\x1b[6 q\x1b[?25h").as_bytes()),
             None => out.extend_from_slice(b"\x1b[?25l"),
+        }
+    }
+
+    /// Decode the page's frame for the boxes' shadow, if it is a new one.
+    /// None before the first frame, and while the logo shows.
+    fn update_shade(&mut self) {
+        let Some(frame) = self.frame.as_deref().filter(|_| self.splash.is_none()) else {
+            self.shade = None;
+            return;
+        };
+        let which = (frame.as_ptr() as usize, frame.len());
+        let page = ui::Rect { col: 1, row: 2, width: self.shown.0, height: self.shown.1 };
+        match &mut self.shade {
+            Some((seen, shade)) if *seen == which => shade.page = page,
+            _ => {
+                let pixels = crate::base64::decode(frame).and_then(|bytes| graphics::decode_png(&bytes, Vec::new()));
+                self.shade = pixels.map(|pixels| (which, crate::modal::Shade { pixels, page }));
+            }
         }
     }
 

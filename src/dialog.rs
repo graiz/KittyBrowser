@@ -227,9 +227,15 @@ impl Dialog {
 
     /// Draw the dialog over the page. Returns where it went and where the
     /// cursor belongs (column, row of the pane), if anywhere.
-    pub fn render(&mut self, out: &mut Vec<u8>, cols: u16, rows: u16) -> (Rect, Option<(u16, u16)>) {
+    pub fn render(
+        &mut self,
+        out: &mut Vec<u8>,
+        cols: u16,
+        rows: u16,
+        shade: Option<&crate::modal::Shade>,
+    ) -> (Rect, Option<(u16, u16)>) {
         let (canvas, cursor) = self.layout(cols as usize, rows as usize);
-        let rect = canvas.draw(out, cols, rows);
+        let rect = canvas.draw(out, cols, rows, shade);
         self.rect = Some(rect);
         let cursor = cursor.map(|(row, col)| (rect.col + col as u16, rect.row + row as u16));
         (rect, cursor)
@@ -295,7 +301,7 @@ mod tests {
     #[test]
     fn buttons_answer_clicks() {
         let mut confirm = Dialog::new(1, Kind::Confirm, "https://a.com/", "Sure?", "");
-        let (rect, _) = confirm.render(&mut Vec::new(), 80, 24);
+        let (rect, _) = confirm.render(&mut Vec::new(), 80, 24, None);
         let (row, ok, _) = confirm.buttons[0].clone();
         let (_, cancel, _) = confirm.buttons[1].clone();
         let at = |col: usize| (rect.col as usize + col, rect.row as usize + row);
