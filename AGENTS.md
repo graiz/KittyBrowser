@@ -20,7 +20,11 @@ x86_64-unknown-linux-gnu -- -D warnings`.
 
 To try a change, install it and run it in a pane: `cargo install --path .`,
 then `kb URL`. A kb that is already running keeps its old code; quit it
-(Ctrl+Q) and start it again.
+(Ctrl+Q) and start it again. Check that `command -v kb` is
+`~/.cargo/bin/kb`: a released kb from Homebrew (`/opt/homebrew/bin/kb`) or
+the install script (`~/.local/bin/kb`) can come first on the PATH, and
+then `kb` runs that release instead of your change. Remove it while you work
+on kb (`brew uninstall kittybrowser`, or `rm ~/.local/bin/kb`).
 
 ## Where things are
 
