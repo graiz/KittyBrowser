@@ -10,7 +10,7 @@
 //! chooses those marked. Esc cancels, and the page hears nothing, as when
 //! Chrome's chooser is cancelled.
 
-use crate::modal::{inside, Canvas, Style};
+use crate::modal::{inside, text_width, Canvas, Style};
 use crate::term::input::{Key, KeyCode};
 use crate::ui::{AddressBar, Edit, Rect};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -85,6 +85,9 @@ pub struct Picker {
     hidden: bool,
     selected: usize,
     scroll: usize,
+    /// Whether the selection may have moved since the last layout, which
+    /// then scrolls it into view. The wheel scrolls without moving it.
+    reveal: bool,
     marked: Vec<PathBuf>,
     field: AddressBar,
     places: Vec<(String, PathBuf)>,
@@ -107,7 +110,7 @@ pub struct Picker {
 
 impl Picker {
     pub fn new(id: u64, multiple: bool, accept: &str, url: &str, start: &Path) -> Picker {
-        let origin = url.split_once("://").map_or("", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+        let origin = crate::ui::host_of(url);
         let mut field = AddressBar::default();
         field.focus();
         let mut picker = Picker {
@@ -120,6 +123,7 @@ impl Picker {
             hidden: false,
             selected: 0,
             scroll: 0,
+            reveal: true,
             marked: Vec::new(),
             field,
             places: places(),
@@ -203,6 +207,7 @@ impl Picker {
                 self.entries = entries;
                 self.folder = folder;
                 self.scroll = 0;
+                self.reveal = true;
                 self.field.set_text("");
                 self.field.focus();
                 self.problem = None;
@@ -351,6 +356,7 @@ impl Picker {
     }
 
     pub fn key(&mut self, key: &Key) -> Outcome {
+        self.reveal = true;
         let outcome = self.key_inner(key);
         self.follow_selection();
         outcome
@@ -543,7 +549,7 @@ impl Picker {
         drawn.up = Some((1, 2..up));
         // Whose files these are, always in sight: over ssh, not the user's own.
         let host = format!("on {}", self.host);
-        let host_at = width.saturating_sub(3 + host.chars().count());
+        let host_at = width.saturating_sub(3 + text_width(&host));
         canvas.put(1, host_at, &host, Style::Dim);
         canvas.put_limited(1, up + 1, &tilde(&self.folder), Style::Title, host_at.saturating_sub(up + 3));
 
@@ -583,7 +589,7 @@ impl Picker {
             let mut col = 2;
             let mut spots = Vec::new();
             for (name, path) in &self.places {
-                if col + name.chars().count() + 2 > width.saturating_sub(2) {
+                if col + text_width(name) + 2 > width.saturating_sub(2) {
                     break;
                 }
                 let style = if *path == self.folder { Style::Accent } else { Style::Text };
@@ -604,11 +610,15 @@ impl Picker {
         drawn.list_top = top + 1;
         drawn.list_rows = footer.saturating_sub(top + 1);
         drawn.list_cols = left..left + list_width;
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if drawn.list_rows > 0 && self.selected >= self.scroll + drawn.list_rows {
-            self.scroll = self.selected + 1 - drawn.list_rows;
+        if std::mem::take(&mut self.reveal) {
+            if self.selected < self.scroll {
+                self.scroll = self.selected;
+            } else if drawn.list_rows > 0 && self.selected >= self.scroll + drawn.list_rows {
+                self.scroll = self.selected + 1 - drawn.list_rows;
+            }
         }
+        // A taller pane can show more: no empty rows below the last entry.
+        self.scroll = self.scroll.min(self.entries.len().saturating_sub(drawn.list_rows.max(1)));
         let now = now();
         for (n, entry) in self.entries.iter().enumerate().skip(self.scroll).take(drawn.list_rows) {
             let row = drawn.list_top + n - self.scroll;
@@ -680,7 +690,7 @@ impl Picker {
             parts.push(("Tab completes".to_owned(), Style::Dim));
             for (n, (text, style)) in parts.iter().enumerate() {
                 let text = if n == 0 { text.clone() } else { format!(" · {text}") };
-                if col + text.chars().count() > end.saturating_sub(16) {
+                if col + text_width(&text) > end.saturating_sub(16) {
                     break;
                 }
                 col = canvas.put(row, col, &text, *style);
@@ -1191,6 +1201,19 @@ mod tests {
     }
 
     #[test]
+    fn tiny_panes_lay_out_without_panicking() {
+        let scratch = Scratch::new("tiny");
+        std::fs::write(scratch.0.join("写真📷.png"), "").unwrap();
+        let mut picker = Picker::new(1, true, "image/*", "https://a.com/", &scratch.0);
+        for cols in 4..=80 {
+            for rows in 3..=30 {
+                let (canvas, _) = picker.layout(cols, rows);
+                assert!(canvas.width <= cols.max(1), "{cols}x{rows}");
+            }
+        }
+    }
+
+    #[test]
     fn clicks_select_and_double_clicks_open() {
         let scratch = Scratch::new("clicks");
         let mut picker = Picker::new(1, true, "", "https://a.com/", &scratch.0);
@@ -1207,6 +1230,29 @@ mod tests {
         picker.click(col, row(1), false);
         picker.click(col, row(1), false);
         assert_eq!(picker.folder(), scratch.0.join("archive"));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_past_the_selection() {
+        let scratch = Scratch::new("wheel");
+        for n in 0..100 {
+            std::fs::write(scratch.0.join(format!("file{n:03}.txt")), "").unwrap();
+        }
+        let mut picker = Picker::new(1, false, "", "https://a.com/", &scratch.0);
+        picker.layout(100, 30);
+        assert_eq!((picker.selected, picker.scroll), (0, 0));
+        picker.wheel(3);
+        let (canvas, _) = picker.layout(100, 30);
+        assert_eq!((picker.selected, picker.scroll), (0, 3));
+        assert!(canvas.line(picker.drawn.list_top).contains("file000"));
+        // A key brings the selection back into view.
+        press(&mut picker, KeyCode::Down);
+        picker.layout(100, 30);
+        assert_eq!((picker.selected, picker.scroll), (1, 1));
+        // The wheel stops at the end of the list.
+        picker.wheel(1000);
+        picker.layout(100, 30);
+        assert_eq!(picker.scroll, picker.entries.len() - picker.drawn.list_rows);
     }
 
     #[test]

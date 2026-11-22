@@ -688,6 +688,11 @@ impl Chrome {
         self.tabs.iter().map(|tab| tab.url.as_str()).collect()
     }
 
+    /// Each open window's session, in the same order.
+    pub fn window_sessions(&self) -> Vec<&str> {
+        self.tabs.iter().map(|tab| tab.session.as_str()).collect()
+    }
+
     /// Show window `n`, counting from 1, if there is one.
     pub fn show_window(&mut self, n: usize) -> Option<PageEvent> {
         (1..=self.tabs.len()).contains(&n).then(|| self.show(n - 1)).flatten()

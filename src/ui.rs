@@ -509,6 +509,13 @@ pub fn render_bar(
     out.extend_from_slice(s.as_bytes());
 }
 
+/// The host of a URL, with its port and without any "user@": "" for a file
+/// or anything else without one.
+pub fn host_of(url: &str) -> &str {
+    let host = url.split_once("://").map_or("", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    host.rsplit_once('@').map_or(host, |(_, host)| host)
+}
+
 /// Turn what was typed into a URL: pass URLs through, add a scheme to bare
 /// hosts, resolve local files, and search for anything else.
 pub fn normalize_url(input: &str) -> Option<String> {
@@ -554,6 +561,15 @@ pub fn normalize_url(input: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosts_drop_the_user() {
+        assert_eq!(super::host_of("https://example.com/a?b"), "example.com");
+        assert_eq!(super::host_of("http://me:pw@localhost:8080/x"), "localhost:8080");
+        assert_eq!(super::host_of("https://a.com#x@y"), "a.com");
+        assert_eq!(super::host_of("file:///tmp/a.html"), "");
+        assert_eq!(super::host_of("about:blank"), "");
+    }
+
     #[test]
     fn box_is_centred_below_the_bar() {
         let mut out = Vec::new();

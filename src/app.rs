@@ -581,7 +581,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         continue;
                     }
                     if request.command == "window" {
-                        let (answer, event) = crate::devtools::window(&request.args, &mut app.chrome);
+                        let (answer, event) = crate::devtools::window(&request.args, &mut app.chrome, &app.devtools);
                         let _ = request.reply.send(answer);
                         if let Some(PageEvent::Shown(url)) = event {
                             app.shown(url);
@@ -753,13 +753,14 @@ impl App {
         }
     }
 
-    /// Wipe the screen, images included. The help, if shown, is drawn
-    /// again with the next frame.
+    /// Wipe the screen, images included. The help and what the page asks,
+    /// if shown, are drawn again with the next frame.
     fn clear(&mut self) {
         term::write(b"\x1b[2J");
         term::write(graphics::DELETE);
         self.page.forget();
         self.help_rect = None;
+        self.modal_rects.clear();
     }
 
     fn page_rows(&self) -> u16 {
@@ -946,9 +947,11 @@ impl App {
         } else {
             splash.draw(&mut out, cols, rows, cell, 2);
         }
-        // The splash paints the pane black, help and all.
+        // The splash paints the pane black, help, dialogs and all.
         self.help_rect = None;
+        self.modal_rects.clear();
         self.render_help(&mut out);
+        self.render_modal(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
     }
@@ -1509,7 +1512,10 @@ impl App {
 
     /// Returns whether the top bar needs redrawing.
     fn on_mouse(&mut self, mouse: Mouse) -> bool {
-        if self.dialog.is_some() || self.picker.is_some() {
+        // A press that went to the page before the box opened is released
+        // there too, or Chrome would think the button still held.
+        let held = mouse.kind == MouseKind::Release && self.buttons != 0;
+        if (self.dialog.is_some() || self.picker.is_some()) && !held {
             return self.modal_mouse(mouse);
         }
         // A click closes the help, and does nothing else.

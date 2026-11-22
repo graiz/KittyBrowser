@@ -245,7 +245,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "dialog",
-        help: "Choose how alert, confirm, prompt and \"leave site?\" dialogs are answered. In a pane, kb asks the user, as Chrome would, when the user set the dialog off; one an agent's command sets off is answered at once, accepted by default with a prompt's default text, since an open dialog freezes the page. While a dialog waits for the user, commands that need the page fail and say so. accept or dismiss answers every dialog that way from now on, including one waiting in the pane; ask goes back to asking the user (not in a headless kb, which has no one to ask). Each dialog is recorded in console, with how it was answered and by whom, and reported by the command that caused it.",
+        help: "Choose how alert, confirm, prompt and \"leave site?\" dialogs are answered. In a pane, kb asks the user, as Chrome would, when the user set the dialog off; one an agent's command sets off is answered at once, accepted by default with a prompt's default text, since an open dialog freezes the page. While a dialog waits for the user, commands that need its page fail and say so; status and window name it, and the window it is in. accept or dismiss answers every dialog that way from now on, including one waiting in the pane; ask goes back to asking the user (not in a headless kb, which has no one to ask). Each dialog is recorded in console, with how it was answered and by whom, and reported by the command that caused it.",
         params: &[
             required("answer", "accept, dismiss or ask"),
             option("text", "TEXT", "what to type into prompts when accepting (default: the prompt's own default)"),

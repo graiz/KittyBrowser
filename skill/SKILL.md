@@ -193,7 +193,8 @@ k check --ignore optimizely.com,doubleclick.net  # third-party noise doesn't cou
 - `alert`, `confirm` and `prompt` that your commands set off are accepted
   and reported by the command that caused them; `dialog dismiss` or
   `dialog accept --text TEXT` changes that for later ones. Ones the user
-  sets off are asked in the pane; while one waits, commands fail saying so.
+  sets off are asked in the pane; while one waits, commands to its page
+  fail saying so, and `status` names it.
   Leave it to the user, or answer it with `dialog accept` or `dismiss`.
 - `eval` reads what no command does (an order, a count, one value).
 

@@ -3,7 +3,7 @@
 //! page's message and OK and Cancel. Enter presses the highlighted button
 //! (OK unless Tab moved it), Esc cancels.
 
-use crate::modal::{inside, wrap, Canvas, Style};
+use crate::modal::{cut, inside, text_width as text_width_of, wrap, Canvas, Style};
 use crate::term::input::{Key, KeyCode};
 use crate::ui::{AddressBar, Edit, Rect};
 
@@ -12,6 +12,8 @@ use crate::ui::{AddressBar, Edit, Rect};
 const WIDTH: usize = 60;
 /// Cells between the frame and the text.
 const PAD: usize = 3;
+/// "  Cancel  ", as a button.
+const CANCEL_WIDTH: usize = 10;
 /// The margin round the frame, in rows and columns, so the dialog stands
 /// clear of the page behind it.
 const MARGIN: (usize, usize) = (1, 2);
@@ -62,8 +64,7 @@ pub struct Dialog {
 /// How Chrome names a page in its dialogs: "example.com says", and "This
 /// page says" for a file or anything without a host.
 pub fn origin_title(url: &str) -> String {
-    let host = url.split_once("://").map_or("", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
-    let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+    let host = crate::ui::host_of(url);
     if host.is_empty() {
         "This page says".to_owned()
     } else {
@@ -154,18 +155,29 @@ impl Dialog {
     /// Lay the dialog out for a `cols` x `rows` pane. Returns the canvas and
     /// the field's cursor on it, if there is one.
     pub fn layout(&mut self, cols: usize, rows: usize) -> (Canvas, Option<(usize, usize)>) {
-        let (top, side) = MARGIN;
+        let (top, mut side) = MARGIN;
+        // A pane too narrow for the margin goes without it.
+        if cols < 24 + 4 + 2 * side {
+            side = 0;
+        }
         let width = WIDTH.min(cols.saturating_sub(4 + 2 * side)).max(24.min(cols));
         let text_width = width.saturating_sub(2 * PAD + 2).max(1);
         let mut message = wrap(&self.message, text_width);
+        // The buttons sit in a row at the right, PAD in from the frame if
+        // there's room; in a pane too narrow for the row, one above the other.
+        let ok = self.ok_label();
+        let ok_width = text_width_of(ok) + 4;
+        let row_width = ok_width + if self.kind == Kind::Alert { 0 } else { 2 + CANCEL_WIDTH };
+        let inside_width = width.saturating_sub(2);
+        let stacked = self.kind != Kind::Alert && row_width + 2 > inside_width;
+        let pad = if row_width + 2 * PAD <= inside_width { PAD } else { 1 };
         // Room below the bar for the frame, gaps, field and buttons.
-        let fixed = 7 + 2 * top + if self.field.is_some() { 2 } else { 0 };
+        let fixed = 7 + 2 * top + if self.field.is_some() { 2 } else { 0 } + if stacked { 1 } else { 0 };
         let room = rows.saturating_sub(2 + fixed).max(1);
         if message.len() > room {
             message.truncate(room);
             if let Some(last) = message.last_mut() {
-                let kept: String = last.chars().take(text_width.saturating_sub(1)).collect();
-                *last = format!("{kept}…");
+                *last = format!("{}…", cut(last, text_width.saturating_sub(1)));
             }
         }
         let height = fixed + message.len();
@@ -190,23 +202,24 @@ impl Dialog {
         // Enter presses last, as in Chrome.
         row += 1;
         self.buttons.clear();
-        let ok = self.ok_label();
-        let mut end = side + width - 1 - PAD;
-        let ok_width = ok.chars().count() + 4;
-        let ok_cols = canvas.button(row, end - ok_width, ok, self.on_ok || self.kind == Kind::Alert);
-        self.buttons.push((row, ok_cols, true));
-        end -= ok_width + 2;
+        let right = (side + width).saturating_sub(1 + pad);
+        let at = |button_width: usize| right.saturating_sub(button_width).max(side + 1);
+        let (ok_row, cancel_row) = if stacked { (row + 1, row) } else { (row, row) };
+        let ok_cols = canvas.button(ok_row, at(ok_width), ok, self.on_ok || self.kind == Kind::Alert);
+        let mut end = ok_cols.start;
+        self.buttons.push((ok_row, ok_cols, true));
         if self.kind != Kind::Alert {
-            let cancel_cols = canvas.button(row, end - 10, "Cancel", !self.on_ok);
-            self.buttons.push((row, cancel_cols.clone(), false));
+            let cancel_at = if stacked { at(CANCEL_WIDTH) } else { at(row_width) };
+            let cancel_cols = canvas.button(cancel_row, cancel_at, "Cancel", !self.on_ok);
             end = cancel_cols.start;
+            self.buttons.push((cancel_row, cancel_cols, false));
         }
         let hint = match self.kind {
             Kind::Alert => "Enter OK",
             Kind::BeforeUnload => "Enter leaves · Esc stays",
             _ => "Enter OK · Esc Cancel",
         };
-        if hint.chars().count() + 1 < end.saturating_sub(left) {
+        if text_width_of(hint) + 1 < end.saturating_sub(left) {
             canvas.put(row, left, hint, Style::Dim);
         }
         (canvas, cursor)
@@ -289,6 +302,33 @@ mod tests {
         assert_eq!(confirm.click(at(ok.start).0, at(ok.start).1), Outcome::Answer(true, None));
         assert_eq!(confirm.click(at(cancel.start).0, at(cancel.start).1), Outcome::Answer(false, None));
         assert_eq!(confirm.click(1, 1), Outcome::Stay);
+    }
+
+    #[test]
+    fn narrow_panes_keep_every_button_in_the_box() {
+        for kind in [Kind::Alert, Kind::Confirm, Kind::Prompt, Kind::BeforeUnload] {
+            for cols in 6..=40 {
+                let mut dialog = Dialog::new(1, kind, "https://a.com/", "Sure?", "x");
+                let (canvas, _) = dialog.layout(cols, 24);
+                assert!(canvas.width <= cols, "{kind:?} at {cols}: {} wide", canvas.width);
+                for (row, range, _) in &dialog.buttons {
+                    assert!(*row < canvas.height && range.end <= canvas.width, "{kind:?} at {cols}");
+                }
+                // No two buttons overlap.
+                if let [(a_row, a, _), (b_row, b, _)] = dialog.buttons.as_slice() {
+                    assert!(a_row != b_row || a.end <= b.start || b.end <= a.start, "{kind:?} at {cols}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wide_messages_wrap_by_width() {
+        let mut alert = Dialog::new(1, Kind::Alert, "https://a.com/", &"保存しました".repeat(10), "");
+        let (canvas, _) = alert.layout(80, 24);
+        let text = canvas.line(3);
+        assert_eq!(text_width_of(&text), canvas.width);
+        assert!(text.contains("保存"));
     }
 
     #[test]

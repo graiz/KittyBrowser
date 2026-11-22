@@ -777,17 +777,21 @@ fn upload_files(args: &Value) -> Result<Vec<String>, String> {
 
 /// `window [N]`: list the windows open, or show window N. Returns the
 /// answer, and the event to handle if another window is shown now.
-pub fn window(args: &Value, chrome: &mut Chrome) -> (Result<Output, String>, Option<PageEvent>) {
+pub fn window(args: &Value, chrome: &mut Chrome, devtools: &Devtools) -> (Result<Output, String>, Option<PageEvent>) {
     let list = |chrome: &Chrome| {
         let (shown, _) = chrome.windows();
         let mut out = String::new();
-        for (at, url) in chrome.window_urls().iter().enumerate() {
+        for (at, (url, session)) in chrome.window_urls().iter().zip(chrome.window_sessions()).enumerate() {
             let url = if url.is_empty() { "about:blank" } else { url };
             let what = match at + 1 {
                 n if n == shown => " (shown)",
                 _ => "",
             };
-            let _ = writeln!(out, "{}. {url}{what}", at + 1);
+            let _ = write!(out, "{}. {url}{what}", at + 1);
+            for waiting in devtools.questions.iter().filter(|question| question.session == session) {
+                let _ = write!(out, "; {} is waiting for an answer in the pane", waiting.describe());
+            }
+            out.push('\n');
         }
         out
     };
@@ -898,8 +902,10 @@ pub struct Devtools {
     /// What the pages are asking the user, oldest first.
     questions: VecDeque<Question>,
     next_question: u64,
-    /// Windows whose dialog kb answered, whose closing is expected.
-    answered: Vec<String>,
+    /// Windows whose dialog kb answered, whose closing is expected, and the
+    /// request that answered each. If Chrome refuses the answer (the dialog
+    /// had gone already) no closing comes, and the entry goes with the refusal.
+    answered: Vec<(String, u64)>,
     /// The request for a file field's attributes, and the question it's for.
     accept_request: Option<(u64, u64)>,
 }
@@ -924,10 +930,48 @@ pub enum Asking {
     Files { node: u64, multiple: bool, accept: String },
 }
 
+/// Whether pages at `a` and `b` may run on one thread, so that a dialog in
+/// one freezes the other: Chrome puts a page and the popups it opens in one
+/// process when they are on the same site, and every file in one. Unless
+/// both sites are known and differ, they may.
+fn may_share_thread(a: &str, b: &str) -> bool {
+    fn site(url: &str) -> Option<String> {
+        if url.starts_with("file:") {
+            return Some("file:".to_owned());
+        }
+        let host = ui::host_of(url);
+        let host = host
+            .rsplit_once(':')
+            .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
+            .map_or(host, |(host, _)| host);
+        if host.is_empty() {
+            return None;
+        }
+        // example.com for www.example.com; an address or a name of one part whole.
+        if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') || host.starts_with('[') {
+            return Some(host.to_owned());
+        }
+        let labels: Vec<&str> = host.rsplit('.').take(2).collect();
+        Some(labels.into_iter().rev().collect::<Vec<_>>().join("."))
+    }
+    match (site(a), site(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// How an agent can answer a dialog waiting in the pane.
+const ANSWER_IT: &str = "kb ctl dialog accept (or dismiss) answers it";
+
 impl Question {
+    /// The window that asked, numbered as kb ctl window lists them.
+    fn window(&self, chrome: &Chrome) -> usize {
+        chrome.window_sessions().iter().position(|session| *session == self.session).map_or(0, |at| at + 1)
+    }
+
     /// The dialog, as it is named to agents: a confirm "Sure?" from example.com.
     fn describe(&self) -> String {
-        let host = self.url.split_once("://").map_or("", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+        let host = ui::host_of(&self.url);
         let from = if host.is_empty() { String::new() } else { format!(" from {host}") };
         match &self.asking {
             Asking::Dialog { kind, message, .. } if kind == "beforeunload" => format!("a \"leave site?\" dialog{from}"),
@@ -1311,18 +1355,13 @@ impl Devtools {
         let flag = |name: &str| args[name] == true || args[name] == "true";
         let need = |name: &str| arg(name).ok_or(format!("{command} needs {name}"));
 
-        // An open dialog freezes the page: commands that need it would wait
-        // on whoever is at the pane.
+        // An open dialog freezes its page: commands that need it would wait
+        // on whoever is at the pane. Those that only read what kb knows go on.
+        let frozen = self.frozen(chrome).map(Question::describe);
         if let Some(waiting) =
-            self.waiting_dialog().filter(|_| !["dialog", "console", "network"].contains(&command.as_str()))
+            frozen.as_ref().filter(|_| !["dialog", "console", "network", "status"].contains(&command.as_str()))
         {
-            fail(
-                &reply,
-                format!(
-                    "{} is waiting for an answer in the pane; answer it there, or kb ctl dialog accept (or dismiss)",
-                    waiting.describe()
-                ),
-            );
+            fail(&reply, format!("{waiting} is waiting for an answer in the pane; {ANSWER_IT}"));
             return;
         }
         let result: Result<(), String> = (|| {
@@ -1370,6 +1409,17 @@ impl Devtools {
                             "\nnote: the viewport is narrow, so many sites show their phone layout, with menus \
                              collapsed; kb ctl viewport 1280 lays pages out as on a desktop",
                         );
+                    }
+                    for waiting in &self.questions {
+                        let _ = write!(rest, "\nwaiting: {} in window {}", waiting.describe(), waiting.window(chrome));
+                        if matches!(waiting.asking, Asking::Dialog { .. }) {
+                            let _ = write!(rest, "; the user can answer it in the pane, or {ANSWER_IT}");
+                        }
+                    }
+                    if frozen.is_some() {
+                        // The page can't be asked its title until the dialog goes.
+                        text(&reply, format!("url: {url}\ntitle: (unknown while the dialog waits)\n{rest}"));
+                        return Ok(());
                     }
                     // The title has to be asked for; the rest is already known.
                     let pending = Pending::Status(reply.clone(), format!("url: {url}"), rest);
@@ -1569,16 +1619,13 @@ impl Devtools {
                                  those an agent's command sets off are still accepted"
                             .to_owned(),
                     };
-                    // One already waiting in the pane is answered now.
+                    // Those already waiting in the pane are answered now.
                     while answer.is_some() {
                         let Some(waiting) = self.waiting_dialog().cloned() else { break };
                         self.questions.retain(|question| question.id != waiting.id);
-                        let _ = write!(
-                            said,
-                            "\nanswered {}: {}",
-                            waiting.describe(),
-                            self.answer_automatically(&waiting, chrome)
-                        );
+                        let how = self.answer_automatically(&waiting, chrome);
+                        let _ = write!(said, "\nanswered {}: {how}", waiting.describe());
+                        self.log(DIALOG, format!("{} {how} by kb ctl dialog", waiting.describe()), String::new());
                     }
                     text(&reply, said);
                 }
@@ -1768,6 +1815,12 @@ impl Devtools {
     /// command it answers, or log the event it reports.
     pub fn observe(&mut self, message: &Value, chrome: &mut Chrome) {
         if let Some(id) = message["id"].as_u64() {
+            if let Some(at) = self.answered.iter().position(|(_, request)| *request == id) {
+                if message.get("error").is_some() {
+                    self.answered.remove(at);
+                }
+                return;
+            }
             if let Some((_, question)) = self.accept_request.filter(|(asked, _)| *asked == id) {
                 self.accept_request = None;
                 let attributes = message["result"]["node"]["attributes"].as_array().cloned().unwrap_or_default();
@@ -2027,6 +2080,15 @@ impl Devtools {
         self.questions.iter().find(|question| matches!(question.asking, Asking::Dialog { .. }))
     }
 
+    /// The dialog that freezes the window shown, if one does: one in that
+    /// window, or in another that may share its thread.
+    fn frozen(&self, chrome: &Chrome) -> Option<&Question> {
+        self.questions
+            .iter()
+            .filter(|question| matches!(question.asking, Asking::Dialog { .. }))
+            .find(|question| question.session == chrome.session() || may_share_thread(&question.url, &self.url))
+    }
+
     /// The dialog waiting for the user, for the pane to show.
     pub fn dialog(&self) -> Option<&Question> {
         self.waiting_dialog()
@@ -2061,12 +2123,17 @@ impl Devtools {
                     // with it every command.
                     let question = Question { id: 0, session, url, asking };
                     let line = self.answer_automatically(&question, chrome);
-                    let line = format!("{} {line}", question.describe());
+                    let who = match (self.answer, self.pane) {
+                        (Some(_), _) => "as kb ctl dialog says",
+                        (None, false) => "by kb, which has no pane to ask in",
+                        (None, true) => "at once, since an agent's command set it off",
+                    };
+                    let line = format!("{} {line} {who}", question.describe());
                     self.log(DIALOG, line, String::new());
                 }
             }
             "Page.javascriptDialogClosed" => {
-                if let Some(at) = self.answered.iter().position(|answered| *answered == session) {
+                if let Some(at) = self.answered.iter().position(|(answered, _)| *answered == session) {
                     self.answered.remove(at);
                 } else if let Some(at) = self.questions.iter().position(|question| {
                     question.session == session && matches!(question.asking, Asking::Dialog { .. })
@@ -2078,7 +2145,7 @@ impl Devtools {
             "Target.detachedFromTarget" => {
                 let gone = params["sessionId"].as_str().unwrap_or("");
                 self.questions.retain(|question| question.session != gone);
-                self.answered.retain(|answered| answered != gone);
+                self.answered.retain(|(answered, _)| answered != gone);
             }
             _ => {}
         }
@@ -2091,12 +2158,12 @@ impl Devtools {
         // Refusing a "leave this page?" would trap the browser on it.
         let accept = self.answer != Some(false) || kind == "beforeunload";
         let typed = self.prompt_text.clone().unwrap_or_else(|| default.clone());
-        chrome.request_in(
+        let request = chrome.request_in(
             &question.session,
             "Page.handleJavaScriptDialog",
             json!({"accept": accept, "promptText": typed}),
         );
-        self.answered.push(question.session.clone());
+        self.answered.push((question.session.clone(), request));
         let mut line = format!("was {}", if accept { "accepted" } else { "dismissed" });
         if kind == "prompt" && accept {
             let _ = write!(line, " with {typed:?}");
@@ -2111,12 +2178,12 @@ impl Devtools {
         let question = self.questions.remove(at).expect("found");
         let Asking::Dialog { kind, default, .. } = &question.asking else { return };
         let typed = typed.unwrap_or_else(|| default.clone());
-        chrome.request_in(
+        let request = chrome.request_in(
             &question.session,
             "Page.handleJavaScriptDialog",
             json!({"accept": accept, "promptText": typed}),
         );
-        self.answered.push(question.session.clone());
+        self.answered.push((question.session.clone(), request));
         let mut line =
             format!("{} was {} by the user", question.describe(), if accept { "accepted" } else { "dismissed" });
         if kind == "prompt" && accept {
@@ -2753,6 +2820,20 @@ impl Devtools {
 
 #[cfg(test)]
 mod tests {
+    use super::may_share_thread;
+
+    #[test]
+    fn dialogs_freeze_pages_on_the_same_site() {
+        assert!(may_share_thread("https://www.example.com/a", "https://login.example.com/b"));
+        assert!(may_share_thread("file:///tmp/a.html", "file:///home/b.html"));
+        assert!(may_share_thread("http://localhost:3000/", "http://localhost:8080/"));
+        // An about:blank popup is its opener's, whatever that is.
+        assert!(may_share_thread("about:blank", "https://example.com/"));
+        assert!(!may_share_thread("https://example.com/", "https://other.org/"));
+        assert!(!may_share_thread("http://10.0.0.1/", "http://10.0.0.2/"));
+        assert!(!may_share_thread("file:///tmp/a.html", "https://example.com/"));
+    }
+
     use super::*;
 
     #[test]

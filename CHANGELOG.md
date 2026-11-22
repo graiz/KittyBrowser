@@ -10,8 +10,8 @@ Notable changes to kb. The format follows
   in the pane, as Chrome asks them, when the user set them off: a window
   over the page with the page's host, its message, and Cancel and OK. Enter
   accepts, Esc cancels. Dialogs an agent's command sets off are still
-  answered at once; while one waits for the user, commands that need the
-  page fail and say so. `kb ctl dialog ask` goes back to asking after
+  answered at once; while one waits for the user, commands that need its
+  page fail and say so, and `status` and `window` name it. `kb ctl dialog ask` goes back to asking after
   `dialog accept` or `dismiss`.
 - A file field the user clicks opens a file chooser in the pane: places on
   the left, the folder's files as `ls -la` lists them, and a File name field
