@@ -649,6 +649,12 @@ impl Chrome {
         self.tx.send(method, params, Some(&self.tabs[self.shown].session)).unwrap_or(0)
     }
 
+    /// Send a command to one window's session, shown or not: the answer
+    /// to a dialog goes to the page that opened it.
+    pub fn request_in(&mut self, session: &str, method: &str, params: Value) -> u64 {
+        self.tx.send(method, params, Some(session)).unwrap_or(0)
+    }
+
     /// Tell every window, and those opened later, the same thing.
     fn send_to_all(&mut self, method: &'static str, params: Value) {
         self.settings.retain(|(sent, _)| *sent != method);
@@ -680,6 +686,11 @@ impl Chrome {
     /// Where each open window is, in the order they opened in.
     pub fn window_urls(&self) -> Vec<&str> {
         self.tabs.iter().map(|tab| tab.url.as_str()).collect()
+    }
+
+    /// Each open window's session, in the same order.
+    pub fn window_sessions(&self) -> Vec<&str> {
+        self.tabs.iter().map(|tab| tab.session.as_str()).collect()
     }
 
     /// Show window `n`, counting from 1, if there is one.

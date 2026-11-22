@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>kb test: dialogs and file pickers</title>
+<style>
+  :root { color-scheme: light dark; }
+  /* A strong colour, neither the terminal's nor the dialog's, so the shadow
+     a dialog casts on the page shows. */
+  html { background: #2456a8; color: #fff; }
+  body { font: 17px system-ui, sans-serif; max-width: 760px; margin: 32px auto; padding: 0 16px; }
+  h1 { font-size: 26px; margin-bottom: 4px; }
+  h2 { font-size: 19px; margin: 28px 0 8px; }
+  p.lead { margin-top: 0; opacity: .75; }
+  button, .pick { font: inherit; padding: 8px 14px; margin: 4px 6px 4px 0; cursor: pointer; border-radius: 6px; }
+  .pick { display: inline-block; border: 1px solid #888; background: #8882; }
+  fieldset { margin: 12px 0; padding: 10px 14px; border: 1px solid #8886; border-radius: 8px; }
+  legend { font-weight: 600; }
+  input[type=file] { font: inherit; }
+  .out { font: 14px ui-monospace, monospace; white-space: pre-wrap; margin-top: 6px; color: #3a3; }
+  img { max-width: 160px; max-height: 110px; margin: 6px 6px 0 0; border-radius: 4px; }
+  #log { font: 14px ui-monospace, monospace; white-space: pre-wrap; padding: 10px; background: #8881; border-radius: 6px; min-height: 3em; }
+</style>
+</head>
+<body>
+<h1>Dialogs and file pickers</h1>
+<p class="lead">A page for trying kb's dialogs and file chooser by hand. Every answer shows below.</p>
+
+<h2>Dialogs</h2>
+<button id="alert" onclick="log('alert', alert('Hello from an alert.'))">alert()</button>
+<button id="confirm" onclick="log('confirm', confirm('Delete this file? This cannot be undone.'))">confirm()</button>
+<button id="prompt" onclick="log('prompt', prompt('What is your name?', 'Greg'))">prompt()</button>
+<button id="chain" onclick="chain()">three in a row</button>
+<button id="long" onclick="log('long confirm', confirm(longText))">long message</button>
+<button id="later" onclick="setTimeout(() => log('timer alert', alert('Two seconds later.')), 2000)">alert in 2s</button>
+<p><label><input type="checkbox" id="leave"> Warn before leaving (beforeunload); then reload, or type an address</label></p>
+<div id="log">Answers appear here.</div>
+
+<h2>File pickers</h2>
+<fieldset>
+  <legend>One file</legend>
+  <input type="file" id="one">
+  <div class="out" id="one-out"></div>
+</fieldset>
+<fieldset>
+  <legend>Several files (multiple)</legend>
+  <input type="file" id="many" multiple>
+  <div class="out" id="many-out"></div>
+</fieldset>
+<fieldset>
+  <legend>Images only (accept="image/*"), with a preview</legend>
+  <input type="file" id="img" accept="image/*" multiple>
+  <div id="img-preview"></div>
+  <div class="out" id="img-out"></div>
+</fieldset>
+<fieldset>
+  <legend>PDF or Word (accept=".pdf,.doc,.docx")</legend>
+  <input type="file" id="doc" accept=".pdf,.doc,.docx">
+  <div class="out" id="doc-out"></div>
+</fieldset>
+<fieldset>
+  <legend>A styled button on a hidden input</legend>
+  <span class="pick" id="styled" onclick="document.getElementById('hidden').click()">Upload a photo…</span>
+  <input type="file" id="hidden" accept="image/*" hidden>
+  <div class="out" id="hidden-out"></div>
+</fieldset>
+<fieldset>
+  <legend>A form with a required file</legend>
+  <form id="form">
+    <label>Title <input name="title" value="My upload"></label><br>
+    <input type="file" name="attachment" required>
+    <button>Submit</button>
+  </form>
+  <div class="out" id="form-out"></div>
+</fieldset>
+
+<script>
+  const longText = 'This is a long message, of the kind some sites put in a confirm: ' +
+    'it goes on for several lines so that the dialog has to wrap it, and it ' +
+    'keeps going, explaining what will happen to your files, your settings and ' +
+    'everything else, until it is long enough to need cutting in a short pane.\n\nContinue?';
+  const out = document.getElementById('log');
+  let first = true;
+  function log(kind, value) {
+    if (first) { out.textContent = ''; first = false; }
+    out.textContent += `${new Date().toLocaleTimeString()}  ${kind} → ${JSON.stringify(value)}\n`;
+  }
+  function chain() {
+    alert('First of three.');
+    const ok = confirm('Second: keep going?');
+    log('chain confirm', ok);
+    if (ok) log('chain prompt', prompt('Third: type anything'));
+  }
+  addEventListener('beforeunload', e => {
+    if (document.getElementById('leave').checked) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  const size = n => n < 1024 ? n + ' B' : (n / 1024).toFixed(1) + ' KB';
+  const list = files => [...files].map(f => `${f.name}  ${size(f.size)}  ${f.type || '?'}`).join('\n') || 'nothing chosen';
+  for (const id of ['one', 'many', 'img', 'doc', 'hidden']) {
+    const input = document.getElementById(id);
+    input.addEventListener('cancel', () => document.getElementById(id + '-out').textContent = 'cancelled');
+    input.addEventListener('change', async () => {
+      let text = list(input.files);
+      const f = input.files[0];
+      if (f && (f.type.startsWith('text') || f.size < 4096)) {
+        text += '\nfirst line: ' + (await f.text()).split('\n')[0].slice(0, 80);
+      }
+      document.getElementById(id + '-out').textContent = text;
+      if (id === 'img' || id === 'hidden') {
+        const box = document.getElementById(id === 'img' ? 'img-preview' : 'hidden-out');
+        box.append(...[...input.files].map(f => Object.assign(new Image(), { src: URL.createObjectURL(f) })));
+      }
+    });
+  }
+  document.getElementById('form').addEventListener('submit', e => {
+    e.preventDefault();
+    const data = new FormData(e.target);
+    const file = data.get('attachment');
+    document.getElementById('form-out').textContent =
+      `would submit: title="${data.get('title')}", attachment=${file.name} (${size(file.size)})`;
+  });
+</script>
+</body>
+</html>

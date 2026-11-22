@@ -191,7 +191,7 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
                         break;
                     }
                     "window" => {
-                        let (answer, event) = crate::devtools::window(&request.args, &mut chrome);
+                        let (answer, event) = crate::devtools::window(&request.args, &mut chrome, &devtools);
                         let _ = request.reply.send(answer);
                         if let Some(PageEvent::Shown(now)) = event {
                             url = if now == "about:blank" { String::new() } else { now };
@@ -238,6 +238,9 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
             }
             Ok(Msg::Chrome(message)) => {
                 if !chrome.shown(&message) {
+                    // A window behind the one shown can still ask something,
+                    // and freezes until answered.
+                    devtools.dialog_event(&message, &mut chrome);
                     continue;
                 }
                 devtools.observe(&message, &mut chrome);

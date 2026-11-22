@@ -4,10 +4,12 @@
 //! only what changed. Row 1 is the top bar, the page image fills the rest.
 
 use crate::control::{self, Output, Request};
-use crate::devtools::{Devtools, Page};
+use crate::devtools::{Asking, Devtools, Page};
+use crate::dialog::{self, Dialog, Kind};
 use crate::engine::chrome::{self, Chrome, PageEvent};
 use crate::history::History;
 use crate::keys::{Action, Bindings};
+use crate::picker::{self, Picker};
 use crate::term::input::{Button, Event, Key, KeyCode, Mouse, MouseKind, Parser};
 use crate::term::page::{PageImage, Route};
 use crate::term::size::{self, Window};
@@ -35,6 +37,9 @@ pub struct Options {
 
 /// How long a note in the bar stays.
 const NOTICE: Duration = Duration::from_millis(2500);
+/// How old the shadow's copy of the page may get while the page moves
+/// under a box: its colour, darkened, changes too little to see sooner.
+const SHADE_AGE: Duration = Duration::from_millis(500);
 
 /// Find the element under a point and the pointer it calls for, as CSS
 /// names it: what the page asks for, or where it says `auto`, a text cursor
@@ -272,6 +277,18 @@ struct App {
     /// button, and whether it was answered yes.
     asking_quit: bool,
     quit_clicked: bool,
+    /// What the page is asking the user, shown over it: a dialog, and a
+    /// file chooser (under the dialog, if both), and where they were drawn.
+    dialog: Option<Dialog>,
+    picker: Option<Picker>,
+    modal_rects: Vec<ui::Rect>,
+    /// The folder the file chooser was last left in, to open there next.
+    last_folder: Option<std::path::PathBuf>,
+    /// Frames from Chrome so far, to tell one from the next.
+    frames: u64,
+    /// The frame decoded, for the shadow the boxes cast on the page: which
+    /// frame it was, and when it was decoded.
+    shade: Option<(u64, Instant, crate::modal::Shade)>,
 }
 
 pub fn run(options: Options) -> Result<(), String> {
@@ -354,7 +371,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         find: None,
         find_text: String::new(),
         history: History::load(crate::data_dir()?.join("history")),
-        devtools: Devtools::default(),
+        devtools: Devtools::in_pane(),
         viewport: (0, 0),
         fixed: None,
         shown: (window.cols, window.rows.saturating_sub(1).max(1)),
@@ -390,6 +407,12 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         panel: None,
         asking_quit: false,
         quit_clicked: false,
+        dialog: None,
+        picker: None,
+        modal_rects: Vec::new(),
+        last_folder: None,
+        frames: 0,
+        shade: None,
     };
     if let Some(dark) = options.dark {
         app.chrome.color_scheme(Some(dark));
@@ -464,6 +487,15 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         break;
                     }
                 }
+                Msg::Term(Event::Key(key)) if app.dialog.is_some() || app.picker.is_some() => {
+                    // What the page asks has the keys, all but quitting.
+                    if app.bindings.action(&key, true) == Some(Action::Quit) {
+                        quit = Some(Ok(()));
+                        break;
+                    }
+                    app.modal_key(&key);
+                    redraw = true;
+                }
                 Msg::Term(Event::Key(key)) if app.asking_quit => {
                     match key.code {
                         KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
@@ -501,7 +533,13 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     redraw = true;
                 }
                 Msg::Term(Event::Paste(text)) => {
-                    if app.find.is_some() {
+                    if let Some(dialog) = &mut app.dialog {
+                        dialog.paste(&text);
+                        redraw = true;
+                    } else if let Some(picker) = &mut app.picker {
+                        picker.paste(&text);
+                        redraw = true;
+                    } else if app.find.is_some() {
                         app.find_edit(|field| field.insert(&text));
                         redraw = true;
                     } else if app.bar.focused() {
@@ -553,7 +591,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         continue;
                     }
                     if request.command == "window" {
-                        let (answer, event) = crate::devtools::window(&request.args, &mut app.chrome);
+                        let (answer, event) = crate::devtools::window(&request.args, &mut app.chrome, &app.devtools);
                         let _ = request.reply.send(answer);
                         if let Some(PageEvent::Shown(url)) = event {
                             app.shown(url);
@@ -592,6 +630,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         }
                     }
                     if !app.chrome.shown(&message) {
+                        // A window behind the one shown can still ask something.
+                        app.devtools.dialog_event(&message, &mut app.chrome);
                         continue;
                     }
                     app.devtools.observe(&message, &mut app.chrome);
@@ -610,6 +650,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                             // frame again is nothing to draw.
                             if fits && app.frame.as_deref() != Some(png.as_str()) {
                                 app.frame = Some(png);
+                                app.frames += 1;
                                 // The blank page that comes first stays under the logo.
                                 new_frame = app.splash.is_none() || app.committed;
                             }
@@ -646,6 +687,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         if let Some(result) = quit {
             break result;
         }
+        redraw |= app.sync_questions();
 
         if checked.elapsed() >= TICK {
             checked = Instant::now();
@@ -722,13 +764,14 @@ impl App {
         }
     }
 
-    /// Wipe the screen, images included. The help, if shown, is drawn
-    /// again with the next frame.
+    /// Wipe the screen, images included. The help and what the page asks,
+    /// if shown, are drawn again with the next frame.
     fn clear(&mut self) {
         term::write(b"\x1b[2J");
         term::write(graphics::DELETE);
         self.page.forget();
         self.help_rect = None;
+        self.modal_rects.clear();
     }
 
     fn page_rows(&self) -> u16 {
@@ -915,9 +958,11 @@ impl App {
         } else {
             splash.draw(&mut out, cols, rows, cell, 2);
         }
-        // The splash paints the pane black, help and all.
+        // The splash paints the pane black, help, dialogs and all.
         self.help_rect = None;
+        self.modal_rects.clear();
         self.render_help(&mut out);
+        self.render_modal(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
     }
@@ -1096,8 +1141,186 @@ impl App {
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge, self.chrome.windows()),
         }
         self.render_help(&mut out);
+        self.render_modal(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
+    }
+
+    /// Draw what the page asks over it: the file chooser, then a dialog on
+    /// top. The cursor goes to the field being typed in, if any.
+    fn render_modal(&mut self, out: &mut Vec<u8>) {
+        for rect in self.modal_rects.drain(..) {
+            ui::blank(out, rect);
+        }
+        let (cols, rows) = (self.window.cols, self.window.rows);
+        if self.picker.is_none() && self.dialog.is_none() {
+            // Not kept while nothing needs it: a frame is megabytes decoded.
+            self.shade = None;
+            return;
+        }
+        self.update_shade();
+        let shade = self.shade.as_ref().map(|(_, _, shade)| shade);
+        let mut cursor = None;
+        if let Some(picker) = &mut self.picker {
+            let (rect, at) = picker.render(out, cols, rows, shade);
+            self.modal_rects.push(rect);
+            cursor = at;
+        }
+        if let Some(dialog) = &mut self.dialog {
+            let (rect, at) = dialog.render(out, cols, rows, shade);
+            self.modal_rects.push(rect);
+            cursor = at;
+        }
+        if self.modal_rects.is_empty() {
+            return;
+        }
+        match cursor {
+            Some((col, row)) => out.extend_from_slice(format!("\x1b[{row};{col}H\x1b[6 q\x1b[?25h").as_bytes()),
+            None => out.extend_from_slice(b"\x1b[?25l"),
+        }
+    }
+
+    /// Decode the page's frame for the boxes' shadow when a box opens, and
+    /// again for a newer frame at most every SHADE_AGE: a page that moves
+    /// under the file chooser would otherwise be decoded on every frame, on
+    /// the thread that must never wait, for a colour no one sees change.
+    /// None before the first frame, and while the logo shows.
+    fn update_shade(&mut self) {
+        let Some(frame) = self.frame.as_deref().filter(|_| self.splash.is_none()) else {
+            self.shade = None;
+            return;
+        };
+        let page = ui::Rect { col: 1, row: 2, width: self.shown.0, height: self.shown.1 };
+        match &mut self.shade {
+            Some((seen, when, shade)) if *seen == self.frames || when.elapsed() < SHADE_AGE => shade.page = page,
+            _ => {
+                let started = Instant::now();
+                let pixels = crate::base64::decode(frame).and_then(|bytes| graphics::decode_png(&bytes, Vec::new()));
+                if let Some(pixels) = &pixels {
+                    log(format_args!(
+                        "decoded the frame for the shadow, {}x{}, in {:?}",
+                        pixels.width,
+                        pixels.height,
+                        started.elapsed()
+                    ));
+                }
+                self.shade = pixels.map(|pixels| (self.frames, started, crate::modal::Shade { pixels, page }));
+            }
+        }
+    }
+
+    /// Show what the pages ask that is new, and stop showing what they no
+    /// longer ask. Returns whether anything changed.
+    fn sync_questions(&mut self) -> bool {
+        let mut changed = false;
+        match self.devtools.dialog().cloned() {
+            Some(question) if self.dialog.as_ref().map(|dialog| dialog.id) != Some(question.id) => {
+                if let Asking::Dialog { kind, message, default } = &question.asking {
+                    self.dialog =
+                        Some(Dialog::new(question.id, Kind::from_name(kind), &question.url, message, default));
+                    self.close_help();
+                    changed = true;
+                }
+            }
+            Some(_) => {}
+            None => changed |= self.dialog.take().is_some(),
+        }
+        match self.devtools.chooser().cloned() {
+            Some(question) => {
+                let Asking::Files { multiple, accept, .. } = &question.asking else { return changed };
+                match &mut self.picker {
+                    Some(picker) if picker.id == question.id => {
+                        if picker.accept() != accept {
+                            picker.set_accept(accept);
+                            changed = true;
+                        }
+                    }
+                    _ => {
+                        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| "/".into());
+                        let start = self.last_folder.clone().unwrap_or(home);
+                        self.picker = Some(Picker::new(question.id, *multiple, accept, &question.url, &start));
+                        self.close_help();
+                        changed = true;
+                    }
+                }
+            }
+            None => changed |= self.picker.take().is_some(),
+        }
+        changed
+    }
+
+    /// A key while the page asks something: it goes to the dialog, or the
+    /// file chooser under it.
+    fn modal_key(&mut self, key: &Key) {
+        if let Some(dialog) = &mut self.dialog {
+            if let dialog::Outcome::Answer(ok, typed) = dialog.key(key) {
+                self.answer_dialog(ok, typed);
+            }
+        } else if let Some(picker) = &mut self.picker {
+            match picker.key(key) {
+                picker::Outcome::Stay => {}
+                picker::Outcome::Choose(files) => self.answer_files(&files),
+                picker::Outcome::Cancel => self.answer_files(&[]),
+            }
+        }
+    }
+
+    fn answer_dialog(&mut self, ok: bool, typed: Option<String>) {
+        let Some(dialog) = self.dialog.take() else { return };
+        self.devtools.answer_dialog(dialog.id, ok, typed, &mut self.chrome);
+        if dialog.kind() == Kind::BeforeUnload && !ok {
+            // Staying: the page and its address are as they were.
+            self.loading = false;
+            self.url = self.chrome.url().to_owned();
+            self.bar.blur(&self.url);
+        }
+    }
+
+    fn answer_files(&mut self, files: &[std::path::PathBuf]) {
+        let Some(picker) = self.picker.take() else { return };
+        self.last_folder = Some(picker.folder().to_owned());
+        self.devtools.answer_files(picker.id, files, &mut self.chrome);
+    }
+
+    /// The mouse while the page asks something: only the box answers it.
+    fn modal_mouse(&mut self, mouse: Mouse) -> bool {
+        let (cell_w, cell_h) = self.cell();
+        let (col, row) = if self.pixel_mouse {
+            (mouse.x as usize / cell_w.max(1) as usize + 1, mouse.y as usize / cell_h.max(1) as usize + 1)
+        } else {
+            (mouse.x as usize, mouse.y as usize)
+        };
+        match mouse.kind {
+            MouseKind::Move => {
+                let over = match (&self.dialog, &self.picker) {
+                    (Some(dialog), _) => dialog.over_button(col, row),
+                    (None, Some(picker)) => picker.over_button(col, row),
+                    _ => false,
+                };
+                self.set_pointer(if over { "pointer" } else { "default" });
+                return false;
+            }
+            MouseKind::Press if mouse.button == Some(Button::Left) => {
+                if let Some(dialog) = &mut self.dialog {
+                    if let dialog::Outcome::Answer(ok, typed) = dialog.click(col, row) {
+                        self.answer_dialog(ok, typed);
+                    }
+                } else if let Some(picker) = &mut self.picker {
+                    match picker.click(col, row, mouse.ctrl) {
+                        picker::Outcome::Stay => {}
+                        picker::Outcome::Choose(files) => self.answer_files(&files),
+                        picker::Outcome::Cancel => self.answer_files(&[]),
+                    }
+                }
+            }
+            MouseKind::Wheel(_, dy) if self.dialog.is_none() => {
+                if let Some(picker) = &mut self.picker {
+                    picker.wheel(dy as isize);
+                }
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Open the find field in the address bar's place.
@@ -1336,6 +1559,12 @@ impl App {
 
     /// Returns whether the top bar needs redrawing.
     fn on_mouse(&mut self, mouse: Mouse) -> bool {
+        // A press that went to the page before the box opened is released
+        // there too, or Chrome would think the button still held.
+        let held = mouse.kind == MouseKind::Release && self.buttons != 0;
+        if (self.dialog.is_some() || self.picker.is_some()) && !held {
+            return self.modal_mouse(mouse);
+        }
         // A click closes the help, and does nothing else.
         if self.help {
             if mouse.kind == MouseKind::Press {

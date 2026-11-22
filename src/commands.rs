@@ -245,9 +245,9 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "dialog",
-        help: "Choose how alert, confirm and prompt dialogs are answered from now on. They are answered at once, since an open dialog freezes the page: by default accepted, with a prompt's default text. Each one is recorded in console and reported by the command that caused it.",
+        help: "Choose how alert, confirm, prompt and \"leave site?\" dialogs are answered. In a pane, kb asks the user, as Chrome would, when the user set the dialog off; one an agent's command sets off is answered at once, accepted by default with a prompt's default text, since an open dialog freezes the page. While a dialog waits for the user, commands that need its page fail and say so; status and window name it, and the window it is in. accept or dismiss answers every dialog that way from now on, including one waiting in the pane; ask goes back to asking the user (not in a headless kb, which has no one to ask). Each dialog is recorded in console, with how it was answered and by whom, and reported by the command that caused it.",
         params: &[
-            required("answer", "accept or dismiss"),
+            required("answer", "accept, dismiss or ask"),
             option("text", "TEXT", "what to type into prompts when accepting (default: the prompt's own default)"),
         ],
     },
@@ -267,7 +267,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "upload",
-        help: "Choose files for a file field, as a user would in the file chooser. Given the <input type=file> itself (it may be hidden), sets its files; given anything else, such as a \"Select video\" button or a drop zone, clicks it and answers the file chooser it opens. The page gets input and change events, as when a user chooses. Answers with each file's name and size as the page sees them, and any console errors it caused. Fails if a file doesn't exist, if several are given for a field that takes one, or if the click opens no file chooser. The files are read from this computer and sent to the page, so choose only files meant for it.",
+        help: "Choose files for a file field, as a user would in the file chooser. Given the <input type=file> itself (it may be hidden), sets its files; given anything else, such as a \"Select video\" button or a drop zone, clicks it and answers the file chooser it opens. The page gets input and change events, as when a user chooses. Answers with each file's name and size as the page sees them, and any console errors it caused. Fails if a file doesn't exist, if several are given for a field that takes one, or if the click opens no file chooser. The files are read from this computer and sent to the page, so choose only files meant for it. Files that look like keys, passwords or sign-ins (in ~/.ssh or ~/.aws, .env files, private keys, browser cookies) are refused: only the user can send those, by choosing them in the page's file chooser, which agents can't see or drive.",
         params: &[
             required("selector", SELECTOR),
             list("files", "paths of the files to choose; relative ones are from the current directory"),

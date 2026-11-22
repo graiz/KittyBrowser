@@ -260,6 +260,17 @@ impl AddressBar {
         Edit::Changed
     }
 
+    /// What a field `width` cells wide shows, for fields drawn in a box: the
+    /// visible text, the cursor's offset into it, and whether it is all
+    /// selected. Completions belong to the address field and aren't shown.
+    pub fn view(&mut self, width: usize) -> (String, usize, bool) {
+        let window = self.window(width.max(1));
+        let end = window.end.min(self.text.len());
+        let start = window.start.min(end);
+        let visible = self.text[start..end].iter().collect();
+        (visible, self.cursor.saturating_sub(start), self.selected)
+    }
+
     /// The range of characters to show in `width` cells, scrolled so the
     /// cursor stays in view.
     fn window(&mut self, width: usize) -> std::ops::Range<usize> {
@@ -281,19 +292,27 @@ impl AddressBar {
 /// the 256-colour palette and follow the terminal's own colours once it
 /// says what they are.
 #[derive(Clone)]
-struct Palette {
-    bar: String,
-    field: String,
-    focused: String,
-    box_art: String,
-    box_style: String,
-    box_title: String,
-    box_dim: String,
+pub(crate) struct Palette {
+    pub bar: String,
+    pub field: String,
+    pub focused: String,
+    pub box_art: String,
+    pub box_style: String,
+    pub box_title: String,
+    pub box_dim: String,
+    /// The button Enter presses, and what is marked: the logo's colour.
+    pub accent: String,
+    /// Text in the logo's colour on the box.
+    pub box_accent: String,
+    /// What a box says, in the terminal's own text colour.
+    pub box_text: String,
+    /// A text field in a box: sunk to the terminal's background.
+    pub input: String,
 }
 
 static PALETTE: std::sync::RwLock<Option<Palette>> = std::sync::RwLock::new(None);
 
-fn palette() -> Palette {
+pub(crate) fn palette() -> Palette {
     PALETTE.read().ok().and_then(|p| p.clone()).unwrap_or_else(|| Palette {
         bar: "\x1b[0;48;5;236;38;5;252m".into(),
         field: "\x1b[0;48;5;238;38;5;250m".into(),
@@ -302,6 +321,10 @@ fn palette() -> Palette {
         box_style: "\x1b[0;48;5;236;38;5;252m".into(),
         box_title: "\x1b[0;48;5;236;38;5;231;1m".into(),
         box_dim: "\x1b[0;48;5;236;38;5;245m".into(),
+        accent: "\x1b[0;48;5;141;38;5;235;1m".into(),
+        box_accent: "\x1b[0;48;5;236;38;5;141;1m".into(),
+        box_text: "\x1b[0;48;5;236;38;5;231m".into(),
+        input: "\x1b[0;48;5;233;38;5;231m".into(),
     })
 }
 
@@ -334,6 +357,10 @@ pub fn use_terminal_colors(fg: Rgb, bg: Rgb) {
         box_style: style(bar, mix(bg, fg, 0.85), ""),
         box_title: style(bar, fg, ";1"),
         box_dim: style(bar, mix(bg, fg, 0.55), ""),
+        accent: style(art, bg, ";1"),
+        box_accent: style(bar, art, ";1"),
+        box_text: style(bar, fg, ""),
+        input: style(bg, fg, ""),
     };
     if let Ok(mut current) = PALETTE.write() {
         *current = Some(palette);
@@ -482,6 +509,13 @@ pub fn render_bar(
     out.extend_from_slice(s.as_bytes());
 }
 
+/// The host of a URL, with its port and without any "user@": "" for a file
+/// or anything else without one.
+pub fn host_of(url: &str) -> &str {
+    let host = url.split_once("://").map_or("", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+    host.rsplit_once('@').map_or(host, |(_, host)| host)
+}
+
 /// Turn what was typed into a URL: pass URLs through, add a scheme to bare
 /// hosts, resolve local files, and search for anything else.
 pub fn normalize_url(input: &str) -> Option<String> {
@@ -527,6 +561,15 @@ pub fn normalize_url(input: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hosts_drop_the_user() {
+        assert_eq!(super::host_of("https://example.com/a?b"), "example.com");
+        assert_eq!(super::host_of("http://me:pw@localhost:8080/x"), "localhost:8080");
+        assert_eq!(super::host_of("https://a.com#x@y"), "a.com");
+        assert_eq!(super::host_of("file:///tmp/a.html"), "");
+        assert_eq!(super::host_of("about:blank"), "");
+    }
+
     #[test]
     fn box_is_centred_below_the_bar() {
         let mut out = Vec::new();

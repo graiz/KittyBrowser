@@ -6,6 +6,23 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- A page's `alert`, `confirm`, `prompt` and "Leave site?" dialogs are asked
+  in the pane, as Chrome asks them, when the user set them off: a window
+  over the page with the page's host, its message, and Cancel and OK. Enter
+  accepts, Esc cancels. Dialogs an agent's command sets off are still
+  answered at once; while one waits for the user, commands that need its
+  page fail and say so, and `status` and `window` name it. `kb ctl dialog ask` goes back to asking after
+  `dialog accept` or `dismiss`.
+- A file field the user clicks opens a file chooser in the pane: places on
+  the left, the folder's files as `ls -la` lists them, and a File name field
+  that follows the selection, takes a typed path, and completes with Tab.
+  Space or Ctrl+click marks several files. It names the computer the files
+  come from, which over ssh isn't the user's own. Agents can't see or drive
+  it.
+- Files that look like keys, passwords or sign-ins are refused to
+  `kb ctl upload`, and the file chooser asks the user a second time before
+  sending one.
+
 ## 0.2.0 — 2026-11-21
 
 - The first release with prebuilt kbs for macOS and Linux, on ARM and
