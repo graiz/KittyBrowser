@@ -2,7 +2,11 @@
 //! says it. Chrome saves them where it would for the user, so a repeated
 //! name gets a number, as in any browser; kb only listens.
 
+use std::path::{Path, PathBuf};
+
 use serde_json::Value;
+
+use crate::picker::tilde_in;
 
 /// Finished downloads kept, to answer the command that caused them.
 const MAX_FINISHED: usize = 20;
@@ -37,9 +41,36 @@ impl Download {
         }
     }
 
+    /// What the bar says when it has ended, as Chrome's download bubble
+    /// does: "Saved report.txt to ~/Downloads". The name is the one saved,
+    /// which can have a number Chrome added.
+    fn note(&self, home: Option<&Path>) -> Option<String> {
+        match &self.state {
+            Saving::Running => None,
+            Saving::Saved(path) => {
+                // Chrome gave no path: say what was saved, not where.
+                let path = Path::new(path);
+                let (Some(name), Some(folder)) = (path.file_name(), path.parent().filter(|_| path.is_absolute()))
+                else {
+                    return Some(format!("Saved {}", self.name));
+                };
+                Some(format!("Saved {} to {}", name.to_string_lossy(), tilde_in(folder, home)))
+            }
+            Saving::Failed => Some(format!("Download of {} failed", self.name)),
+        }
+    }
+
     fn running(&self) -> bool {
         self.state == Saving::Running
     }
+}
+
+/// A download that has just ended, saved or not.
+pub struct Ended {
+    /// For the record, and the answer to the command that caused it.
+    pub line: String,
+    /// For the person at the pane.
+    pub note: String,
 }
 
 /// Downloads under way, and the last few finished.
@@ -67,9 +98,9 @@ impl Downloads {
         });
     }
 
-    /// Chrome's `Browser.downloadProgress`. Returns what to record when the
-    /// download has just finished, saved or not.
-    pub fn progressed(&mut self, params: &Value) -> Option<String> {
+    /// Chrome's `Browser.downloadProgress`. Returns what to say when the
+    /// download has just ended, saved or not.
+    pub fn progressed(&mut self, params: &Value) -> Option<Ended> {
         let download = self.list.iter_mut().find(|d| params["guid"] == d.guid.as_str())?;
         if !download.running() {
             return None;
@@ -83,7 +114,9 @@ impl Downloads {
             Some("canceled") => Saving::Failed,
             _ => return None,
         };
-        Some(download.line())
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let note = download.note(home.as_deref())?;
+        Some(Ended { line: download.line(), note })
     }
 
     /// What to add to the answer of a command whose page messages began at
@@ -192,7 +225,7 @@ mod tests {
         let mut downloads = Downloads::default();
         downloads.began(&json!({"guid": "g1", "suggestedFilename": "big.bin"}), 5);
         let step = json!({"guid": "g1", "receivedBytes": 4_200_000, "totalBytes": 20_000_000, "state": "inProgress"});
-        assert_eq!(downloads.progressed(&step), None);
+        assert!(downloads.progressed(&step).is_none());
         assert_eq!(downloads.bar().as_deref(), Some("Downloading 4.2 of 20 MB"));
         assert_eq!(downloads.running().collect::<Vec<_>>(), ["downloading big.bin, 4.2 of 20 MB so far"]);
         assert_eq!(
@@ -210,18 +243,44 @@ mod tests {
             "filePath": "/Users/me/Downloads/report (1).txt"
         });
         let saved = "downloaded report.txt (11 bytes) to /Users/me/Downloads/report (1).txt";
-        assert_eq!(downloads.progressed(&done).as_deref(), Some(saved));
+        assert_eq!(downloads.progressed(&done).map(|ended| ended.line).as_deref(), Some(saved));
         assert_eq!(downloads.since(6).collect::<Vec<_>>(), [saved]);
 
         let cancelled = json!({"guid": "g1", "receivedBytes": 0, "state": "canceled"});
         assert_eq!(
-            downloads.progressed(&cancelled).as_deref(),
+            downloads.progressed(&cancelled).map(|ended| ended.line).as_deref(),
             Some("the download of big.bin failed or was cancelled")
         );
         assert_eq!(downloads.bar(), None);
         // Chrome's progress after the end changes nothing.
-        assert_eq!(downloads.progressed(&json!({"guid": "g1", "state": "completed"})), None);
-        assert_eq!(downloads.progressed(&json!({"guid": "unknown", "state": "completed"})), None);
+        assert!(downloads.progressed(&json!({"guid": "g1", "state": "completed"})).is_none());
+        assert!(downloads.progressed(&json!({"guid": "unknown", "state": "completed"})).is_none());
+    }
+
+    #[test]
+    fn the_bar_says_where_a_download_went() {
+        let download = |state| Download {
+            guid: "g".to_owned(),
+            name: "report.txt".to_owned(),
+            received: 11,
+            total: Some(11),
+            state,
+            seq: 0,
+        };
+        let home = Some(Path::new("/Users/me"));
+        let saved = |path: &str| download(Saving::Saved(path.to_owned())).note(home);
+        assert_eq!(saved("/Users/me/Downloads/report.txt").as_deref(), Some("Saved report.txt to ~/Downloads"));
+        // The name saved, numbered when it repeats.
+        assert_eq!(saved("/Users/me/Downloads/report (1).txt").as_deref(), Some("Saved report (1).txt to ~/Downloads"));
+        assert_eq!(saved("/Users/me/report.txt").as_deref(), Some("Saved report.txt to ~"));
+        assert_eq!(saved("/tmp/out/report.txt").as_deref(), Some("Saved report.txt to /tmp/out"));
+        assert_eq!(
+            download(Saving::Saved("/Users/me/Downloads/report.txt".to_owned())).note(None).as_deref(),
+            Some("Saved report.txt to /Users/me/Downloads")
+        );
+        assert_eq!(saved("the downloads folder").as_deref(), Some("Saved report.txt"));
+        assert_eq!(download(Saving::Failed).note(home).as_deref(), Some("Download of report.txt failed"));
+        assert_eq!(download(Saving::Running).note(home), None);
     }
 
     #[test]

@@ -48,7 +48,9 @@ Notable changes to kb. The format follows
   They go where Chrome would put them, numbered when a name repeats. While
   one runs, the bar shows `Downloading 4.2 of 20 MB` and `kb ctl status`
   says how far it has come; `kb ctl console` records each one that
-  finished. `kb ctl open` on a file to download says so rather than failing
+  finished. When one ends, the bar says `Saved report.pdf to ~/Downloads`,
+  or that it failed, as Chrome's download bubble does, so a small file
+  saved between redraws isn't missed. `kb ctl open` on a file to download says so rather than failing
   with `net::ERR_ABORTED`. Quitting cancels downloads still running, so no
   part of a file is left behind.
 - `kb ctl click` on a link whose text wraps onto two lines clicks the

@@ -928,6 +928,8 @@ pub struct Devtools {
     /// The request for a file field's attributes, and the question it's for.
     accept_request: Option<(u64, u64)>,
     downloads: Downloads,
+    /// A download that ended, for the bar's note.
+    download_note: Option<String>,
 }
 
 /// Something a page asks the user, waiting in the pane.
@@ -2277,8 +2279,9 @@ impl Devtools {
         if method == "Browser.downloadWillBegin" {
             self.downloads.began(params, self.next_seq);
             self.next_seq += 1;
-        } else if let Some(line) = self.downloads.progressed(params) {
-            self.log(DOWNLOAD, line, String::new());
+        } else if let Some(ended) = self.downloads.progressed(params) {
+            self.log(DOWNLOAD, ended.line, String::new());
+            self.download_note = Some(ended.note);
         } else {
             return;
         }
@@ -2290,6 +2293,12 @@ impl Devtools {
     /// What the bar shows while files download: "Downloading 4.2 of 20 MB".
     pub fn downloading(&self) -> Option<String> {
         self.downloads.bar()
+    }
+
+    /// What to tell the person at the pane about a download that just
+    /// ended, once.
+    pub fn take_download_note(&mut self) -> Option<String> {
+        self.download_note.take()
     }
 
     /// Cancel downloads still running, so quitting doesn't leave a part of
@@ -3017,6 +3026,9 @@ mod tests {
         let saved = "downloaded report.txt (11 bytes) to /Users/me/Downloads/report.txt";
         assert_eq!(tools.fallout(&since), format!("\n{saved}"));
         assert_eq!(tools.console_lines(false, false), format!("[download] {saved}\n"));
+        // The pane is told once.
+        assert!(tools.take_download_note().is_some_and(|note| note.starts_with("Saved report.txt to ")));
+        assert_eq!(tools.take_download_note(), None);
         // The next action's answer doesn't repeat it, and the record stays
         // once another page has loaded.
         assert_eq!(tools.fallout(&tools.baseline("")), "");

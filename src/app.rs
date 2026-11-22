@@ -644,6 +644,11 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     app.devtools.observe(&message, &mut app.chrome);
                     // The bar shows how a download is going.
                     redraw |= message["method"].as_str().is_some_and(|method| method.starts_with("Browser.download"));
+                    // A small file is saved between redraws: say it was, as
+                    // Chrome's download bubble does.
+                    if let Some(note) = app.devtools.take_download_note() {
+                        app.note(&note);
+                    }
                     match app.chrome.handle(message) {
                         Some(PageEvent::Frame(png)) => {
                             let fits = app.fits(&png);
