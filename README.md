@@ -265,7 +265,8 @@ one:
   wait, dialog, window (list a page's popups and switch between them),
   throttle, scheme (dark or light mode).
 - **Debugging:** console, network, eval, style (`--why` explains which CSS
-  rule won), box, listeners, storage.
+  rule won), box, listeners, storage, clear-storage (cookies and storage
+  for the site, to test a first visit).
 
 Selectors are CSS (reaching into shadow DOM, and with `iframe >>> sel`
 into a frame from the same site), `text=Some words`, `@N` from
@@ -278,7 +279,12 @@ session, if there is one (several is an error), else the lowest-numbered.
 The same commands are available as an MCP server, which is off until you turn
 it on: `kb mcp on` (it prints how to register it with Claude Code), `kb mcp
 off`, `kb mcp status`. `kb mcp serve -i NAME` drives only the kb with that
-name, so an agent given it can't reach the kbs in your panes.
+name, so an agent given it can't reach the kbs in your panes. Add
+`--read-only` to offer only the tools that read (status, text, screenshot,
+storage and the like) and refuse the rest, or `--tools open,text,screenshot`
+to offer only those; `--read-only` wins over `--tools`. Each tool tells the
+client whether it only reads or can destroy something (`click`, `type`,
+`eval`, `clear-storage`, `quit`), so a client can ask before those.
 
 **Security:** kb listens on a socket in `~/.kittybrowser` that only your user
 can open. Anything running as you can use that socket to run JavaScript in

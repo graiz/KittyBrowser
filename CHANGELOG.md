@@ -6,6 +6,22 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- `storage` only reads, and clearing is its own command, `clear-storage`,
+  so an MCP client can allow one and ask before the other. `storage --clear`
+  fails and names the new command.
+- `kb mcp serve --read-only` offers only the tools that read the page and
+  refuses calls to the rest; `--tools A,B,...` offers only those named,
+  failing to start on a name that isn't a tool. They go in any order with
+  `-i NAME`, and `--read-only` wins. Every MCP tool carries `readOnlyHint`
+  and `destructiveHint` annotations and a title, so a client can skip asking
+  before reading and ask before a click, typing, `eval`, `clear-storage` or
+  `quit`.
+- A page stuck in a script that never yields no longer leaves kb unable to
+  leave it. `status` answered "kb dropped the command unanswered" after
+  30 s, and `open` and `reload` never got the page to go, until kb was
+  restarted. Now `status` answers after 5 s, without the title, saying the
+  page isn't answering; and `open`, `reload`, `back` and `forward` stop the
+  script after 5 s, leave the page, and say they did.
 - A page's `alert`, `confirm`, `prompt` and "Leave site?" dialogs are asked
   in the pane, as Chrome asks them, when the user set them off: a window
   over the page with the page's host, its message, and Cancel and OK. Enter
@@ -58,6 +74,16 @@ Notable changes to kb. The format follows
   empty space beside the text, miss, and still answer `clicked`. A click
   whose point lands on empty space around an element now fails and says
   so.
+- `kb ctl upload` given something other than a file field sets the files of
+  the field it belongs to, without clicking: the field a label is for, the
+  one inside a button, or the one in a close ancestor within its form. It
+  clicks and answers the file chooser only when no field belongs to the
+  element, so a wrong selector no longer clicks a button that does
+  something else. The answer names the field and how it was found.
+- `kb ctl upload` reports the files it sent, with their sizes on disk.
+  Before, it read the field back, and a page that takes the files in its
+  change handler and empties the field was reported as given no files; now
+  kb says the page cleared the field.
 
 ## 0.2.0 — 2026-11-21
 
