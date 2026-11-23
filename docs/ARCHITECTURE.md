@@ -437,6 +437,22 @@ field, it clicks it through the same path as `click` and answers the
 `Page.fileChooserOpened` that follows, by its `backendNodeId`; a chooser
 that opens with no upload waiting is reported like a dialog.
 
+**Downloads.** At startup kb sends `Browser.setDownloadBehavior` with
+`behavior: "default"` and `eventsEnabled: true`. "default" leaves the folder
+and the naming to Chrome, so files land where the user would look (usually
+`~/Downloads`) and a repeated name is numbered; "allow" with a folder would
+overwrite a file of the same name. The events (`Browser.downloadWillBegin`,
+`Browser.downloadProgress`, the last carrying `filePath`) come on the
+browser's own session, so downloads from any window are seen.
+`src/downloads.rs` keeps them; each download takes a place in the stream of
+page messages when it begins, so the answer of the command that set it off,
+and only that one, names the file and where it was saved, or how far it has
+come if it is still running when the command answers. `status` lists those
+running, the console keeps a line for each that finished (shown whatever
+page has loaded since), and the bar shows the progress. `Page.navigate`
+answers a download with `isDownload`, which `open` takes as a success.
+Quitting cancels downloads still running, and Chrome deletes the part saved.
+
 **Decisions on the remaining requests.** Iframes are entered only when a
 selector asks, with `iframe >>> sel`, the syntax that already crosses shadow
 roots; reading commands stop at the top document. Only frames from the same

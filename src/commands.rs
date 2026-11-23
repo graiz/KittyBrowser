@@ -77,12 +77,12 @@ const SELECTOR: &str =
 pub const COMMANDS: &[Command] = &[
     Command {
         name: "status",
-        help: "Show the page's URL and title, whether it is loading, the viewport size, and counts of console errors and failed requests.",
+        help: "Show the page's URL and title, whether it is loading, the viewport size, counts of console errors and failed requests, and any download still running and how far it has come.",
         params: &[],
     },
     Command {
         name: "open",
-        help: "Go to a URL or a local HTML file, wait for it to load and go quiet, and report console errors and failed requests so far. Errors that come later (a timer, a slow fetch) show in status. Local pages (files, localhost, private addresses) are never served from the cache.",
+        help: "Go to a URL or a local HTML file, wait for it to load and go quiet, and report console errors and failed requests so far. Errors that come later (a timer, a slow fetch) show in status. An address that is a file to download leaves the page as it is and says where the file was saved. Local pages (files, localhost, private addresses) are never served from the cache.",
         params: &[required("url", "URL, host name, or path to a local file")],
     },
     Command {
@@ -116,7 +116,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "quit",
-        help: "Quit this kb and its browser. In a pane that ran only kb, the pane closes; a headless kb (kb --headless) stops. Cookies and sign-ins are kept in its profile.",
+        help: "Quit this kb and its browser. In a pane that ran only kb, the pane closes; a headless kb (kb --headless) stops. Cookies and sign-ins are kept in its profile. Downloads still running are cancelled, and the part saved deleted.",
         params: &[],
     },
     Command {
@@ -131,7 +131,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "console",
-        help: "Show the current page's console messages and uncaught exceptions, with the file and line each came from, and any alert, confirm or prompt dialogs with how they were answered.",
+        help: "Show the current page's console messages and uncaught exceptions, with the file and line each came from, any alert, confirm or prompt dialogs with how they were answered, and each download that finished, with where it was saved.",
         params: &[
             flag("errors", "only errors"),
             flag("all", "also show messages from pages visited earlier, under a line naming each page"),
@@ -231,7 +231,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "click",
-        help: "Click (or with --double, double-click) the middle of an element with the mouse, scrolling it into view first. Fails if the element is off screen or something else covers it. Answers once the page has settled: reports any console errors and dialogs the click caused and a change of address, and if it led to another page, waits for that page to load. Fails if the page never received the click. The mouse stays there, so :hover styles apply until it moves.",
+        help: "Click (or with --double, double-click) the middle of an element with the mouse (for a link whose text wraps, the middle of its longest line), scrolling it into view first. Fails if the element is off screen, something else covers it, or its middle is empty space (then use --at). Answers once the page has settled: reports any console errors and dialogs the click caused, a file it downloaded and where it was saved (or how far one still running has come), and a change of address, and if it led to another page, waits for that page to load. Fails if the page never received the click. The mouse stays there, so :hover styles apply until it moves.",
         params: &[
             required("selector", SELECTOR),
             flag("double", "double-click, as for editing a todo item"),

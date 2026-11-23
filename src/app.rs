@@ -587,7 +587,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 Msg::Control(request) => {
                     log(format_args!("control: {} {}", request.command, request.args));
                     if request.command == "quit" {
-                        let _ = request.reply.send(Ok(Output::Text("kb is quitting; its pane closes".to_owned())));
+                        let cancelled = app.devtools.cancel_downloads(&mut app.chrome);
+                        let _ =
+                            request.reply.send(Ok(Output::Text(format!("kb is quitting{cancelled}; its pane closes"))));
                         quit = Some(Ok(()));
                         break;
                     }
@@ -640,6 +642,13 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         continue;
                     }
                     app.devtools.observe(&message, &mut app.chrome);
+                    // The bar shows how a download is going.
+                    redraw |= message["method"].as_str().is_some_and(|method| method.starts_with("Browser.download"));
+                    // A small file is saved between redraws: say it was, as
+                    // Chrome's download bubble does.
+                    if let Some(note) = app.devtools.take_download_note() {
+                        app.note(&note);
+                    }
                     match app.chrome.handle(message) {
                         Some(PageEvent::Frame(png)) => {
                             let fits = app.fits(&png);
@@ -740,6 +749,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     socket.remove();
     app.history.save();
     app.page.close();
+    app.devtools.cancel_downloads(&mut app.chrome);
     app.chrome.close();
     result
 }
@@ -1129,6 +1139,12 @@ impl App {
             const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
             badge.push(SPINNER[step % SPINNER.len()]);
+        }
+        if let Some(downloading) = self.devtools.downloading() {
+            if !badge.is_empty() {
+                badge.push(' ');
+            }
+            badge.push_str(&downloading);
         }
         if (self.zoom - 1.0).abs() > 0.001 {
             if !badge.is_empty() {

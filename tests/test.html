@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>kb test: dialogs and file pickers</title>
+<title>kb test: dialogs, file pickers and downloads</title>
 <style>
   :root { color-scheme: light dark; }
   /* A strong colour, neither the terminal's nor the dialog's, so the shadow
@@ -19,12 +19,13 @@
   input[type=file] { font: inherit; }
   .out { font: 14px ui-monospace, monospace; white-space: pre-wrap; margin-top: 6px; color: #3a3; }
   img { max-width: 160px; max-height: 110px; margin: 6px 6px 0 0; border-radius: 4px; }
+  ul.downloads li { margin: 6px 0; }
   #log { font: 14px ui-monospace, monospace; white-space: pre-wrap; padding: 10px; background: #8881; border-radius: 6px; min-height: 3em; }
 </style>
 </head>
 <body>
-<h1>Dialogs and file pickers</h1>
-<p class="lead">A page for trying kb's dialogs and file chooser by hand. Every answer shows below.</p>
+<h1>Dialogs, file pickers and downloads</h1>
+<p class="lead">A page for trying kb's dialogs, file chooser and downloads by hand. Every answer shows below.</p>
 
 <h2>Dialogs</h2>
 <button id="alert" onclick="log('alert', alert('Hello from an alert.'))">alert()</button>
@@ -74,6 +75,20 @@
   <div class="out" id="form-out"></div>
 </fieldset>
 
+<h2>Downloads</h2>
+<p>Files go where Chrome puts them for you, usually <code>~/Downloads</code>, numbered when a name repeats.
+The bar shows progress while one runs. Links to other sites need the network.</p>
+<ul class="downloads">
+  <li><a id="dl-text" href="data:text/plain,Downloaded%20from%20the%20kb%20test%20page.%0A" download="kb-test.txt">A small text file</a> (click twice: the second is numbered)</li>
+  <li><button id="dl-made" onclick="made()">A file the page makes</button> (a script builds it, then downloads it as made-here.csv)</li>
+  <li><a id="dl-header" href="https://github.com/graiz/KittyBrowser/releases/download/v0.2.0/kb-aarch64-apple-darwin.tar.gz.sha256">A file the server names</a> (a checksum from kb's release)</li>
+  <li><a id="dl-new-tab" target="_blank" href="https://github.com/graiz/KittyBrowser/releases/download/v0.2.0/kb-x86_64-apple-darwin.tar.gz.sha256">In a new tab</a> (a download the link opens in a new tab, which closes itself)</li>
+  <li><a id="dl-archive" href="https://github.com/graiz/KittyBrowser/releases/download/v0.2.0/kb-aarch64-apple-darwin.tar.gz">A 1 MB archive</a> (kb's release)</li>
+  <li><a id="dl-slow" href="https://httpbin.org/drip?duration=10&amp;numbytes=1000000&amp;code=200&amp;delay=0">A slow 1 MB file</a> (about 10 seconds; quit kb during it and nothing is left behind)</li>
+  <li><a id="dl-renamed-header" href="https://httpbin.org/response-headers?Content-Disposition=attachment%3B%20filename%3Dnamed-by-header.txt">A name set by a header</a> (named-by-header.txt)</li>
+  <li><a id="dl-opens" href="https://raw.githubusercontent.com/graiz/KittyBrowser/main/assets/logo.svg" download="kb-logo.svg">kb's logo, which opens instead</a> (a <code>download</code> attribute on another site's file is ignored, as in Chrome)</li>
+</ul>
+
 <script>
   const longText = 'This is a long message, of the kind some sites put in a confirm: ' +
     'it goes on for several lines so that the dialog has to wrap it, and it ' +
@@ -90,6 +105,13 @@
     const ok = confirm('Second: keep going?');
     log('chain confirm', ok);
     if (ok) log('chain prompt', prompt('Third: type anything'));
+  }
+  function made() {
+    const rows = 'name,size\nkb,small\n';
+    const a = Object.assign(document.createElement('a'), {
+      href: URL.createObjectURL(new Blob([rows], { type: 'text/csv' })), download: 'made-here.csv',
+    });
+    a.click();
   }
   addEventListener('beforeunload', e => {
     if (document.getElementById('leave').checked) { e.preventDefault(); e.returnValue = ''; }

@@ -45,6 +45,7 @@ src/term/              raw mode, input decoding, pane size, kitty graphics
 src/control.rs         the socket that kb ctl and the MCP server talk to; instances
 src/commands.rs        the agent commands: one table drives kb ctl, its help and MCP
 src/devtools.rs        carries the agent commands out, and the page-side scripts
+src/downloads.rs       the files pages download, and how commands report them
 src/cli.rs             kb ctl and kb list
 src/doctor.rs          kb doctor, and what kb says in a terminal it can't draw in
 src/mcp.rs             kb mcp

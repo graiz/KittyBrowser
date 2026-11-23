@@ -7,6 +7,7 @@
 //! reply with that id comes past in `observe`.
 
 use crate::control::{Output, Reply, Request};
+use crate::downloads::Downloads;
 use crate::engine::chrome::{Chrome, PageEvent};
 use crate::term::input::{Key, KeyCode};
 use crate::ui;
@@ -158,6 +159,14 @@ const LIB: &str = r#"globalThis.__kb = {
       y += b.top + f.clientTop + parseFloat(s.paddingTop);
     }
     return {x, y, width: r.width, height: r.height};
+  },
+  // Where a click aims, from the element's top left: its middle, or for
+  // text that wraps onto several lines (an inline link) the middle of its
+  // longest line, as the middle of the whole box can be beside the text.
+  middle(el) {
+    const b = el.getBoundingClientRect(), lines = [...el.getClientRects()];
+    const line = lines.length > 1 ? lines.reduce((a, c) => (c.width * c.height > a.width * a.height ? c : a)) : b;
+    return {x: line.left - b.left + line.width / 2, y: line.top - b.top + line.height / 2};
   },
   at(x, y, doc = document) {
     let hit = doc.elementFromPoint(x, y);
@@ -433,14 +442,21 @@ const HEAR: &str = "{ globalThis.__kbHeard = false; \
        try { w.addEventListener('mousedown', hear, {capture: true, once: true}); } \
        catch (e) { globalThis.__kbHeard = true; } } }";
 
-/// For `locate`, before a click: refuse if the click would land elsewhere.
-const CLICKABLE: &str = "{ const b = el.getBoundingClientRect(); \
-     const hit = b.width > 0 && b.height > 0 ? __kb.at(b.left + b.width / 2, b.top + b.height / 2, el.ownerDocument) : el; \
+/// For `locate`, before a click: refuse if the click would land elsewhere:
+/// on something covering the element, or on empty space in one around it
+/// (beside text that wraps), unless the element lets clicks through to it
+/// (`pointer-events: none`) or it is the element's label.
+const CLICKABLE: &str = "{ const b = el.getBoundingClientRect(), m = __kb.middle(el); \
+     const hit = b.width > 0 && b.height > 0 ? __kb.at(b.left + m.x, b.top + m.y, el.ownerDocument) : el; \
      if (!hit) throw new Error('the element is off screen, at ' + Math.round(b.left) + ',' + Math.round(b.top) + \
        ' in the window, and can\\'t be scrolled into view, so it can\\'t be clicked; see: kb ctl box'); \
      const labels = el.labels ? [...el.labels] : []; \
      if (hit !== el && !__kb.within(el, hit) && !__kb.within(hit, el) && !labels.some(label => __kb.within(label, hit))) \
        throw new Error('the element is covered by ' + NAME(hit) + ', which would get the click instead; see: kb ctl box'); \
+     const passes = getComputedStyle(el).pointerEvents === 'none' || labels.some(label => __kb.within(label, hit)); \
+     if (hit !== el && __kb.within(hit, el) && !passes) \
+       throw new Error('the click would land on empty space in ' + NAME(hit) + ' around the element, not on it; ' + \
+         'click a point on it with --at X,Y; see: kb ctl box'); \
      if (hit !== el && __kb.within(el, hit)) landed = NAME(hit); }";
 
 /// Where an element is on the page, without moving the page, for a screenshot.
@@ -505,9 +521,7 @@ const CONTENTS: &str = "function() { \
 fn clickable(at: Option<(f64, f64)>) -> String {
     let template = names(CLICKABLE);
     match at {
-        Some((x, y)) => template
-            .replace("b.left + b.width / 2", &format!("b.left + {x}"))
-            .replace("b.top + b.height / 2", &format!("b.top + {y}")),
+        Some((x, y)) => template.replace("m = __kb.middle(el)", &format!("m = {{x: {x}, y: {y}}}")),
         None => template,
     }
 }
@@ -564,7 +578,8 @@ impl Message {
 const PAGE: &str = "page";
 /// The level of the record of a dialog and how it was answered.
 const DIALOG: &str = "dialog";
-
+/// The level of the record of a finished download.
+const DOWNLOAD: &str = "download";
 impl NetRequest {
     fn line(&self) -> String {
         let state = match (&self.error, self.status) {
@@ -658,6 +673,9 @@ struct LoadWait {
     check: bool,
     /// For `check`: hosts whose errors and failed requests don't count.
     ignore: Vec<String>,
+    /// Where the command began among the page's messages: downloads from
+    /// then on are its doing.
+    since: u64,
 }
 
 /// An action that is done but not yet answered: errors it causes take a
@@ -679,7 +697,8 @@ enum Pending {
     /// An object's contents are coming, as JSON; if they can't be had,
     /// answer with this description of it.
     Contents(Reply, String),
-    Navigate(Reply),
+    /// `open`'s navigation; the page as it was, to report a download.
+    Navigate(Reply, Baseline),
     /// The element's rectangle is coming; then act on it.
     Rect(Reply, Then),
     /// The page's layout is coming; then capture the window, or with `true`
@@ -908,6 +927,9 @@ pub struct Devtools {
     answered: Vec<(String, u64)>,
     /// The request for a file field's attributes, and the question it's for.
     accept_request: Option<(u64, u64)>,
+    downloads: Downloads,
+    /// A download that ended, for the bar's note.
+    download_note: Option<String>,
 }
 
 /// Something a page asks the user, waiting in the pane.
@@ -1126,8 +1148,8 @@ fn locate(selector: &str, prepare: &str) -> String {
     format!(
         "{LIB}\n(() => {{ const el = __kb.get({sel}); \
          el.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}}); \
-         let landed = ''; {prepare} const r = __kb.box(el); \
-         return {{x: r.x, y: r.y, width: r.width, height: r.height, landed, target: {sel}}}; }})()",
+         let landed = ''; {prepare} const r = __kb.box(el), middle = __kb.middle(el); \
+         return {{x: r.x, y: r.y, width: r.width, height: r.height, middle, landed, target: {sel}}}; }})()",
         sel = quote(selector),
     )
 }
@@ -1305,11 +1327,18 @@ impl Devtools {
         for dialog in self.console.iter().filter(|m| m.seq >= since.seq && m.level == DIALOG) {
             let _ = write!(out, "\na dialog appeared: {}", dialog.text);
         }
+        out.push_str(&self.downloads_since(since.seq));
         let failed = self.requests.iter().filter(|r| r.failed()).count().saturating_sub(since.failed);
         if failed > 0 {
             let _ = write!(out, "\n{} since; see: kb ctl network --failed", plural(failed, "failed request"));
         }
         out
+    }
+
+    /// The downloads a command that began at `seq` set off, as lines to add
+    /// to its answer.
+    fn downloads_since(&self, seq: u64) -> String {
+        self.downloads.since(seq).map(|line| format!("\n{line}")).collect()
     }
 
     /// Capture a region of the page, in CSS pixels from the top of the
@@ -1391,6 +1420,9 @@ impl Devtools {
                     if !self.throttle.is_empty() {
                         let _ = write!(rest, "\nnetwork throttled: {}", self.throttle);
                     }
+                    for download in self.downloads.running() {
+                        let _ = write!(rest, "\n{download}");
+                    }
                     let windows = match chrome.windows() {
                         (_, 1) => "\nwindows: 1 open".to_owned(),
                         (shown, open) => format!(
@@ -1434,8 +1466,9 @@ impl Devtools {
                 "open" => {
                     let url = ui::normalize_url(need("url")?).ok_or("open needs a URL")?;
                     chrome.cache_for(&url);
+                    let since = self.baseline(chrome.session());
                     let id = chrome.request("Page.navigate", json!({"url": url}));
-                    self.park(id, Pending::Navigate(reply.clone()));
+                    self.park(id, Pending::Navigate(reply.clone(), since));
                 }
                 "reload" => {
                     chrome.reload();
@@ -1649,6 +1682,7 @@ impl Devtools {
                         stopped,
                         check: true,
                         ignore,
+                        since: self.next_seq,
                     });
                 }
                 "storage" => {
@@ -1855,6 +1889,7 @@ impl Devtools {
             self.active = Some(Instant::now());
         }
         match method {
+            "Browser.downloadWillBegin" | "Browser.downloadProgress" => self.download_event(method, params),
             "Runtime.consoleAPICalled" => {
                 let parts: Vec<String> = params["args"].as_array().into_iter().flatten().map(show).collect();
                 let frame = &params["stackTrace"]["callFrames"][0];
@@ -2040,7 +2075,8 @@ impl Devtools {
     fn console_lines(&self, all: bool, errors: bool) -> String {
         let mut out = String::new();
         let mut header = None;
-        for message in self.console.iter().filter(|m| all || m.seq >= self.page_seq) {
+        // A download outlives the page that started it.
+        for message in self.console.iter().filter(|m| all || m.seq >= self.page_seq || m.level == DOWNLOAD) {
             let wanted = match message.level.as_str() {
                 PAGE => {
                     header = all.then(|| message.line());
@@ -2239,6 +2275,43 @@ impl Devtools {
         }
     }
 
+    fn download_event(&mut self, method: &str, params: &Value) {
+        if method == "Browser.downloadWillBegin" {
+            self.downloads.began(params, self.next_seq);
+            self.next_seq += 1;
+        } else if let Some(ended) = self.downloads.progressed(params) {
+            self.log(DOWNLOAD, ended.line, String::new());
+            self.download_note = Some(ended.note);
+        } else {
+            return;
+        }
+        // The action that caused it waits a moment more, so a small file is
+        // reported saved rather than begun.
+        self.active = Some(Instant::now());
+    }
+
+    /// What the bar shows while files download: "Downloading 4.2 of 20 MB".
+    pub fn downloading(&self) -> Option<String> {
+        self.downloads.bar()
+    }
+
+    /// What to tell the person at the pane about a download that just
+    /// ended, once.
+    pub fn take_download_note(&mut self) -> Option<String> {
+        self.download_note.take()
+    }
+
+    /// Cancel downloads still running, so quitting doesn't leave a part of
+    /// a file behind; Chrome deletes it. Says which, for the answer to `quit`.
+    pub fn cancel_downloads(&mut self, chrome: &mut Chrome) -> String {
+        let mut said = String::new();
+        for (guid, name) in self.downloads.abandon() {
+            chrome.cancel_download(&guid);
+            let _ = write!(said, "; cancelled the download of {name}");
+        }
+        said
+    }
+
     fn request(&mut self, id: &Value) -> Option<&mut NetRequest> {
         let id = id.as_str()?;
         self.requests.iter_mut().rev().find(|request| request.id == id)
@@ -2260,8 +2333,14 @@ impl Devtools {
     }
 
     fn await_load(&mut self, reply: Reply, said: String) {
+        let since = self.next_seq;
+        self.await_load_since(reply, said, since);
+    }
+
+    /// Wait for the page to load, for a command that began at `since`.
+    fn await_load_since(&mut self, reply: Reply, said: String, since: u64) {
         let deadline = Instant::now() + LOAD_TIMEOUT;
-        self.loading.push(LoadWait { reply, said, deadline, stopped: None, check: false, ignore: Vec::new() });
+        self.loading.push(LoadWait { reply, said, deadline, stopped: None, check: false, ignore: Vec::new(), since });
     }
 
     /// Tell a command that waited for the page how the load went.
@@ -2276,7 +2355,7 @@ impl Devtools {
             _ => String::new(),
         };
         if !wait.check {
-            let before = format!("{}loaded {}{refused}", wait.said, self.url);
+            let before = format!("{}loaded {}{refused}{}", wait.said, self.url, self.downloads_since(wait.since));
             let pending = Pending::Status(wait.reply, before, self.health());
             return self.evaluate(chrome, "document.title", pending);
         }
@@ -2344,8 +2423,17 @@ impl Devtools {
                 // Cyclic, or otherwise not expressible as JSON.
                 Err(_) => text(&reply, description),
             },
-            Pending::Navigate(reply) => match result {
+            Pending::Navigate(reply, since) => match result {
                 Err(error) => fail(&reply, error),
+                // Chrome calls a download an aborted load: the page stays,
+                // and the answer says where the file went.
+                Ok(result) if result["isDownload"] == true => self.settling.push(Settling {
+                    reply,
+                    message: "the address is a file to download, so the page stays".to_owned(),
+                    since,
+                    at: Instant::now(),
+                    verify: None,
+                }),
                 Ok(result) => match result["errorText"].as_str() {
                     Some(error) => fail(&reply, format!("couldn't load the page: {error}")),
                     // No new document: only the fragment changed.
@@ -2360,6 +2448,9 @@ impl Devtools {
                 };
                 let number = |name: &str| rect[name].as_f64().unwrap_or(0.0);
                 let (x, y, width, height) = (number("x"), number("y"), number("width"), number("height"));
+                // Where a click aims: see `middle` in LIB.
+                let aim = |axis: &str, size: f64| rect["middle"][axis].as_f64().unwrap_or(size / 2.0);
+                let middle = (x + aim("x", width), y + aim("y", height));
                 if width <= 0.0 || height <= 0.0 {
                     return fail(
                         &reply,
@@ -2372,7 +2463,7 @@ impl Devtools {
                         let since = self.baseline(chrome.session());
                         let id = chrome.request(
                             "Input.dispatchMouseEvent",
-                            json!({"type": "mouseMoved", "x": x + width / 2.0, "y": y + height / 2.0}),
+                            json!({"type": "mouseMoved", "x": middle.0, "y": middle.1}),
                         );
                         self.park(id, Pending::Done(reply, format!("the mouse is over {selector}"), since, None));
                     }
@@ -2380,7 +2471,7 @@ impl Devtools {
                         let since = self.baseline(chrome.session());
                         let (x, y) = match at {
                             Some((dx, dy)) => (x + dx, y + dy),
-                            None => (x + width / 2.0, y + height / 2.0),
+                            None => middle,
                         };
                         // Clicking a container hits whatever is in its middle.
                         let selector = match rect["landed"].as_str() {
@@ -2760,11 +2851,12 @@ impl Devtools {
                         "another window is shown now, {at} of {n} (kb ctl window lists them; back on a window's first page closes it)"
                     ),
                 };
-                text(&action.reply, format!("{}; {shown}: {}", action.message, chrome.url()));
+                let downloads = self.downloads_since(action.since.seq);
+                text(&action.reply, format!("{}; {shown}: {}{downloads}", action.message, chrome.url()));
             } else if self.loads != action.since.loads && new_page {
                 // It led to another page: answer when that has loaded and gone quiet.
                 let stopped = (!self.busy).then_some(now);
-                self.await_load(action.reply, format!("{}\n", action.message));
+                self.await_load_since(action.reply, format!("{}\n", action.message), action.since.seq);
                 if let Some(wait) = self.loading.last_mut() {
                     wait.stopped = stopped;
                 }
@@ -2911,6 +3003,37 @@ mod tests {
         let Ok(Ok(Output::Text(out))) = answer.recv() else { panic!() };
         assert!(out.len() < MAX_OUTPUT + 100);
         assert!(out.ends_with(&format!("({} more characters not shown)", MAX_OUTPUT / 2)));
+    }
+
+    #[test]
+    fn clicks_aim_at_the_middle_or_where_asked() {
+        assert!(clickable(None).contains("m = __kb.middle(el)"));
+        let at = clickable(Some((10.0, 20.5)));
+        assert!(at.contains("m = {x: 10, y: 20.5}"), "{at}");
+        assert!(!at.contains("__kb.middle"), "{at}");
+    }
+
+    #[test]
+    fn downloads_are_answered_and_recorded() {
+        let mut tools = Devtools::default();
+        let since = tools.baseline("");
+        tools.download_event("Browser.downloadWillBegin", &json!({"guid": "g", "suggestedFilename": "report.txt"}));
+        tools.download_event(
+            "Browser.downloadProgress",
+            &json!({"guid": "g", "receivedBytes": 11, "totalBytes": 11, "state": "completed",
+                    "filePath": "/Users/me/Downloads/report.txt"}),
+        );
+        let saved = "downloaded report.txt (11 bytes) to /Users/me/Downloads/report.txt";
+        assert_eq!(tools.fallout(&since), format!("\n{saved}"));
+        assert_eq!(tools.console_lines(false, false), format!("[download] {saved}\n"));
+        // The pane is told once.
+        assert!(tools.take_download_note().is_some_and(|note| note.starts_with("Saved report.txt to ")));
+        assert_eq!(tools.take_download_note(), None);
+        // The next action's answer doesn't repeat it, and the record stays
+        // once another page has loaded.
+        assert_eq!(tools.fallout(&tools.baseline("")), "");
+        tools.new_page("loader-2", "https://site.test/next");
+        assert_eq!(tools.console_lines(false, false), format!("[download] {saved}\n"));
     }
 
     #[test]

@@ -632,6 +632,12 @@ impl Chrome {
         for (method, params) in &settings {
             call(tx, rx, method, params.clone(), s)?;
         }
+        // Downloads go where Chrome would put them for the user, numbered
+        // when a name repeats; this only asks it to say where. ("allow" with
+        // a folder would overwrite a file of the same name.) A browser that
+        // refuses still downloads; kb just can't say where.
+        let _ =
+            call(tx, rx, "Browser.setDownloadBehavior", json!({"behavior": "default", "eventsEnabled": true}), None);
         let tree = call(tx, rx, "Page.getFrameTree", json!({}), s)?;
         let main_frame = tree["frameTree"]["frame"]["id"].as_str().unwrap_or(&target).to_owned();
         call(tx, rx, "Target.setDiscoverTargets", json!({"discover": true}), None)?;
@@ -1228,6 +1234,11 @@ impl Chrome {
                 "windowsVirtualKeyCode": vk,
             }),
         );
+    }
+
+    /// Stop a download; Chrome deletes the part it had saved.
+    pub fn cancel_download(&mut self, guid: &str) {
+        self.send_browser("Browser.cancelDownload", json!({"guid": guid}));
     }
 
     /// Ask Chrome to exit, so it writes cookies to the profile, and wait

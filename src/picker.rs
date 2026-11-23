@@ -965,10 +965,13 @@ fn when(seconds: i64, now: i64) -> String {
 
 /// A path with the home folder as ~.
 fn tilde(path: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        if let Ok(rest) = path.strip_prefix(&home) {
-            return if rest.as_os_str().is_empty() { "~".to_owned() } else { format!("~/{}", rest.display()) };
-        }
+    tilde_in(path, std::env::var_os("HOME").map(PathBuf::from).as_deref())
+}
+
+/// A path with `home`, when there is one, as ~.
+pub fn tilde_in(path: &Path, home: Option<&Path>) -> String {
+    if let Some(rest) = home.and_then(|home| path.strip_prefix(home).ok()) {
+        return if rest.as_os_str().is_empty() { "~".to_owned() } else { format!("~/{}", rest.display()) };
     }
     path.display().to_string()
 }
