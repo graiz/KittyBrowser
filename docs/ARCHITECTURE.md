@@ -319,7 +319,14 @@ parser, its help, and the MCP tool list are all generated from it, so the two
 front ends can't drift apart. `kb mcp serve` is a thin JSON-RPC wrapper that
 forwards each tool call over the same socket; it lists no tools unless
 `~/.kittybrowser/mcp-enabled` exists (`kb mcp on`). `kb mcp serve -i NAME`
-sets `KB_INSTANCE`, so every call goes to that kb and none other. Parameters
+sets `KB_INSTANCE`, so every call goes to that kb and none other. Each
+command's `Effect` in the table says whether it only reads, changes
+something that can be undone, or can destroy something (it sends the page
+input, clears storage, or quits); it becomes the tool's `readOnlyHint` and
+`destructiveHint`, since a client takes a tool with no annotations to be
+destructive. `kb mcp serve --read-only` lists only the tools that read and
+refuses calls to the rest, and `--tools` narrows the list to the names
+given, failing at startup on one it doesn't know. Parameters
 are typed in the table (text, number, or a list of words), which becomes the
 tool schema; the control thread turns numbers back into the words `kb ctl`
 would send, so commands read one form.
@@ -399,6 +406,23 @@ also watches every event to keep what the commands report on:
   first and refuse an element that is off screen or covered.
 - **Dialogs.** `alert`, `confirm` and `prompt` are answered at once, since an
   open dialog freezes the page, and recorded in the console.
+- **Stuck pages.** A script that never yields holds the page's main thread,
+  and Chrome then answers nothing that needs the page: not a title, not
+  even a navigation, since Chrome asks the page before it lets it go, and
+  once it is going holds back what it is sent until the next page is
+  there. So `status`, `open`, `reload`, `back` and `forward` first ask the
+  page something it answers at once (`Runtime.evaluate` of `0`, the probe).
+  `status` answers without the title, saying the page isn't answering, if
+  the probe has gone 5 s unanswered. The others wait for the probe before
+  they leave the page, and if it goes 5 s unanswered, stop the script
+  (`Runtime.terminateExecution`, which V8 carries out off the main thread)
+  and leave it, saying so. Only then: told to stop with no script running,
+  V8 stops the next one instead. The probe is dropped when it is answered,
+  when the stop is sent, and when the page gets a new document, whose
+  answer to a question sent to the old one may never come; one left waiting
+  would make a healthy page look stuck. On a free page the probe costs one
+  round trip, about a millisecond, before every `open`, `reload`, `back` and
+  `forward`, in a pane as well as headless.
 
 `viewport` is the one command the app handles itself: it fixes the layout
 size, and the image is then placed in fewer cells, shrunk to fit if need be,
@@ -433,9 +457,19 @@ clicking the submit button, then click Logout.
 every window intercepts them (`Page.setInterceptFileChooserDialog`). `upload`
 sets a file field's files with `DOM.setFileInputFiles`, over the pipe like
 everything else, so no port is opened. Given anything other than a file
-field, it clicks it through the same path as `click` and answers the
+field, it first looks for the field the element belongs to (a label's
+`control`, the one field inside it, or the one field in an ancestor no
+further up than three levels, its form or the body) and sets that, since a
+click on a wrong selector could do anything. Another kind of control (a
+text field, a list, a button that submits its form, or a label for one)
+fails instead: a file field near it is no more likely to be the one meant. Only when there is none does it
+click through the same path as `click` and answer the
 `Page.fileChooserOpened` that follows, by its `backendNodeId`; a chooser
-that opens with no upload waiting is reported like a dialog.
+that opens with no upload waiting is reported like a dialog. The answer
+lists the files sent, as they are on disk, and then reads the field back
+only to say whether the page has emptied or changed it: Chrome runs the
+page's change handlers while setting the files, and some pages take the
+files there and clear the field.
 
 **Downloads.** At startup kb sends `Browser.setDownloadBehavior` with
 `behavior: "default"` and `eventsEnabled: true`. "default" leaves the folder

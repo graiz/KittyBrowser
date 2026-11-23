@@ -22,7 +22,9 @@ release, with credit if you'd like it.
   accordingly.
 - **The MCP server** (`kb mcp serve`) forwards an agent's tool calls to that
   socket. It offers no tools until you run `kb mcp on`. `kb mcp serve -i
-  NAME` reaches only the kb with that name.
+  NAME` reaches only the kb with that name. `--read-only` and `--tools`
+  limit the MCP tools only; they are no sandbox for an agent that can also
+  run `kb ctl`.
 - **Uploads.** `kb ctl upload` (and the MCP tool) reads files from your
   computer and gives them to the page, which can send them anywhere. It
   refuses files that look like keys, passwords or sign-ins: those in

@@ -27,6 +27,10 @@ const MAX_OUTPUT: usize = 30_000;
 const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long Chrome gets to answer a request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the page may take to answer a question it answers at once when
+/// its main thread is free. Longer, and a script is running without a pause,
+/// as an endless loop does, and nothing that needs the page gets through.
+const UNRESPONSIVE: Duration = Duration::from_secs(5);
 /// How long `back` and `forward` wait for the page to change.
 const MOVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A loaded page is reported on once nothing has been requested or logged
@@ -697,16 +701,18 @@ enum Pending {
     /// An object's contents are coming, as JSON; if they can't be had,
     /// answer with this description of it.
     Contents(Reply, String),
-    /// `open`'s navigation; the page as it was, to report a download.
-    Navigate(Reply, Baseline),
+    /// `open`'s navigation: the page as it was, to report a download, and
+    /// what to say first, once the page has loaded.
+    Navigate(Reply, Baseline, String),
     /// The element's rectangle is coming; then act on it.
     Rect(Reply, Then),
     /// The page's layout is coming; then capture the window, or with `true`
     /// the whole page.
     PageSize(Reply, ShotSize, bool),
     Image(Reply),
-    /// The history list is coming; then step this far through it.
-    History(Reply, i64),
+    /// The history list is coming; then step this far through it, and say
+    /// this before where it went.
+    History(Reply, i64, String),
     /// Once Chrome confirms the action, answer with this text and whatever
     /// went wrong on the page since the baseline; and if set, first check
     /// the page heard the click.
@@ -732,14 +738,24 @@ enum Pending {
     Acted(Reply, Baseline),
     /// One check of a `wait`; the number identifies the wait.
     WaitCheck(u64),
-    /// For `upload`: the element by reference, then what kind it is, then
-    /// its files being set, then the files it has. The element is named by
-    /// its selector, or once a chooser has opened, by the click that did.
+    /// For `upload`: the element by reference, then the file field it
+    /// belongs to, then that field by reference, then its files being set,
+    /// then the files it has. The element is named by its selector.
     UploadTo(Reply, String, Vec<String>),
     UploadKind(Reply, String, Vec<String>, String),
-    UploadSet(Reply, String, Option<String>, Option<u64>),
-    UploadNode(Reply, String),
-    UploadRead(Reply, String, Baseline),
+    UploadField(Reply, Upload),
+    UploadSet(Reply, Upload, Option<String>, Option<u64>),
+    UploadNode(Reply, Upload),
+    UploadRead(Reply, Upload, Baseline),
+}
+
+/// An `upload` once its file field is known: the field's name, how it was
+/// found from what the agent gave (empty when given the field itself, or
+/// the same as the name once a chooser has opened), and the files to send.
+struct Upload {
+    name: String,
+    how: String,
+    files: Vec<String>,
 }
 
 /// An `upload` that clicked something, waiting for the file chooser it
@@ -757,12 +773,95 @@ struct Choosing {
 /// Script function: the element's name and the files it holds, as the page
 /// sees them.
 const FILES: &str = "function() { return {name: NAME(this), \
-     files: [...this.files].map(f => f.name + ' (' + f.size.toLocaleString('en') + ' bytes)')}; }";
+     files: [...this.files].map(f => ({name: f.name, size: f.size}))}; }";
 
-/// Script function: whether the element is a file field, and how many files
-/// it takes.
-const FILE_FIELD: &str = "function() { return {file: this.localName === 'input' && this.type === 'file', \
-     multiple: !!this.multiple, disabled: !!this.disabled, name: NAME(this)}; }";
+/// Script fragment: the file field an element belongs to, and how it was
+/// found, so that `upload` sets its files without a click: the element
+/// itself, the field a <label> is for, the one field inside it, or the one
+/// field in a close ancestor. The ancestors go no further than a form and
+/// stop short of the body, and one holding several fields ends the search,
+/// so a field elsewhere on the page is never taken for this one.
+const FIELD_OF: &str = "const fieldOf = e => { \
+     const file = f => !!f && f.localName === 'input' && f.type === 'file'; \
+     if (file(e)) return [e, '']; \
+     if (e.localName === 'label' && file(e.control)) return [e.control, 'the file field ' + NAME(e) + ' is for']; \
+     const inside = e.querySelectorAll('input[type=file]'); \
+     if (inside.length) return [inside.length === 1 ? inside[0] : null, 'the file field inside ' + NAME(e)]; \
+     const other = c => c.localName === 'input' ? (c.type === 'text' ? 'a text field' : 'a field of type ' + c.type) : c.localName === 'select' ? 'a list' : \
+       c.localName === 'textarea' ? 'a text area' : c.localName === 'button' && c.form && c.type === 'submit' ? \
+       'a button that submits its form' : ''; \
+     if (e.localName === 'label' && e.control) return [null, '', NAME(e) + ' is for ' + other(e.control) + ', not a file field']; \
+     if (other(e)) return [null, '', NAME(e) + ' is ' + other(e) + ', not a file field']; \
+     let up = e.parentElement; \
+     for (let level = 0; level < 3 && up && up !== up.ownerDocument.body; level++, up = up.parentElement) { \
+       const near = up.querySelectorAll('input[type=file]'); \
+       if (near.length === 1) return [near[0], 'the file field in ' + NAME(up) + ', which holds ' + NAME(e)]; \
+       if (near.length || up.localName === 'form') break; \
+     } \
+     return [null, '']; };";
+
+/// Script function body: the file field the element belongs to, as
+/// `FIELD_OF` finds it: whether there is one, how it was found, and how
+/// many files it takes. `inside` counts the fields in an element that holds
+/// several, which is no one field.
+const FILE_FIELD: &str = "const [field, how, wrong] = fieldOf(this); const f = field || this; \
+     return {file: !!field, how, wrong, inside: this.querySelectorAll('input[type=file]').length, \
+     multiple: !!f.multiple, disabled: !!f.disabled, name: NAME(f)};";
+
+/// Script function body: the file field itself, by reference.
+const FIELD: &str = "return fieldOf(this)[0];";
+
+/// A script function that can find an element's file field.
+fn field_function(body: &str) -> String {
+    names(&format!("function() {{ {FIELD_OF} {body} }}"))
+}
+
+/// The name and size of each file, as the page will see them.
+fn on_disk(files: &[String]) -> Vec<(String, u64)> {
+    let file = |path: &String| {
+        let path = std::path::Path::new(path);
+        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        (name, std::fs::metadata(path).map(|data| data.len()).unwrap_or(0))
+    };
+    files.iter().map(file).collect()
+}
+
+/// A count with commas between thousands, as in 1,234,567.
+fn grouped(count: u64) -> String {
+    let digits = count.to_string();
+    let mut out = String::new();
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// What `upload` answers: the files it sent, as they are on disk, and what
+/// the field holds afterwards (`held`, when it could be read) if that
+/// differs. Chrome runs the page's change handlers as it sets the files,
+/// and some pages take the files there and empty the field: the upload
+/// went ahead, so that's said rather than reported as nothing chosen.
+fn chosen(field: &str, how: &str, sent: &[(String, u64)], held: Option<&[(String, u64)]>) -> String {
+    let list = |files: &[(String, u64)]| {
+        let size = |size: u64| format!("{} byte{}", grouped(size), if size == 1 { "" } else { "s" });
+        files.iter().map(|(name, bytes)| format!("{name} ({})", size(*bytes))).collect::<Vec<_>>().join(", ")
+    };
+    let how = if how.is_empty() || how == field { String::new() } else { format!(" ({how})") };
+    let mut out = format!("chose {} for {field}{how}: {}", plural(sent.len(), "file"), list(sent));
+    match held {
+        Some([]) => {
+            out.push_str("; the field is empty again: the page took the files and cleared it, as some pages do")
+        }
+        Some(held) if held != sent => {
+            let _ = write!(out, "; the field now holds {}: the page changed it", list(held));
+        }
+        _ => {}
+    }
+    out
+}
 
 /// The files of an `upload`, checked again here: a client may not have.
 fn upload_files(args: &Value) -> Result<Vec<String>, String> {
@@ -892,8 +991,9 @@ pub struct Devtools {
     active: Option<Instant>,
     /// Why the page's own document last failed to load, if it did.
     document_error: Option<String>,
-    /// `back` and `forward` waiting for the page to change.
-    moving: Vec<(Reply, Instant)>,
+    /// `back` and `forward` waiting for the page to change, and what to say
+    /// before where it went.
+    moving: Vec<(Reply, String, Instant)>,
     /// `back` closing a window: answered once fewer are open than this.
     closing: Vec<(Reply, usize, Instant)>,
     waits: Vec<Wait>,
@@ -930,6 +1030,47 @@ pub struct Devtools {
     downloads: Downloads,
     /// A download that ended, for the bar's note.
     download_note: Option<String>,
+    /// The question put to the page to learn whether it can answer at all,
+    /// until it does.
+    probe: Option<Probe>,
+    /// Commands that leave the page, waiting until it has answered the probe.
+    held: Vec<Leave>,
+}
+
+/// A question the page answers at once if its main thread is free.
+struct Probe {
+    id: u64,
+    /// The window asked.
+    session: String,
+    sent: Instant,
+}
+
+/// A command that leaves the page. It waits for the page to answer the
+/// probe, as a page stuck in a script has to be stopped before it is left:
+/// Chrome asks the page first whether it may go, and once it is going holds
+/// back what kb asks of it, the stop too, until the next page is there.
+enum Leave {
+    Open(Reply, String),
+    Reload(Reply),
+    /// `back` or `forward`.
+    Step(Reply, i64),
+}
+
+/// How long the page in `session` has gone without answering `probe`, once
+/// that is long enough to call it stuck.
+fn unanswered(probe: Option<&Probe>, session: &str, now: Instant) -> Option<Duration> {
+    let probe = probe.filter(|probe| probe.session == session)?;
+    let waited = now.saturating_duration_since(probe.sent);
+    (waited >= UNRESPONSIVE).then_some(waited)
+}
+
+/// What `status` says of a page that hasn't answered for `waited`.
+fn stuck_note(waited: Duration) -> String {
+    format!(
+        "responding: no; the page hasn't answered for {} s, as when a script runs without a pause, so commands \
+         that need the page wait on it. kb ctl reload (or open) stops the script and leaves the page",
+        waited.as_secs()
+    )
 }
 
 /// Something a page asks the user, waiting in the pane.
@@ -1197,6 +1338,81 @@ impl Devtools {
         self.pending.insert(id, (pending, Instant::now() + REQUEST_TIMEOUT));
     }
 
+    /// Ask the page something it answers at once when its main thread is
+    /// free, unless it was asked already and hasn't answered yet.
+    fn probe(&mut self, chrome: &mut Chrome) {
+        if self.probe.as_ref().is_some_and(|probe| probe.session == chrome.session()) {
+            return;
+        }
+        let id = chrome.request("Runtime.evaluate", json!({"expression": "0"}));
+        let session = chrome.session().to_owned();
+        self.probe = Some(Probe { id, session, sent: Instant::now() });
+    }
+
+    /// The page in `session` has a new document. A probe sent to the old one
+    /// may never be answered, and left waiting would make the new page look
+    /// stuck.
+    fn new_document(&mut self, session: &str) {
+        if self.probe.as_ref().is_some_and(|probe| probe.session == session) {
+            self.probe = None;
+        }
+    }
+
+    /// Leave the page as the held commands ask, saying `said` first.
+    fn leave(&mut self, chrome: &mut Chrome, said: &str) {
+        for leave in std::mem::take(&mut self.held) {
+            match leave {
+                Leave::Open(reply, url) => {
+                    chrome.cache_for(&url);
+                    let since = self.baseline(chrome.session());
+                    let id = chrome.request("Page.navigate", json!({"url": url}));
+                    self.park(id, Pending::Navigate(reply, since, said.to_owned()));
+                }
+                Leave::Reload(reply) => {
+                    chrome.reload();
+                    self.await_load(reply, said.to_owned());
+                }
+                Leave::Step(reply, step) => {
+                    let id = chrome.request("Page.getNavigationHistory", json!({}));
+                    self.park(id, Pending::History(reply, step, said.to_owned()));
+                }
+            }
+        }
+    }
+
+    /// The page has been stuck in a script for `waited`. A status waiting on
+    /// its title is told so rather than left to time out; and a command that
+    /// leaves the page stops the script first. Only now, while the probe is
+    /// still unanswered: told to stop when no script is running, V8 stops
+    /// the next one to run instead.
+    fn stuck(&mut self, chrome: &mut Chrome, waited: Duration) {
+        let statuses: Vec<u64> = self
+            .pending
+            .iter()
+            .filter(|(_, (pending, _))| matches!(pending, Pending::Status(..)))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in statuses {
+            if let Some((Pending::Status(reply, before, after), _)) = self.pending.remove(&id) {
+                let note = stuck_note(waited);
+                text(&reply, format!("{before}\ntitle: (unknown while the page isn't answering)\n{after}\n{note}"));
+            }
+        }
+        if self.held.is_empty() {
+            return;
+        }
+        // The navigation answers for the probe from here: one left waiting
+        // would have a later command stop whatever runs on the next page.
+        if let Some(probe) = self.probe.take() {
+            chrome.request_in(&probe.session, "Runtime.terminateExecution", json!({}));
+        }
+        let said = format!(
+            "stopped a script that had kept the page from answering for {} s, so that it could be left\n",
+            waited.as_secs()
+        );
+        self.leave(chrome, &said);
+    }
+
     /// Run one of our own scripts, whose result comes back by value.
     fn evaluate(&mut self, chrome: &mut Chrome, expression: &str, pending: Pending) {
         let id = chrome.request(
@@ -1460,24 +1676,24 @@ impl Devtools {
                         return Ok(());
                     }
                     // The title has to be asked for; the rest is already known.
+                    // If the page can't answer, tick says so in its place.
+                    self.probe(chrome);
                     let pending = Pending::Status(reply.clone(), format!("url: {url}"), rest);
                     self.evaluate(chrome, "document.title", pending);
                 }
                 "open" => {
                     let url = ui::normalize_url(need("url")?).ok_or("open needs a URL")?;
-                    chrome.cache_for(&url);
-                    let since = self.baseline(chrome.session());
-                    let id = chrome.request("Page.navigate", json!({"url": url}));
-                    self.park(id, Pending::Navigate(reply.clone(), since));
+                    self.probe(chrome);
+                    self.held.push(Leave::Open(reply.clone(), url));
                 }
                 "reload" => {
-                    chrome.reload();
-                    self.await_load(reply.clone(), String::new());
+                    self.probe(chrome);
+                    self.held.push(Leave::Reload(reply.clone()));
                 }
                 "back" | "forward" => {
                     let step = if command == "back" { -1 } else { 1 };
-                    let id = chrome.request("Page.getNavigationHistory", json!({}));
-                    self.park(id, Pending::History(reply.clone(), step));
+                    self.probe(chrome);
+                    self.held.push(Leave::Step(reply.clone(), step));
                 }
                 "screenshot" => {
                     let size = ShotSize::parse(arg("size"))?;
@@ -1686,26 +1902,33 @@ impl Devtools {
                     });
                 }
                 "storage" => {
+                    // Over MCP, where no parser turns the old flag away.
                     if flag("clear") {
-                        let origin = match self.url.split_once("://") {
-                            Some((scheme, rest)) if scheme.starts_with("http") => {
-                                format!("{scheme}://{}", rest.split(['/', '?', '#']).next().unwrap_or(""))
-                            }
-                            _ => return Err("storage --clear works on http and https pages".to_owned()),
-                        };
-                        let id = chrome.request(
-                            "Storage.clearDataForOrigin",
-                            json!({
-                                "origin": origin,
-                                "storageTypes": "cookies,local_storage,session_storage,indexeddb,cache_storage,service_workers",
-                            }),
-                        );
-                        let message =
-                            format!("cleared cookies and storage for {origin}; reload to start the page fresh");
-                        self.park(id, Pending::Done(reply.clone(), message, self.baseline(chrome.session()), None));
-                    } else {
-                        self.evaluate(chrome, STORAGE, Pending::Eval(reply.clone()));
+                        return Err(crate::commands::MOVED_CLEAR.to_owned());
                     }
+                    self.evaluate(chrome, STORAGE, Pending::Eval(reply.clone()));
+                }
+                "clear-storage" => {
+                    let origin = match self.url.split_once("://") {
+                        Some((scheme, rest)) if scheme.starts_with("http") => {
+                            format!("{scheme}://{}", rest.split(['/', '?', '#']).next().unwrap_or(""))
+                        }
+                        _ => {
+                            return Err(format!(
+                                "clear-storage works on http and https pages, and this page is {}",
+                                self.url
+                            ))
+                        }
+                    };
+                    let id = chrome.request(
+                        "Storage.clearDataForOrigin",
+                        json!({
+                            "origin": origin,
+                            "storageTypes": "cookies,local_storage,session_storage,indexeddb,cache_storage,service_workers",
+                        }),
+                    );
+                    let message = format!("cleared cookies and storage for {origin}; reload to start the page fresh");
+                    self.park(id, Pending::Done(reply.clone(), message, self.baseline(chrome.session()), None));
                 }
                 "listeners" => {
                     let selector = need("selector")?;
@@ -1855,6 +2078,12 @@ impl Devtools {
     /// command it answers, or log the event it reports.
     pub fn observe(&mut self, message: &Value, chrome: &mut Chrome) {
         if let Some(id) = message["id"].as_u64() {
+            if self.probe.as_ref().is_some_and(|probe| probe.id == id) {
+                // Answered, or dropped because the page is going anyway.
+                self.probe = None;
+                self.leave(chrome, "");
+                return;
+            }
             if let Some(at) = self.answered.iter().position(|(_, request)| *request == id) {
                 if message.get("error").is_some() {
                     self.answered.remove(at);
@@ -1971,7 +2200,8 @@ impl Devtools {
                         Some(node) => {
                             let id = chrome.request("DOM.setFileInputFiles", json!({"files": files, "backendNodeId": node}));
                             let how = format!("the file chooser clicking {selector} opened");
-                            self.park(id, Pending::UploadSet(reply, how, None, Some(node)));
+                            let upload = Upload { name: how.clone(), how, files };
+                            self.park(id, Pending::UploadSet(reply, upload, None, Some(node)));
                         }
                     }
                 }
@@ -2040,6 +2270,7 @@ impl Devtools {
                 }
             }
             "Page.frameNavigated" if params["frame"].get("parentId").is_none() => {
+                self.new_document(chrome.session());
                 // The new page starts here, when it replaces the old one, and
                 // not at its request: a load that fails may replace nothing.
                 let loader = params["frame"]["loaderId"].as_str().unwrap_or("");
@@ -2051,6 +2282,7 @@ impl Devtools {
                     format!("{}{}", frame["url"].as_str().unwrap_or(""), frame["urlFragment"].as_str().unwrap_or(""));
                 self.moved();
             }
+            "Runtime.executionContextsCleared" => self.new_document(chrome.session()),
             "Page.navigatedWithinDocument" if main_frame => {
                 self.url = params["url"].as_str().unwrap_or("").to_owned();
                 self.moved();
@@ -2105,6 +2337,7 @@ impl Devtools {
     fn agent_busy(&self) -> bool {
         !self.settling.is_empty()
             || self.choosing.is_some()
+            || !self.held.is_empty()
             || self.pending.values().any(|(pending, _)| !matches!(pending, Pending::WaitCheck(_)))
     }
 
@@ -2319,8 +2552,8 @@ impl Devtools {
 
     /// The page changed: answer the `back` and `forward` waiting on that.
     fn moved(&mut self) {
-        for (reply, _) in std::mem::take(&mut self.moving) {
-            text(&reply, format!("now at {}", self.url));
+        for (reply, said, _) in std::mem::take(&mut self.moving) {
+            text(&reply, format!("{said}now at {}", self.url));
         }
     }
 
@@ -2423,22 +2656,22 @@ impl Devtools {
                 // Cyclic, or otherwise not expressible as JSON.
                 Err(_) => text(&reply, description),
             },
-            Pending::Navigate(reply, since) => match result {
+            Pending::Navigate(reply, since, said) => match result {
                 Err(error) => fail(&reply, error),
                 // Chrome calls a download an aborted load: the page stays,
                 // and the answer says where the file went.
                 Ok(result) if result["isDownload"] == true => self.settling.push(Settling {
                     reply,
-                    message: "the address is a file to download, so the page stays".to_owned(),
+                    message: format!("{said}the address is a file to download, so the page stays"),
                     since,
                     at: Instant::now(),
                     verify: None,
                 }),
                 Ok(result) => match result["errorText"].as_str() {
-                    Some(error) => fail(&reply, format!("couldn't load the page: {error}")),
+                    Some(error) => fail(&reply, format!("{said}couldn't load the page: {error}")),
                     // No new document: only the fragment changed.
-                    None if result.get("loaderId").is_none() => text(&reply, "moved within the page"),
-                    None => self.await_load(reply, String::new()),
+                    None if result.get("loaderId").is_none() => text(&reply, format!("{said}moved within the page")),
+                    None => self.await_load(reply, said),
                 },
             },
             Pending::Rect(reply, then) => {
@@ -2629,7 +2862,7 @@ impl Devtools {
                     Err(error) => Err(error),
                 });
             }
-            Pending::History(reply, step) => {
+            Pending::History(reply, step, said) => {
                 let result = match result {
                     Ok(result) => result,
                     Err(error) => return fail(&reply, error),
@@ -2639,7 +2872,7 @@ impl Devtools {
                 match entry {
                     Some(entry) => {
                         chrome.request("Page.navigateToHistoryEntry", json!({"entryId": entry["id"]}));
-                        self.moving.push((reply, Instant::now() + MOVE_TIMEOUT));
+                        self.moving.push((reply, said, Instant::now() + MOVE_TIMEOUT));
                     }
                     // The first page of a window a page opened: back is closing it.
                     None if step < 0 && chrome.windows().1 > 1 => {
@@ -2683,7 +2916,10 @@ impl Devtools {
                     let object_id = object["objectId"].as_str().unwrap_or("").to_owned();
                     let id = chrome.request(
                         "Runtime.callFunctionOn",
-                        json!({"objectId": object_id, "returnByValue": true, "functionDeclaration": names(FILE_FIELD)}),
+                        json!({
+                            "objectId": object_id, "returnByValue": true,
+                            "functionDeclaration": field_function(FILE_FIELD),
+                        }),
                     );
                     self.park(id, Pending::UploadKind(reply, selector, files, object_id));
                 }
@@ -2699,8 +2935,30 @@ impl Devtools {
                     Err(error) => return fail(&reply, error),
                 };
                 let name = field["name"].as_str().unwrap_or("the element").to_owned();
+                let how = field["how"].as_str().unwrap_or("").to_owned();
+                // Another kind of control: a field near it is no more likely
+                // to be meant than any other, and clicking it could submit.
+                if let Some(wrong) = field["wrong"].as_str() {
+                    return fail(
+                        &reply,
+                        format!("{wrong}; upload takes the <input type=file>, or what a user clicks to choose files"),
+                    );
+                }
+                if field["file"] != true && !how.is_empty() {
+                    return fail(
+                        &reply,
+                        format!(
+                            "{name} holds {} file fields, so kb can't tell which to choose files for; give upload \
+                             one of them (see: kb ctl html {})",
+                            field["inside"].as_u64().unwrap_or(0),
+                            quote(&selector)
+                        ),
+                    );
+                }
                 if field["file"] != true {
-                    // A button or drop zone: click it, and answer the chooser it opens.
+                    // No file field belongs to it, so it opens the chooser by
+                    // script, as some buttons and drop zones do: click it, and
+                    // answer the chooser it opens.
                     if self.choosing.is_some() {
                         return fail(&reply, "another upload is waiting for its file chooser; try again in a moment");
                     }
@@ -2721,12 +2979,32 @@ impl Devtools {
                 if files.len() > 1 && field["multiple"] != true {
                     return fail(&reply, format!("{name} takes one file, and {} were given", files.len()));
                 }
-                let id = chrome.request("DOM.setFileInputFiles", json!({"files": files, "objectId": object_id}));
-                self.park(id, Pending::UploadSet(reply, name, Some(object_id), None));
+                let upload = Upload { name, how, files };
+                if upload.how.is_empty() {
+                    let id =
+                        chrome.request("DOM.setFileInputFiles", json!({"files": upload.files, "objectId": object_id}));
+                    self.park(id, Pending::UploadSet(reply, upload, Some(object_id), None));
+                } else {
+                    let id = chrome.request(
+                        "Runtime.callFunctionOn",
+                        json!({"objectId": object_id, "functionDeclaration": field_function(FIELD)}),
+                    );
+                    self.park(id, Pending::UploadField(reply, upload));
+                }
             }
-            Pending::UploadSet(reply, name, object_id, node) => {
+            Pending::UploadField(reply, upload) => match evaluated(result) {
+                Ok(object) if object["objectId"].is_string() => {
+                    let object_id = object["objectId"].as_str().unwrap_or("").to_owned();
+                    let id =
+                        chrome.request("DOM.setFileInputFiles", json!({"files": upload.files, "objectId": object_id}));
+                    self.park(id, Pending::UploadSet(reply, upload, Some(object_id), None));
+                }
+                Ok(_) => fail(&reply, format!("{} went from the page before its files could be set", upload.name)),
+                Err(error) => fail(&reply, error),
+            },
+            Pending::UploadSet(reply, upload, object_id, node) => {
                 if let Err(error) = result {
-                    return fail(&reply, format!("Chrome couldn't set the files of {name}: {error}"));
+                    return fail(&reply, format!("Chrome couldn't set the files of {}: {error}", upload.name));
                 }
                 let since = self.baseline(chrome.session());
                 match (object_id, node) {
@@ -2735,16 +3013,16 @@ impl Devtools {
                             "Runtime.callFunctionOn",
                             json!({"objectId": object_id, "returnByValue": true, "functionDeclaration": names(FILES)}),
                         );
-                        self.park(id, Pending::UploadRead(reply, String::new(), since));
+                        self.park(id, Pending::UploadRead(reply, upload, since));
                     }
                     (None, Some(node)) => {
                         let id = chrome.request("DOM.resolveNode", json!({"backendNodeId": node}));
-                        self.park(id, Pending::UploadNode(reply, name));
+                        self.park(id, Pending::UploadNode(reply, upload));
                     }
-                    (None, None) => text(&reply, format!("chose the files for {name}")),
+                    (None, None) => text(&reply, chosen(&upload.name, &upload.how, &on_disk(&upload.files), None)),
                 }
             }
-            Pending::UploadNode(reply, name) => match result {
+            Pending::UploadNode(reply, upload) => match result {
                 Ok(node) => {
                     let id = chrome.request(
                         "Runtime.callFunctionOn",
@@ -2754,26 +3032,26 @@ impl Devtools {
                         }),
                     );
                     let since = self.baseline(chrome.session());
-                    self.park(id, Pending::UploadRead(reply, name, since));
+                    self.park(id, Pending::UploadRead(reply, upload, since));
                 }
-                Err(_) => text(&reply, format!("chose the files for {name}")),
+                Err(_) => text(&reply, chosen(&upload.name, &upload.how, &on_disk(&upload.files), None)),
             },
-            Pending::UploadRead(reply, how, since) => match evaluated(result) {
-                Ok(object) => {
-                    let field = &object["value"];
-                    let files: Vec<&str> =
-                        field["files"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                    let how = if how.is_empty() { how } else { format!(" ({how})") };
-                    let message = format!(
-                        "chose {} for {}{how}: {}",
-                        plural(files.len(), "file"),
-                        field["name"].as_str().unwrap_or("the field"),
-                        files.join(", ")
-                    );
-                    self.settling.push(Settling { reply, message, since, at: Instant::now(), verify: None });
-                }
-                Err(error) => fail(&reply, error),
-            },
+            Pending::UploadRead(reply, upload, since) => {
+                // The files were set either way; reading them back only tells
+                // whether the page has changed them since.
+                let (name, held) = match evaluated(result) {
+                    Ok(object) => {
+                        let field = &object["value"];
+                        let file = |file: &Value| Some((file["name"].as_str()?.to_owned(), file["size"].as_u64()?));
+                        let held: Vec<(String, u64)> =
+                            field["files"].as_array().into_iter().flatten().filter_map(file).collect();
+                        (field["name"].as_str().unwrap_or(&upload.name).to_owned(), Some(held))
+                    }
+                    Err(_) => (upload.name.clone(), None),
+                };
+                let message = chosen(&name, &upload.how, &on_disk(&upload.files), held.as_deref());
+                self.settling.push(Settling { reply, message, since, at: Instant::now(), verify: None });
+            }
             Pending::WaitCheck(id) => {
                 let found = evaluated(result).is_ok_and(|object| object["value"] == true);
                 if let Some(at) = self.waits.iter().position(|wait| wait.id == id) {
@@ -2794,6 +3072,16 @@ impl Devtools {
     pub fn tick(&mut self, chrome: &mut Chrome) {
         let now = Instant::now();
         self.pending.retain(|_, (_, deadline)| *deadline > now);
+        if self.probe.as_ref().is_some_and(|probe| probe.session != chrome.session()) {
+            // Another window is shown: the question was for the one before.
+            self.probe = None;
+        }
+        if self.frozen(chrome).is_some() || self.probe.is_none() {
+            // A dialog keeps the page from answering too, and says why itself.
+            self.leave(chrome, "");
+        } else if let Some(waited) = unanswered(self.probe.as_ref(), chrome.session(), now) {
+            self.stuck(chrome, waited);
+        }
 
         for wait in std::mem::take(&mut self.loading) {
             match wait.stopped {
@@ -2826,7 +3114,7 @@ impl Devtools {
             }
             *deadline > now
         });
-        self.moving.retain(|(reply, deadline)| {
+        self.moving.retain(|(reply, _, deadline)| {
             if *deadline <= now {
                 fail(reply, "the page didn't change");
             }
@@ -2932,7 +3220,75 @@ mod tests {
         assert!(!may_share_thread("file:///tmp/a.html", "https://example.com/"));
     }
 
+    #[test]
+    fn a_page_is_stuck_once_it_has_not_answered_for_a_while() {
+        use super::{unanswered, Probe, UNRESPONSIVE};
+        use std::time::{Duration, Instant};
+        let sent = Instant::now();
+        let probe = Probe { id: 7, session: "A".to_owned(), sent };
+        // Not asked, or still in time to answer.
+        assert_eq!(unanswered(None, "A", sent + UNRESPONSIVE), None);
+        assert_eq!(unanswered(Some(&probe), "A", sent + Duration::from_millis(4900)), None);
+        // Too long.
+        assert_eq!(unanswered(Some(&probe), "A", sent + UNRESPONSIVE), Some(UNRESPONSIVE));
+        let later = sent + Duration::from_secs(12);
+        assert_eq!(unanswered(Some(&probe), "A", later), Some(Duration::from_secs(12)));
+        // The window asked isn't the one shown.
+        assert_eq!(unanswered(Some(&probe), "B", later), None);
+        assert!(super::stuck_note(Duration::from_millis(12_400)).contains("hasn't answered for 12 s"));
+    }
+
+    #[test]
+    fn a_probe_from_before_a_navigation_is_forgotten() {
+        use super::{unanswered, Devtools, Probe, UNRESPONSIVE};
+        use std::time::{Duration, Instant};
+        // A probe whose answer was lost as the page went, long ago.
+        let sent = Instant::now();
+        let probe = Some(Probe { id: 7, session: "A".to_owned(), sent });
+        let mut tools = Devtools { probe, ..Default::default() };
+        let later = sent + UNRESPONSIVE + Duration::from_secs(300);
+        // Another window's new page leaves it be.
+        tools.new_document("B");
+        assert!(unanswered(tools.probe.as_ref(), "A", later).is_some());
+        // Its own page's new document drops it, so the next command that
+        // leaves the page asks afresh rather than stopping a healthy page.
+        tools.new_document("A");
+        assert_eq!(unanswered(tools.probe.as_ref(), "A", later), None);
+    }
+
     use super::*;
+
+    #[test]
+    fn uploads_report_the_files_sent() {
+        let sent = vec![("a.txt".to_owned(), 12), ("clip.mp4".to_owned(), 1_234_567)];
+        let held = sent.clone();
+        assert_eq!(
+            chosen("<input#f>", "", &sent, Some(&held)),
+            "chose 2 files for <input#f>: a.txt (12 bytes), clip.mp4 (1,234,567 bytes)"
+        );
+        // A page that takes the files in its change handler and empties the field.
+        assert_eq!(
+            chosen("<input#f>", "the file field inside <button.pick>", &sent[..1], Some(&[])),
+            "chose 1 file for <input#f> (the file field inside <button.pick>): a.txt (12 bytes); \
+             the field is empty again: the page took the files and cleared it, as some pages do"
+        );
+        let other = vec![("b.txt".to_owned(), 1)];
+        assert_eq!(
+            chosen("<input#f>", "", &sent[..1], Some(&other)),
+            "chose 1 file for <input#f>: a.txt (12 bytes); the field now holds b.txt (1 byte): the page changed it"
+        );
+        // Unread, or named only by the chooser that opened.
+        let how = "the file chooser clicking #up opened";
+        assert_eq!(chosen(how, how, &sent[..1], None), format!("chose 1 file for {how}: a.txt (12 bytes)"));
+    }
+
+    #[test]
+    fn counts_are_grouped() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1000), "1,000");
+        assert_eq!(grouped(123_456_789), "123,456,789");
+    }
 
     #[test]
     fn shot_sizes() {

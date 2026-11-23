@@ -125,7 +125,7 @@ shows only what's visible:
 ```sh
 kb ctl -i ID type '#email' 'a@b.co' --clear
 kb ctl -i ID select '#plan' Pro  # by value or label
-kb ctl -i ID upload '#avatar' me.png # the file field, or the button that opens its chooser
+kb ctl -i ID upload '#avatar' me.png # the file field, its label, or the button that opens its chooser
 kb ctl -i ID click 'text=Save'   # fails if hidden, off screen or covered
 kb ctl -i ID wait '#result' --text Saved # the element the click should change, and words you expect
 kb ctl -i ID console --errors    # this page's; --all adds earlier pages'
@@ -151,7 +151,8 @@ When something looks wrong or does nothing:
 | `box SELECTOR` | where it is, whether it's rendered, what covers it |
 | `style SELECTOR [PROPERTY] [--why]` | computed CSS; `--why` lists the rules that set it, winner first, with file and line |
 | `listeners SELECTOR` | its event listeners; none may mean a parent handles the event |
-| `storage [--clear]` | localStorage, sessionStorage and cookie names; `--clear` then `reload` tests a first visit |
+| `storage` | localStorage, sessionStorage and cookie names |
+| `clear-storage` | clears the site's cookies and storage (signing it out); then `reload` tests a first visit |
 | `html SELECTOR`, `eval 'JS'` | anything else; wrap declarations in `(() => { ... })()` |
 
 Also:
@@ -200,6 +201,9 @@ k check --ignore optimizely.com,doubleclick.net  # third-party noise doesn't cou
   was saved to (Chrome's downloads folder, numbered when a name repeats):
   read the file there. One still running when the command answers shows in
   `status`, and `console` records where it was saved when it finishes.
+- `status` saying `responding: no` means a script on the page runs without
+  a pause, and commands that need the page will wait on it. `reload` or
+  `open` stops the script and leaves the page.
 - `eval` reads what no command does (an order, a count, one value).
 
 ## Reading and research
