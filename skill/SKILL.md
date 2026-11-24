@@ -113,7 +113,9 @@ to show you. Say "click it in kb", then run `kb ctl pick`. kb goes into
 inspect mode in the pane, outlining what the mouse is over; the user's
 click picks the element (the page gets no click), and `pick` answers with
 its `selector` line, ready for `click`, `text`, `box`, `style` and the
-rest, with its size, styles and text. It waits up to a minute; if the user
+rest, with its size, styles and text (and a `link` line for a link). To
+see exactly what they pointed at, run `kb ctl screenshot --selector` with
+that selector. It waits up to a minute; if the user
 presses Esc, or nothing is picked, it fails and says so. It needs kb in a
 pane the user can see; a headless kb can't pick.
 
