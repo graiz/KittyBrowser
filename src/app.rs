@@ -448,7 +448,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             true => app.frame_gap().saturating_sub(app.last_ack.elapsed()).min(TICK),
             false => TICK,
         };
-        if let Some(splash_wait) = app.splash.as_ref().filter(|_| app.by_file).and_then(|splash| splash.wait()) {
+        if let Some(splash_wait) =
+            app.splash.as_ref().filter(|_| app.by_file).and_then(|splash| splash.wait(app.loading))
+        {
             wait = wait.min(splash_wait);
         }
         match rx.recv_timeout(wait) {
@@ -735,7 +737,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         if new_frame || redraw {
             app.draw(new_frame);
         }
-        if app.by_file && app.splash.as_ref().is_some_and(|splash| splash.due()) {
+        if app.by_file && app.splash.as_ref().is_some_and(|splash| splash.due(app.loading)) {
             app.draw_splash();
         }
         // One frame per gap, or all of them while the page is in use.
@@ -967,12 +969,15 @@ impl App {
         let cell = self.cell();
         let (cols, rows) = (self.window.cols, self.page_rows());
         let Some(splash) = &mut self.splash else { return };
-        let mut out = b"\x1b[?2026h".to_vec();
+        // The bar isn't drawn again here, so the cursor goes back to the
+        // address field, not left by the logo for each frame.
+        let mut out = b"\x1b[?2026h\x1b7".to_vec();
         if self.help {
             crate::splash::Splash::hide(&mut out);
         } else {
-            splash.draw(&mut out, cols, rows, cell, 2);
+            splash.draw(&mut out, cols, rows, cell, 2, self.loading);
         }
+        out.extend_from_slice(b"\x1b8");
         // The splash paints the pane black, help, dialogs and all.
         self.help_rect = None;
         self.modal_rects.clear();

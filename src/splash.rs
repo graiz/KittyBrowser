@@ -11,11 +11,9 @@ const LOGO: &[u8] = include_bytes!("../assets/logo.png");
 const ID: u32 = 3;
 /// Frames in one trip round the ring.
 const FRAMES: usize = 48;
-/// The time between frames, and how long to animate before holding still:
-/// with no page asked for, the logo stays as a home screen and shouldn't
-/// cost anything once the user has seen it.
+/// The time between frames while a page loads. With none loading the logo
+/// holds still, a home screen that costs nothing.
 pub const FRAME_GAP: Duration = Duration::from_millis(60);
-const ANIMATE_FOR: Duration = Duration::from_secs(12);
 
 /// The logo is drawn from assets/logo.svg, whose viewBox starts here and is
 /// this wide; logo.png is rendered from it with
@@ -30,44 +28,47 @@ const SPHERE: (f64, f64, f64) = (205.0, 225.0, 100.0);
 const BLACK: &str = "\x1b[0;48;2;0;0;0m";
 
 pub struct Splash {
+    /// The logo as drawn, without the light: shown at rest.
+    logo: Pixels,
     frames: Vec<Pixels>,
     next: usize,
-    started: Instant,
     last: Option<Instant>,
+    /// Whether the frame on screen is the still one.
+    still: bool,
 }
 
 impl Splash {
     pub fn new() -> Option<Splash> {
         let logo = graphics::decode_png(LOGO, Vec::new()).filter(|logo| logo.alpha)?;
         let frames = (0..FRAMES).map(|n| frame(&logo, n)).collect();
-        Some(Splash { frames, next: 0, started: Instant::now(), last: None })
+        Some(Splash { logo, frames, next: 0, last: None, still: false })
     }
 
-    /// Whether it is time for the next frame.
-    pub fn due(&self) -> bool {
-        match self.last {
-            None => true,
-            Some(_) if self.started.elapsed() > ANIMATE_FOR => false,
-            Some(last) => last.elapsed() >= FRAME_GAP,
-        }
+    /// Whether it is time for the next frame: while `loading`, one each
+    /// FRAME_GAP; otherwise only to come to rest.
+    pub fn due(&self, loading: bool) -> bool {
+        self.wait(loading).is_some_and(|wait| wait.is_zero())
     }
 
     /// How long until the next frame is due, if one will be.
-    pub fn wait(&self) -> Option<Duration> {
+    pub fn wait(&self, loading: bool) -> Option<Duration> {
         match self.last {
             None => Some(Duration::ZERO),
-            Some(_) if self.started.elapsed() > ANIMATE_FOR => None,
+            Some(_) if !loading => (!self.still).then_some(Duration::ZERO),
             Some(last) => Some(FRAME_GAP.saturating_sub(last.elapsed())),
         }
     }
 
     /// Append the escapes that draw the next frame in the middle of a
     /// `cols` x `rows` area of `cell`-pixel cells whose top row is `top`.
-    /// Needs a terminal that reads files.
-    pub fn draw(&mut self, out: &mut Vec<u8>, cols: u16, rows: u16, cell: (u32, u32), top: u16) {
-        let still = self.last.is_some() && self.started.elapsed() > ANIMATE_FOR;
-        let pixels = &self.frames[if still { FRAMES / 4 } else { self.next }];
-        self.next = (self.next + 1) % FRAMES;
+    /// Needs a terminal that reads files. The light travels round the ring
+    /// while `loading`, and rests otherwise.
+    pub fn draw(&mut self, out: &mut Vec<u8>, cols: u16, rows: u16, cell: (u32, u32), top: u16, loading: bool) {
+        let pixels = if loading { &self.frames[self.next] } else { &self.logo };
+        if loading {
+            self.next = (self.next + 1) % FRAMES;
+        }
+        self.still = !loading;
         self.last = Some(Instant::now());
 
         // Two fifths of the smaller side, and never larger than the logo
@@ -166,6 +167,30 @@ fn glow(pixels: &mut Pixels, x: f64, y: f64, scale: f64, strength: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spins_only_while_loading() {
+        let splash = |last: Option<Instant>, still: bool| Splash {
+            logo: Pixels { width: 0, height: 0, alpha: true, data: Vec::new() },
+            frames: Vec::new(),
+            next: 0,
+            last,
+            still,
+        };
+        // The first frame is drawn either way.
+        assert!(splash(None, false).due(false) && splash(None, false).due(true));
+        // At rest with nothing loading: nothing more to draw, nor to wake for.
+        let rest = splash(Some(Instant::now()), true);
+        assert!(!rest.due(false) && rest.wait(false).is_none());
+        // Loading: the next frame a gap after the last.
+        let gap = rest.wait(true).unwrap();
+        assert!(gap > Duration::ZERO && gap <= FRAME_GAP);
+        let late = splash(Instant::now().checked_sub(FRAME_GAP), false);
+        assert!(late.due(true));
+        // Loading done mid-trip: one more frame, the still one, at once.
+        let moving = splash(Some(Instant::now()), false);
+        assert!(moving.due(false));
+    }
 
     #[test]
     fn logo_decodes_and_the_light_moves() {
