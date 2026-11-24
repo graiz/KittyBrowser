@@ -13,12 +13,15 @@ const ID: u32 = 5;
 /// Above the page and its tiles, below text, so a box drawn over the page
 /// still covers it.
 const Z: i64 = -1;
-/// How long a drift to a new point takes.
-const DRIFT: Duration = Duration::from_millis(600);
-/// How far it wiggles while it waits, in cells, and how slowly: a loop
-/// that takes this many seconds.
-const WIGGLE: f64 = 0.15;
-const WIGGLE_PERIOD: f64 = 2.4;
+/// How long a drift to a new point takes: slow, as a hand moves.
+const DRIFT: Duration = Duration::from_millis(1500);
+/// How far it wiggles while it waits, across and down, in cells' heights
+/// (about 8 and 5 points), and how slowly: a loop that takes this many
+/// seconds.
+const WIGGLE: (f64, f64) = (0.45, 0.6);
+const WIGGLE_PERIOD: f64 = 8.0;
+/// How tall the pointer is, in cells' heights.
+const SIZE: f64 = 1.6;
 /// How long it takes to fade away.
 pub const FADE: Duration = Duration::from_millis(1000);
 /// The time between frames while it moves or floats.
@@ -135,7 +138,7 @@ impl AgentCursor {
         // so it doesn't jump on arrival.
         let waiting = now.saturating_duration_since(self.moved).saturating_sub(DRIFT).as_secs_f64();
         let angle = waiting * std::f64::consts::TAU / WIGGLE_PERIOD;
-        let grow = (waiting / 0.5).min(1.0);
+        let grow = (waiting / 2.0).min(1.0);
         (x + grow * wiggle.0 * angle.sin(), y + grow * wiggle.1 * (2.0 * angle).sin() / 2.0)
     }
 
@@ -149,7 +152,7 @@ impl AgentCursor {
     /// first if the terminal hasn't got it so.
     pub fn draw(&mut self, out: &mut Vec<u8>, cell: (u32, u32), opacity: f64) {
         let (cell_w, cell_h) = (cell.0.max(1) as f64, cell.1.max(1) as f64);
-        let height = (cell_h * 1.1).round().max(8.0) as u32;
+        let height = (cell_h * SIZE).round().max(8.0) as u32;
         let tenths = (opacity.clamp(0.0, 1.0) * 10.0).round() as u32;
         if self.sent != Some((height, tenths)) {
             let mut pixels = arrow(height);
@@ -160,7 +163,7 @@ impl AgentCursor {
             graphics::transmit(out, &keys, &crate::base64::encode(&pixels.data));
             self.sent = Some((height, tenths));
         }
-        let (x, y) = self.position(Instant::now(), (cell_w * WIGGLE * 2.0, cell_h * WIGGLE));
+        let (x, y) = self.position(Instant::now(), (cell_h * WIGGLE.0, cell_h * WIGGLE.1));
         let (x, y) = (x.max(0.0), y.max(0.0));
         let (col, row) = ((x / cell_w) as u32, (y / cell_h) as u32);
         let (dx, dy) = ((x - col as f64 * cell_w) as u32, (y - row as f64 * cell_h) as u32);
