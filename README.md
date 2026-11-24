@@ -47,9 +47,9 @@ kb doctor                  # checks your terminal and Chrome, and says what to f
 kb news.ycombinator.com
 ```
 
-Ctrl+/ shows the keys, Ctrl+Q quits (or the ✕ at the right of the bar, which asks first).
+Ctrl+/ shows the keys, Ctrl+Q quits (or Quit browser in the ⋮ menu at the right of the bar, which asks first).
 A window a page opens, such as a sign-in popup, is shown over the page;
-‹ › in the bar switch between open windows, and ✕ closes the one shown.
+‹ › in the bar switch between open windows, and Ctrl+W closes the one shown.
 Downloads go where Chrome puts them, usually `~/Downloads`, and the bar
 shows how far one has come while it runs.
 
@@ -178,15 +178,15 @@ click the address to edit it, and click, drag and scroll the page.
 | Cmd+R or Ctrl+R | Reload |
 | Cmd+C or Ctrl+C | Copy the selection (or the address while editing it) to the system clipboard |
 | Ctrl+Shift+C or Cmd+Shift+C | Inspect: hover to outline elements, click one for its selector, size and styles |
-| Alt+F or Alt+E, or ⋮ in the bar | The menu: Select element (inspect), View source (the page's HTML in `$EDITOR`), Network performance (the slowest requests and load times) |
+| Alt+F or Alt+E, or ⋮ in the bar | The menu: Select element (inspect), View source (the page's HTML in `$EDITOR`), Network performance (the slowest requests and load times), Quit browser |
 | F12, Ctrl+Shift+I or Cmd+Alt+I | Open Chrome DevTools for the page (start kb with `--devtools`) |
 | Ctrl+= and Ctrl+- | Zoom in and out; the zoom shows at the right of the bar |
 | Ctrl+0 | Zoom to 100%, or out until a page too wide for the pane fits |
 | Ctrl+/ | Help: the keys, and the page, zoom, viewport and pane sizes |
 | Ctrl+Tab, Ctrl+PageDown | Next window: a popup or a new tab a page opened (‹ › in the bar) |
 | Ctrl+Shift+Tab, Ctrl+PageUp | Previous window |
-| Ctrl+W | Close the window shown (✕); on the last one, ask to quit |
-| Ctrl+Q | Quit (the ✕ at the right of the bar closes a popup, or asks first) |
+| Ctrl+W | Close the window shown; on the last one, ask to quit |
+| Ctrl+Q | Quit (Quit browser in the ⋮ menu asks first) |
 
 Every other key goes to the page. The mouse's back and forward buttons go
 back and forward. `kb keys` lists the bindings; change them in

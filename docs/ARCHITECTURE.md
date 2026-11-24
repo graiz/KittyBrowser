@@ -77,7 +77,7 @@ Things it takes care of itself:
   same settings (the domains kb listens to, the user agent, the viewport,
   the colour scheme) and its own headless window, fitted like the first.
   Only the window shown sends events the app looks at. When it closes, by
-  itself, with ✕, or with Back on its first page, the one before it is
+  itself, with Ctrl+W, or with Back on its first page, the one before it is
   shown again.
 - **Looking like a browser.** Sites such as Google answer what looks like a
   robot with captchas, and headless Chrome looks like one in four ways, each
@@ -288,13 +288,13 @@ Command never arrives.
 
 Row 1 is ordinary terminal text: three buttons, the address field, then
 the window switcher (‹ 2/3 ›), the badge (a note, the spinner, a
-download's progress, the zoom), ⋮ and ✕, the field giving up room to the
+download's progress, the zoom) and ⋮ at the end, the field giving up room to the
 rest down to a few columns. The field is a line editor (cursor, word
 moves, select-all on focus, horizontal scroll) with no terminal
 dependencies, so it is unit tested directly. Hit testing maps a column to a
 button or a position in the field, from the same layout the bar is drawn
 with. ⋮ opens the menu (`menu.rs`), as Chrome's does: Select element,
-View source, Network performance. Network performance reads the page's
+View source, Network performance, Quit browser. Network performance reads the page's
 own Performance API (navigation and resource timings), not the DevTools
 network events, which carry no timings in kb's record.
 Zoom (Ctrl+= and Ctrl+-) divides the CSS viewport by the zoom, so Chrome

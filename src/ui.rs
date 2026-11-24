@@ -8,12 +8,9 @@ use std::fmt::Write;
 const BACK: std::ops::RangeInclusive<usize> = 1..=3;
 const FORWARD: std::ops::RangeInclusive<usize> = 4..=6;
 const RELOAD: std::ops::RangeInclusive<usize> = 7..=9;
-/// The address field starts here and runs to just before the close
-/// button, with one cell of padding inside each end.
+/// The address field starts here, with one cell of padding inside each end.
 const FIELD: usize = 11;
-/// The close button, at the right end: a space, the cross, a space.
-const CLOSE: usize = 3;
-/// The menu button, before the close button: a space, ⋮, a space.
+/// The menu button, at the right end: a space, ⋮, a space.
 const MENU: usize = 3;
 /// The fewest columns of address kept when the switcher and the badge
 /// share the bar with it.
@@ -27,7 +24,6 @@ pub enum Hit {
     Forward,
     Reload,
     Menu,
-    Close,
     /// The window switcher's halves.
     PreviousWindow,
     NextWindow,
@@ -39,10 +35,10 @@ pub enum Hit {
 /// The right of the bar, after the address field: the window switcher when
 /// a page has opened windows ("‹ 2/3 ›" for the second of three shown), then
 /// the badge (a note, the spinner, a download's progress, the zoom), then ⋮
-/// and ✕, as far as there's room, the address keeping MIN_FIELD columns.
+/// at the end, as far as there's room, the address keeping MIN_FIELD columns.
 /// Returns the switcher and the badge to show, and the field's width.
 fn right_side(cols: usize, windows: (usize, usize), badge: Option<&str>) -> (Option<String>, Option<&str>, usize) {
-    let mut width = cols.saturating_sub(FIELD + 2 + MENU + CLOSE);
+    let mut width = cols.saturating_sub(FIELD + 2 + MENU);
     let text = format!("‹ {}/{} ›", windows.0, windows.1);
     let switcher = (windows.1 > 1 && width > MIN_FIELD + text.chars().count()).then_some(text);
     width -= switcher.as_ref().map_or(0, |text| text.chars().count() + 1);
@@ -56,7 +52,7 @@ pub fn hit(col: usize, cols: usize, windows: (usize, usize), badge: Option<&str>
     let (switcher, badge, _) = right_side(cols, windows, badge);
     let switcher = switcher.map_or(0, |text| text.chars().count());
     let badge = badge.map_or(0, |badge| badge.chars().count() + 1);
-    let switcher_start = cols.saturating_sub(CLOSE + MENU + badge + switcher + 1) + 1;
+    let switcher_start = cols.saturating_sub(MENU + badge + switcher + 1) + 1;
     if cols < MIN_COLS {
         Hit::Nothing
     } else if BACK.contains(&col) {
@@ -67,11 +63,9 @@ pub fn hit(col: usize, cols: usize, windows: (usize, usize), badge: Option<&str>
         Hit::Reload
     } else if col > cols {
         Hit::Nothing
-    } else if col > cols - CLOSE {
-        Hit::Close
-    } else if col > cols - CLOSE - MENU {
+    } else if col > cols - MENU {
         Hit::Menu
-    } else if col > cols - CLOSE - MENU - badge {
+    } else if col > cols - MENU - badge {
         Hit::Nothing
     } else if switcher > 0 && col >= switcher_start {
         // Either half: wide enough to hit, the arrows being one column each.
@@ -84,32 +78,6 @@ pub fn hit(col: usize, cols: usize, windows: (usize, usize), badge: Option<&str>
         Hit::Address(col.saturating_sub(FIELD + 1))
     } else {
         Hit::Nothing
-    }
-}
-
-/// The question the bar asks before quitting.
-pub const QUIT_QUESTION: &str = "Quit KittyBrowser?";
-
-/// Draw `question` in the top bar with Yes and No buttons after it.
-pub fn render_question(out: &mut Vec<u8>, question: &str, cols: usize) {
-    let colors = palette();
-    let mut s = format!("\x1b[1;1H{}\x1b[2K {question}  ", colors.bar);
-    let _ = write!(s, "{} Yes {} {} No {}", colors.focused, colors.bar, colors.field, colors.bar);
-    let used = question.chars().count() + 13;
-    let _ = write!(s, "{:pad$}\x1b[0m\x1b[?25l", "", pad = cols.saturating_sub(used));
-    out.extend_from_slice(s.as_bytes());
-}
-
-/// Which button of `render_question`'s a column is on: `Some(true)` for Yes.
-pub fn answer(col: usize, question: &str) -> Option<bool> {
-    // " question  " then " Yes ", a space, " No ".
-    let yes = question.chars().count() + 4;
-    if (yes..yes + 5).contains(&col) {
-        Some(true)
-    } else if (yes + 6..yes + 10).contains(&col) {
-        Some(false)
-    } else {
-        None
     }
 }
 
@@ -517,7 +485,7 @@ pub fn render_bar(
     if let Some(badge) = badge {
         let _ = write!(s, "{badge} ");
     }
-    s.push_str(" ⋮  ✕ \x1b[0m");
+    s.push_str(" ⋮ \x1b[0m");
     if bar.focused {
         // A bar-shaped cursor at the insertion point.
         let _ = write!(s, "\x1b[1;{}H\x1b[6 q\x1b[?25h", FIELD + 1 + bar.cursor - window.start);
@@ -786,26 +754,24 @@ mod tests {
         assert_eq!(hit(10, (1, 1)), Hit::Nothing);
         assert_eq!(hit(11, (1, 1)), Hit::Address(0));
         assert_eq!(hit(14, (1, 1)), Hit::Address(2));
-        assert_eq!(hit(73, (1, 1)), Hit::Address(61));
-        assert_eq!(hit(74, (1, 1)), Hit::Nothing);
-        // " ⋮ " takes columns 75 to 77, and " ✕ " 78 to 80.
-        assert_eq!(hit(75, (1, 1)), Hit::Menu);
-        assert_eq!(hit(77, (1, 1)), Hit::Menu);
-        assert_eq!(hit(78, (1, 1)), Hit::Close);
-        assert_eq!(hit(80, (1, 1)), Hit::Close);
+        assert_eq!(hit(76, (1, 1)), Hit::Address(64));
+        assert_eq!(hit(77, (1, 1)), Hit::Nothing);
+        // " ⋮ " takes columns 78 to 80.
+        assert_eq!(hit(78, (1, 1)), Hit::Menu);
+        assert_eq!(hit(80, (1, 1)), Hit::Menu);
         assert_eq!(hit(81, (1, 1)), Hit::Nothing);
-        // "‹ 2/3 ›" takes columns 67 to 73, before ⋮.
-        assert_eq!(hit(65, (2, 3)), Hit::Address(53));
-        assert_eq!(hit(67, (2, 3)), Hit::PreviousWindow);
-        assert_eq!(hit(69, (2, 3)), Hit::PreviousWindow);
-        assert_eq!(hit(70, (2, 3)), Hit::NextWindow);
+        // "‹ 2/3 ›" takes columns 70 to 76, before ⋮.
+        assert_eq!(hit(68, (2, 3)), Hit::Address(56));
+        assert_eq!(hit(70, (2, 3)), Hit::PreviousWindow);
+        assert_eq!(hit(72, (2, 3)), Hit::PreviousWindow);
         assert_eq!(hit(73, (2, 3)), Hit::NextWindow);
-        assert_eq!(hit(75, (2, 3)), Hit::Menu);
+        assert_eq!(hit(76, (2, 3)), Hit::NextWindow);
+        assert_eq!(hit(78, (2, 3)), Hit::Menu);
     }
 
     #[test]
     fn the_bar_is_drawn_where_it_is_hit() {
-        // The switcher, then the badge, then ⋮ and ✕, as drawn.
+        // The switcher, then the badge, then ⋮, as drawn.
         let badge = "Downloading 1.3 of 20 MB";
         let mut out = Vec::new();
         render_bar(&mut out, &mut AddressBar::default(), 80, false, None, Some(badge), (2, 3));
@@ -831,20 +797,7 @@ mod tests {
         assert_eq!(hit(column("›")), Hit::NextWindow);
         assert_eq!(hit(column("Downloading")), Hit::Nothing);
         assert_eq!(hit(column("⋮")), Hit::Menu);
-        assert_eq!(hit(column("✕")), Hit::Close);
         assert_eq!(hit(column("‹") - 2), Hit::Address(column("‹") - 2 - 12));
-    }
-
-    #[test]
-    fn quit_question() {
-        // " Quit?  " puts Yes at columns 9 to 13 and No at 15 to 18.
-        assert_eq!(answer(8, "Quit?"), None);
-        assert_eq!(answer(9, "Quit?"), Some(true));
-        assert_eq!(answer(13, "Quit?"), Some(true));
-        assert_eq!(answer(14, "Quit?"), None);
-        assert_eq!(answer(15, "Quit?"), Some(false));
-        assert_eq!(answer(18, "Quit?"), Some(false));
-        assert_eq!(answer(19, "Quit?"), None);
     }
 
     #[test]

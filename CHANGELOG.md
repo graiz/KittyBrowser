@@ -6,13 +6,15 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
-- The bar has Chrome's ⋮ menu, before ✕ (Alt+F or Alt+E opens it from the
-  keyboard): Select element (inspect mode), View source (the page's HTML,
-  as it is now, opened in `$EDITOR` in the pane, as git opens one for a
-  commit message), and Network performance (when the page's first byte
-  came, when it was ready and loaded, its requests and bytes, and its
-  slowest requests). The window switcher now comes before the badge, so a
-  download's progress sits next to ⋮.
+- The bar ends with Chrome's ⋮ menu, in place of ✕ (Alt+F or Alt+E opens
+  it from the keyboard): Select element (inspect mode), View source (the
+  page's HTML, as it is now, opened in `$EDITOR` in the pane, as git opens
+  one for a commit message), Network performance (when the page's first
+  byte came, when it was ready and loaded, its requests and bytes, and its
+  slowest requests), and Quit browser, which asks first in a dialog like
+  a page's confirm, as Ctrl+W on the last window does now too. A popup
+  is closed with Ctrl+W, or Back on its first page. The window switcher now
+  comes before the badge, so a download's progress sits next to ⋮.
 - `kb ctl pick` asks the user to point at an element: kb goes into inspect
   mode in the pane, the user clicks the element they mean, and the agent
   gets its selector, size, styles and text. The skill tells agents to ask

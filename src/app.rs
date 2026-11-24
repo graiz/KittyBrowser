@@ -398,7 +398,6 @@ struct App {
     panel: Option<Vec<String>>,
     /// Whether the bar is asking to quit, after a click on its close
     /// button, and whether it was answered yes.
-    asking_quit: bool,
     quit_clicked: bool,
     /// What the page is asking the user, shown over it: a dialog, and a
     /// file chooser (under the dialog, if both), and where they were drawn.
@@ -547,7 +546,6 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         source_request: None,
         network_request: None,
         panel: None,
-        asking_quit: false,
         quit_clicked: false,
         dialog: None,
         picker: None,
@@ -638,20 +636,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         break;
                     }
                     app.modal_key(&key);
-                    redraw = true;
-                }
-                Msg::Term(Event::Key(key)) if app.asking_quit => {
-                    match key.code {
-                        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                            quit = Some(Ok(()));
-                            break;
-                        }
-                        _ if app.bindings.action(&key, false) == Some(Action::Quit) => {
-                            quit = Some(Ok(()));
-                            break;
-                        }
-                        KeyCode::Char('n' | 'N') | KeyCode::Esc => app.asking_quit = false,
-                        _ => {}
+                    if app.quit_clicked {
+                        quit = Some(Ok(()));
+                        break;
                     }
                     redraw = true;
                 }
@@ -1064,9 +1051,9 @@ impl App {
             (Action::Devtools, "Chrome DevTools (start kb with --devtools)"),
             (Action::NextWindow, "next window: a popup, a new tab (‹ › in the bar)"),
             (Action::PreviousWindow, "previous window"),
-            (Action::CloseWindow, "close the window shown (✕); on the last one, ask to quit"),
+            (Action::CloseWindow, "close the window shown; on the last one, ask to quit"),
             (Action::Help, "this help"),
-            (Action::Quit, "quit (the ✕ in the bar closes a popup, or asks first)"),
+            (Action::Quit, "quit (Quit browser in the ⋮ menu asks first)"),
         ]
         .map(|(action, does)| (keys(action), does))
         .into_iter()
@@ -1168,11 +1155,18 @@ impl App {
 
     /// Close the window shown, as a browser's tab closes; the last one is
     /// kb itself, so that asks first.
+    /// Ask before quitting, in a dialog as a page's confirm is asked.
+    fn ask_quit(&mut self) {
+        self.close_menu();
+        self.close_help();
+        self.dialog = Some(Dialog::quit());
+    }
+
     fn close_window(&mut self) {
         if self.chrome.windows().1 > 1 {
             self.chrome.close_window();
         } else {
-            self.asking_quit = true;
+            self.ask_quit();
         }
     }
 
@@ -1294,7 +1288,6 @@ impl App {
         let badge = self.badge();
         let badge = (!badge.is_empty()).then_some(badge.as_str());
         match &mut self.find {
-            _ if self.asking_quit => ui::render_question(&mut out, ui::QUIT_QUESTION, cols),
             Some(field) => {
                 ui::render_bar(&mut out, field, cols, self.loading, Some("Find"), badge, self.chrome.windows())
             }
@@ -1384,6 +1377,8 @@ impl App {
                 }
             }
             Some(_) => {}
+            // kb's own question isn't the page's to take away.
+            None if self.dialog.as_ref().is_some_and(|dialog| dialog.id == dialog::QUIT) => {}
             None => changed |= self.dialog.take().is_some(),
         }
         match self.devtools.chooser().cloned() {
@@ -1428,6 +1423,10 @@ impl App {
 
     fn answer_dialog(&mut self, ok: bool, typed: Option<String>) {
         let Some(dialog) = self.dialog.take() else { return };
+        if dialog.id == dialog::QUIT {
+            self.quit_clicked = ok;
+            return;
+        }
         self.devtools.answer_dialog(dialog.id, ok, typed, &mut self.chrome);
         if dialog.kind() == Kind::BeforeUnload && !ok {
             // Staying: the page and its address are as they were.
@@ -1663,8 +1662,13 @@ impl App {
             self.page.forget();
         }
         let Some(menu) = &self.menu else { return };
-        let inspect = self.bindings.keys_for(Action::Inspect).into_iter().next().unwrap_or_default();
-        let keys = |item| if item == menu::Item::SelectElement { inspect.clone() } else { String::new() };
+        let first = |action| self.bindings.keys_for(action).into_iter().next().unwrap_or_default();
+        let (inspect, quit) = (first(Action::Inspect), first(Action::Quit));
+        let keys = |item| match item {
+            menu::Item::SelectElement => inspect.clone(),
+            menu::Item::Quit => quit.clone(),
+            _ => String::new(),
+        };
         self.menu_rect = Some(menu.render(out, self.window.cols, keys));
     }
 
@@ -1697,6 +1701,7 @@ impl App {
             menu::Item::Network => {
                 self.network_request = Some(self.chrome.evaluate_value(TIMINGS));
             }
+            menu::Item::Quit => self.ask_quit(),
         }
     }
 
@@ -1956,43 +1961,21 @@ impl App {
         if matches!(mouse.button, Some(Button::Back | Button::Forward)) {
             return false;
         }
-        // While the bar asks whether to quit, only its buttons answer.
-        if self.asking_quit {
-            let answer = (py < cell_h).then(|| ui::answer((px / cell_w) as usize + 1, ui::QUIT_QUESTION)).flatten();
-            match mouse.kind {
-                MouseKind::Move => self.set_pointer(if answer.is_some() { "pointer" } else { "default" }),
-                MouseKind::Press if mouse.button == Some(Button::Left) => match answer {
-                    Some(true) => self.quit_clicked = true,
-                    Some(false) => self.asking_quit = false,
-                    None => {}
-                },
-                _ => {}
-            }
-            return true;
-        }
         // A drag that began on the page stays with the page.
         if py < cell_h && self.buttons == 0 {
             let col = (px / cell_w) as usize + 1;
             if mouse.kind == MouseKind::Move {
                 let shape = match self.bar_hit(col) {
                     Hit::Address(_) => "text",
-                    Hit::Back
-                    | Hit::Forward
-                    | Hit::Reload
-                    | Hit::Menu
-                    | Hit::Close
-                    | Hit::PreviousWindow
-                    | Hit::NextWindow => "pointer",
+                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Menu | Hit::PreviousWindow | Hit::NextWindow => {
+                        "pointer"
+                    }
                     Hit::Nothing => "default",
                 };
                 self.set_pointer(shape);
             }
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
                 return false;
-            }
-            if self.bar_hit(col) == Hit::Close {
-                self.close_window();
-                return true;
             }
             let hit = self.bar_hit(col);
             if let Some(field) = &mut self.find {
@@ -2011,7 +1994,7 @@ impl App {
                 Hit::PreviousWindow => self.switch_window(-1),
                 Hit::NextWindow => self.switch_window(1),
                 Hit::Menu => self.open_menu(),
-                Hit::Close | Hit::Nothing => {}
+                Hit::Nothing => {}
             }
             return true;
         }

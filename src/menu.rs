@@ -13,13 +13,16 @@ pub enum Item {
     ViewSource,
     /// The page's requests, slowest first, and how long it took to load.
     Network,
+    /// Quit kb, once the bar has asked.
+    Quit,
 }
 
 /// The items, with what the menu says for each.
-const ITEMS: [(Item, &str); 3] = [
+const ITEMS: [(Item, &str); 4] = [
     (Item::SelectElement, "Select element"),
     (Item::ViewSource, "View source"),
     (Item::Network, "Network performance"),
+    (Item::Quit, "Quit browser"),
 ];
 
 /// What a key or a click did to the menu.
@@ -76,7 +79,7 @@ impl Menu {
         let inner =
             lines.iter().map(|(label, keys)| label.chars().count() + 3 + keys.chars().count()).max().unwrap_or(0);
         let width = (inner as u16 + 4).min(cols);
-        // Its right edge under ✕, as Chrome's menu hangs from its button.
+        // Its right edge under ⋮, as Chrome's menu hangs from its button.
         let col = cols.saturating_sub(width) + 1;
         let row = 2;
         let text_width = width.saturating_sub(4) as usize;
@@ -134,7 +137,7 @@ mod tests {
         // Up from the top goes round to the bottom.
         press(&mut menu, KeyCode::Up);
         press(&mut menu, KeyCode::Up);
-        assert_eq!(press(&mut menu, KeyCode::Enter), Outcome::Choose(Item::Network));
+        assert_eq!(press(&mut menu, KeyCode::Enter), Outcome::Choose(Item::Quit));
         assert_eq!(press(&mut menu, KeyCode::Esc), Outcome::Close);
     }
 
@@ -146,15 +149,16 @@ mod tests {
         let rect = menu.render(&mut out, 80, keys);
         // "Network performance" is the widest line, with "Ctrl+Shift+C" on
         // the first: right-aligned to the pane's edge, below the bar.
-        assert_eq!((rect.col + rect.width - 1, rect.row, rect.height), (80, 2, 5));
+        assert_eq!((rect.col + rect.width - 1, rect.row, rect.height), (80, 2, 6));
         let drawn = String::from_utf8(out).unwrap();
         assert!(drawn.contains("Select element") && drawn.contains("Ctrl+Shift+C"), "{drawn:?}");
         let col = rect.col as usize + 2;
         assert_eq!(menu.click(rect, col, 2), Outcome::Stay);
         assert_eq!(menu.click(rect, col, 3), Outcome::Choose(Item::SelectElement));
         assert_eq!(menu.click(rect, col, 5), Outcome::Choose(Item::Network));
-        assert_eq!(menu.click(rect, col, 6), Outcome::Stay);
-        assert_eq!(menu.click(rect, col, 7), Outcome::Close);
+        assert_eq!(menu.click(rect, col, 6), Outcome::Choose(Item::Quit));
+        assert_eq!(menu.click(rect, col, 7), Outcome::Stay);
+        assert_eq!(menu.click(rect, col, 8), Outcome::Close);
         assert_eq!(menu.click(rect, 1, 3), Outcome::Close);
         let mut menu = menu;
         assert!(menu.hover(rect, col, 4));

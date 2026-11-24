@@ -52,6 +52,8 @@ pub struct Dialog {
     title: String,
     message: String,
     field: Option<AddressBar>,
+    /// What the OK button says.
+    ok: &'static str,
     /// Whether OK, rather than Cancel, is the highlighted button.
     on_ok: bool,
     /// From the last draw, for clicks: where it is, its buttons' columns
@@ -60,6 +62,9 @@ pub struct Dialog {
     buttons: Vec<(usize, std::ops::Range<usize>, bool)>,
     field_at: Option<(usize, usize)>,
 }
+
+/// The id of kb's own question, whether to quit: no page asks it.
+pub const QUIT: u64 = u64::MAX;
 
 /// How Chrome names a page in its dialogs: "example.com says", and "This
 /// page says" for a file or anything without a host.
@@ -85,7 +90,17 @@ impl Dialog {
             field.focus();
             field
         });
-        Dialog { id, kind, title, message, field, on_ok: true, rect: None, buttons: Vec::new(), field_at: None }
+        let ok = if kind == Kind::BeforeUnload { "Leave" } else { "OK" };
+        Dialog { id, kind, title, message, field, ok, on_ok: true, rect: None, buttons: Vec::new(), field_at: None }
+    }
+
+    /// kb's own question before quitting, asked as a page's confirm is.
+    pub fn quit() -> Dialog {
+        let mut dialog =
+            Dialog::new(QUIT, Kind::Confirm, "", "Quit KittyBrowser? Its windows close; sign-ins are kept.", "");
+        dialog.title = "KittyBrowser".to_owned();
+        dialog.ok = "Quit";
+        dialog
     }
 
     pub fn kind(&self) -> Kind {
@@ -93,11 +108,7 @@ impl Dialog {
     }
 
     fn ok_label(&self) -> &'static str {
-        if self.kind == Kind::BeforeUnload {
-            "Leave"
-        } else {
-            "OK"
-        }
+        self.ok
     }
 
     fn answer(&self, ok: bool) -> Outcome {
@@ -308,6 +319,19 @@ mod tests {
         assert_eq!(confirm.click(at(ok.start).0, at(ok.start).1), Outcome::Answer(true, None));
         assert_eq!(confirm.click(at(cancel.start).0, at(cancel.start).1), Outcome::Answer(false, None));
         assert_eq!(confirm.click(1, 1), Outcome::Stay);
+    }
+
+    #[test]
+    fn quitting_is_asked_as_a_confirm() {
+        let mut quit = Dialog::quit();
+        assert_eq!(quit.id, QUIT);
+        let (canvas, _) = quit.layout(80, 24);
+        assert!(canvas.line(1).contains("KittyBrowser"));
+        assert!(canvas.line(3).contains("Quit KittyBrowser?"));
+        let buttons = canvas.line(canvas.height - 4);
+        assert!(buttons.contains("Quit") && buttons.contains("Cancel"), "{buttons}");
+        assert_eq!(press(&mut quit, KeyCode::Esc), Outcome::Answer(false, None));
+        assert_eq!(press(&mut quit, KeyCode::Enter), Outcome::Answer(true, None));
     }
 
     #[test]
