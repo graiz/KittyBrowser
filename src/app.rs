@@ -149,6 +149,34 @@ const DESCRIBE: &str = "(function() { const el = this, s = getComputedStyle(el),
   if (text) lines.push('text      ' + (text.length > 60 ? text.slice(0, 60) + '…' : text)); \
   return {lines, selector: path.join(' > ')}; }).call(globalThis.__kbInspected)";
 
+/// How long `kb ctl pick` waits for the user: at most a minute, so that the
+/// answer comes before `kb ctl` stops waiting for it.
+const PICK_WAIT: f64 = 60.0;
+
+/// `kb ctl pick --timeout`, in seconds.
+fn pick_timeout(seconds: Option<&str>) -> Result<Duration, String> {
+    let seconds = match seconds {
+        Some(seconds) => {
+            seconds.parse::<f64>().ok().filter(|s| *s > 0.0).ok_or("--timeout needs a number of seconds")?
+        }
+        None => PICK_WAIT,
+    };
+    Ok(Duration::from_secs_f64(seconds.min(PICK_WAIT)))
+}
+
+/// The answer to `kb ctl pick`: the element's details as inspect mode
+/// shows them, its name first.
+fn picked(lines: &[String]) -> String {
+    let lines: Vec<String> = lines
+        .iter()
+        .map(|line| match line.strip_prefix('\u{2}') {
+            Some(name) => format!("picked {name}"),
+            None => line.clone(),
+        })
+        .collect();
+    lines.join("\n")
+}
+
 enum Msg {
     Term(Event),
     TermClosed,
@@ -273,6 +301,9 @@ struct App {
     /// picked.
     inspecting: bool,
     describe_request: Option<u64>,
+    /// `kb ctl pick` waiting for the user to pick an element, and when each
+    /// gives up.
+    picks: Vec<(control::Reply, Instant)>,
     /// Lines for the box, in place of the help: an element's details.
     panel: Option<Vec<String>>,
     /// Whether the bar is asking to quit, after a click on its close
@@ -407,6 +438,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         dark: options.dark,
         inspecting: false,
         describe_request: None,
+        picks: Vec::new(),
         panel: None,
         asking_quit: false,
         quit_clicked: false,
@@ -595,6 +627,20 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         quit = Some(Ok(()));
                         break;
                     }
+                    if request.command == "pick" {
+                        match pick_timeout(request.args["timeout"].as_str()) {
+                            Ok(timeout) => {
+                                app.close_help();
+                                app.inspecting = true;
+                                app.picks.push((request.reply, Instant::now() + timeout));
+                                redraw = true;
+                            }
+                            Err(error) => {
+                                let _ = request.reply.send(Err(error));
+                            }
+                        }
+                        continue;
+                    }
                     if request.command == "scheme" {
                         let _ = request.reply.send(app.set_scheme(request.args["scheme"].as_str().unwrap_or("")));
                         continue;
@@ -721,6 +767,10 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             }
             if app.notice.as_ref().is_some_and(|(_, at)| at.elapsed() >= NOTICE) {
                 app.notice = None;
+                redraw = true;
+            }
+            if app.picks.iter().any(|(_, deadline)| *deadline <= Instant::now()) {
+                app.expire_picks();
                 redraw = true;
             }
             if let Some(window) = size::window().filter(|w| *w != app.window) {
@@ -1137,6 +1187,8 @@ impl App {
         if let Some((note, _)) = &self.notice {
             badge.push_str(note);
             badge.push(' ');
+        } else if self.inspecting && !self.picks.is_empty() {
+            badge.push_str("Pick: click the element you mean, Esc to cancel ");
         } else if self.inspecting {
             badge.push_str("Inspect: click an element, Esc to stop ");
         }
@@ -1500,6 +1552,27 @@ impl App {
     fn stop_inspecting(&mut self) {
         self.inspecting = false;
         self.chrome.evaluate(UNHOVER);
+        for (reply, _) in self.picks.drain(..) {
+            let _ = reply.send(Err("the user stopped picking without choosing an element".to_owned()));
+        }
+    }
+
+    /// Fail the picks no one answered in time, and leave inspect mode once
+    /// none is waiting.
+    fn expire_picks(&mut self) {
+        let now = Instant::now();
+        self.picks.retain(|(reply, deadline)| {
+            if *deadline <= now {
+                let _ = reply.send(Err(
+                    "nothing was picked in time; ask the user to click the element in the pane, then pick again"
+                        .to_owned(),
+                ));
+            }
+            *deadline > now
+        });
+        if self.picks.is_empty() && self.inspecting {
+            self.stop_inspecting();
+        }
     }
 
     /// Handle Chrome's reply to a request the app made. Returns whether it
@@ -1521,6 +1594,20 @@ impl App {
             let mut lines: Vec<String> =
                 value["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(str::to_owned)).collect();
             if lines.is_empty() {
+                // Nothing was under the click: keep picking for whoever waits.
+                self.inspecting = !self.picks.is_empty();
+                return true;
+            }
+            if !self.picks.is_empty() {
+                // Asked for by kb ctl pick: the answer goes there, and the
+                // user's clipboard is left alone.
+                let answer = picked(&lines);
+                for (reply, _) in self.picks.drain(..) {
+                    let _ = reply.send(Ok(Output::Text(answer.clone())));
+                }
+                self.chrome.evaluate(UNHOVER);
+                let selector = value["selector"].as_str().unwrap_or("the element");
+                self.note(&format!("Picked {selector}"));
                 return true;
             }
             if let Some(selector) = value["selector"].as_str() {
@@ -1757,6 +1844,16 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_waits_at_most_a_minute_and_answers_with_the_details() {
+        assert_eq!(pick_timeout(None).unwrap(), Duration::from_secs(60));
+        assert_eq!(pick_timeout(Some("5")).unwrap(), Duration::from_secs(5));
+        assert_eq!(pick_timeout(Some("600")).unwrap(), Duration::from_secs(60));
+        assert!(pick_timeout(Some("0")).is_err() && pick_timeout(Some("soon")).is_err());
+        let lines = ["\u{2}button#signup.primary", "selector  #signup", "text      Sign up"].map(str::to_owned);
+        assert_eq!(picked(&lines), "picked button#signup.primary\nselector  #signup\ntext      Sign up");
+    }
 
     #[test]
     fn a_wheel_tick_scrolls_the_page_one_row_of_the_pane() {

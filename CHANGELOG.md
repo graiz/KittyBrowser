@@ -6,6 +6,11 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- `kb ctl pick` asks the user to point at an element: kb goes into inspect
+  mode in the pane, the user clicks the element they mean, and the agent
+  gets its selector, size, styles and text. The skill tells agents to ask
+  for a pick rather than guess a selector from the user's words. The page
+  gets no click; Esc cancels; it waits up to a minute.
 - `storage` only reads, and clearing is its own command, `clear-storage`,
   so an MCP client can allow one and ask before the other. `storage --clear`
   fails and names the new command.

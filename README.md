@@ -267,6 +267,8 @@ one:
 - **Debugging:** console, network, eval, style (`--why` explains which CSS
   rule won), box, listeners, storage, clear-storage (cookies and storage
   for the site, to test a first visit).
+- **Asking the user:** pick (the user clicks an element in the pane, and
+  the agent gets its selector).
 
 Selectors are CSS (reaching into shadow DOM, and with `iframe >>> sel`
 into a frame from the same site), `text=Some words`, `@N` from
