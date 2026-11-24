@@ -1,5 +1,6 @@
 //! Everything that touches the terminal.
 
+pub mod cursor;
 pub mod graphics;
 pub mod input;
 pub mod layers;

@@ -9,6 +9,11 @@ Notable changes to kb. The format follows
 - The address field turns orange while an agent drives kb: any command over
   `kb ctl` or MCP lights it, and it goes back 10 seconds after the last.
   Typing in the field shows it as usual; `kb list` doesn't count.
+- An orange pointer shows the agent at work on the page: it drifts to where
+  the agent clicks, hovers or types, wiggles slowly there between commands,
+  and fades away a second after the address field goes back. kb draws it in
+  the terminal, over the page, so the page, its screenshots and its HTML
+  never see it.
 - The bar ends with Chrome's ⋮ menu, in place of ✕ (Alt+F or Alt+E opens
   it from the keyboard): Select element (inspect mode), View source (the
   page's HTML, as it is now, opened in `$EDITOR` in the pane, as git opens

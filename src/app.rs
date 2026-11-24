@@ -11,6 +11,7 @@ use crate::history::History;
 use crate::keys::{Action, Bindings};
 use crate::menu::{self, Menu};
 use crate::picker::{self, Picker};
+use crate::term::cursor::{self, AgentCursor};
 use crate::term::input::{Button, Event, Key, KeyCode, Mouse, MouseKind, Parser};
 use crate::term::page::{PageImage, Route};
 use crate::term::size::{self, Window};
@@ -419,6 +420,10 @@ struct App {
     picks: Vec<(control::Reply, Instant)>,
     /// When an agent last sent a command, while the field shows it.
     driven: Option<Instant>,
+    /// When an agent last sent a command, for its cursor, which fades after
+    /// the field goes back; and the cursor, once an agent has come.
+    agent_last: Option<Instant>,
+    cursor: Option<AgentCursor>,
     /// The ⋮ menu while it is open, and where it was drawn.
     menu: Option<Menu>,
     menu_rect: Option<ui::Rect>,
@@ -574,6 +579,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         describe_request: None,
         picks: Vec::new(),
         driven: None,
+        agent_last: None,
+        cursor: None,
         menu: None,
         menu_rect: None,
         source_request: None,
@@ -622,6 +629,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             app.splash.as_ref().filter(|_| app.by_file).and_then(|splash| splash.wait(app.loading))
         {
             wait = wait.min(splash_wait);
+        }
+        if app.agent_last.is_some() {
+            wait = wait.min(cursor::FRAME_GAP);
         }
         match rx.recv_timeout(wait) {
             Ok(message) => messages.push(message),
@@ -752,6 +762,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     // every kb how it is isn't working this one.
                     if request.args["listing"] != true {
                         app.driven = Some(Instant::now());
+                        app.agent_last = app.driven;
                         app.bar.set_driven(true);
                         redraw = true;
                     }
@@ -930,6 +941,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         if app.by_file && app.splash.as_ref().is_some_and(|splash| splash.due(app.loading)) {
             app.draw_splash();
         }
+        app.move_cursor();
         // One frame per gap, or all of them while the page is in use.
         while app.chrome.ack_pending() && app.last_ack.elapsed() >= app.frame_gap() {
             app.chrome.ack();
@@ -977,6 +989,9 @@ impl App {
         term::write(b"\x1b[2J");
         term::write(graphics::DELETE);
         self.page.forget();
+        if let Some(cursor) = &mut self.cursor {
+            cursor.forget();
+        }
         self.help_rect = None;
         self.modal_rects.clear();
     }
@@ -1785,6 +1800,60 @@ impl App {
             Ok(status) => self.note(&format!("{editor} ended: {status}")),
             Err(error) => self.note(&format!("Couldn't start {editor}: {error}")),
         }
+    }
+
+    /// Draw the agent's cursor for this moment, or take it away: it shows
+    /// while the address field is orange and fades out after, and steps
+    /// aside for anything drawn over the page.
+    fn move_cursor(&mut self) {
+        let now = Instant::now();
+        let since = self.agent_last.map(|at| now.saturating_duration_since(at));
+        let opacity = match since {
+            Some(since) if since < DRIVEN => 1.0,
+            Some(since) if since < DRIVEN + cursor::FADE => {
+                1.0 - (since - DRIVEN).as_secs_f64() / cursor::FADE.as_secs_f64()
+            }
+            _ => 0.0,
+        };
+        if opacity == 0.0 {
+            self.agent_last = None;
+        }
+        let covered = self.splash.is_some()
+            || self.help
+            || self.menu.is_some()
+            || self.dialog.is_some()
+            || self.picker.is_some()
+            || self.inspecting;
+        let point = self.devtools.take_agent_point().map(|point| self.to_pane(point));
+        // It first appears in the middle of the page, if not where the
+        // agent is acting.
+        let middle = self.to_pane((self.viewport.0 as f64 / 2.0, self.viewport.1 as f64 / 2.0));
+        let cell = self.cell();
+        let cursor = self.cursor.get_or_insert_with(|| AgentCursor::new(point.unwrap_or(middle)));
+        if let Some(point) = point {
+            cursor.aim(point);
+        }
+        let mut out = Vec::new();
+        if opacity > 0.0 && !covered {
+            if cursor.due() {
+                cursor.draw(&mut out, cell, opacity);
+            }
+        } else {
+            cursor.hide(&mut out);
+        }
+        if !out.is_empty() {
+            term::write(&out);
+        }
+    }
+
+    /// A point on the page, in CSS pixels in the window, as pixels from the
+    /// pane's top left.
+    fn to_pane(&self, (x, y): (f64, f64)) -> (f64, f64) {
+        let (cell_w, cell_h) = self.cell();
+        let (cell_w, cell_h) = (cell_w as f64, cell_h as f64);
+        let across = self.shown.0 as f64 * cell_w / self.viewport.0.max(1) as f64;
+        let down = self.shown.1 as f64 * cell_h / self.viewport.1.max(1) as f64;
+        (x * across, cell_h + y * down)
     }
 
     /// What a column of the top bar holds, as it is drawn now.
