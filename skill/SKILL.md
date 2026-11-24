@@ -105,6 +105,10 @@ picks `b` inside `a`'s shadow root, or inside the page in iframe `a`),
 `text=Some words` (the element showing them), `@N` (a number from `links`),
 or `:focus`.
 
+While you send commands, kb's address field turns orange, and it goes
+back 10 seconds after your last: the user can see when you're at work in
+their browser.
+
 ## Asking the user to point
 
 When the user means something on the page ("this button", "that box is

@@ -106,9 +106,16 @@ pub struct AddressBar {
     focused: bool,
     selected: bool,
     completion: Vec<char>,
+    /// Whether an agent is driving the page, which turns the field orange.
+    driven: bool,
 }
 
 impl AddressBar {
+    /// Show, or stop showing, that an agent is driving the page.
+    pub fn set_driven(&mut self, driven: bool) {
+        self.driven = driven;
+    }
+
     /// The address as shown, completion included.
     pub fn text(&self) -> String {
         self.text.iter().chain(&self.completion).collect()
@@ -296,6 +303,8 @@ pub(crate) struct Palette {
     pub box_text: String,
     /// A text field in a box: sunk to the terminal's background.
     pub input: String,
+    /// The address field while an agent drives the page: orange.
+    pub driven: String,
 }
 
 static PALETTE: std::sync::RwLock<Option<Palette>> = std::sync::RwLock::new(None);
@@ -313,6 +322,7 @@ pub(crate) fn palette() -> Palette {
         box_accent: "\x1b[0;48;5;236;38;5;141;1m".into(),
         box_text: "\x1b[0;48;5;236;38;5;231m".into(),
         input: "\x1b[0;48;5;233;38;5;231m".into(),
+        driven: "\x1b[0;48;5;208;38;5;232m".into(),
     })
 }
 
@@ -349,6 +359,8 @@ pub fn use_terminal_colors(fg: Rgb, bg: Rgb) {
         box_accent: style(bar, art, ";1"),
         box_text: style(bar, fg, ""),
         input: style(bg, fg, ""),
+        // The same orange on light and dark, with dark text, as a sign.
+        driven: style((230, 126, 34), (20, 16, 12), ""),
     };
     if let Ok(mut current) = PALETTE.write() {
         *current = Some(palette);
@@ -466,7 +478,11 @@ pub fn render_bar(
     let typed_end = bar.text.len().clamp(window.start, window.end);
     let visible: String = shown[window.start..typed_end].iter().collect();
     let completion: String = shown[typed_end..window.end].iter().collect();
-    s.push_str(if bar.focused { &colors.focused } else { &colors.field });
+    s.push_str(match (bar.focused, bar.driven) {
+        (true, _) => &colors.focused,
+        (false, true) => &colors.driven,
+        (false, false) => &colors.field,
+    });
     s.push(' ');
     if bar.selected {
         let _ = write!(s, "\x1b[7m{visible}\x1b[27m");
@@ -767,6 +783,23 @@ mod tests {
         assert_eq!(hit(73, (2, 3)), Hit::NextWindow);
         assert_eq!(hit(76, (2, 3)), Hit::NextWindow);
         assert_eq!(hit(78, (2, 3)), Hit::Menu);
+    }
+
+    #[test]
+    fn the_field_is_orange_while_an_agent_drives() {
+        let draw = |bar: &mut AddressBar| {
+            let mut out = Vec::new();
+            render_bar(&mut out, bar, 80, false, None, None, (1, 1));
+            String::from_utf8(out).unwrap()
+        };
+        let colors = palette();
+        let mut bar = AddressBar::default();
+        assert!(!draw(&mut bar).contains(&colors.driven));
+        bar.set_driven(true);
+        assert!(draw(&mut bar).contains(&colors.driven));
+        // The user typing in it shows their own field, not the agent's.
+        bar.focus();
+        assert!(!draw(&mut bar).contains(&colors.driven));
     }
 
     #[test]

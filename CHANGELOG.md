@@ -6,6 +6,9 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- The address field turns orange while an agent drives kb: any command over
+  `kb ctl` or MCP lights it, and it goes back 10 seconds after the last.
+  Typing in the field shows it as usual; `kb list` doesn't count.
 - The bar ends with Chrome's ⋮ menu, in place of ✕ (Alt+F or Alt+E opens
   it from the keyboard): Select element (inspect mode), View source (the
   page's HTML, as it is now, opened in `$EDITOR` in the pane, as git opens

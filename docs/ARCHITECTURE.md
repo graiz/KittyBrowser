@@ -293,7 +293,9 @@ rest down to a few columns. The field is a line editor (cursor, word
 moves, select-all on focus, horizontal scroll) with no terminal
 dependencies, so it is unit tested directly. Hit testing maps a column to a
 button or a position in the field, from the same layout the bar is drawn
-with. ⋮ opens the menu (`menu.rs`), as Chrome's does: Select element,
+with. While an agent sends commands, the field is orange, until 10 s
+after the last one: the user sees whenever an agent is reading or working
+the page. ⋮ opens the menu (`menu.rs`), as Chrome's does: Select element,
 View source, Network performance, Quit browser. Network performance reads the page's
 own Performance API (navigation and resource timings), not the DevTools
 network events, which carry no timings in kb's record.

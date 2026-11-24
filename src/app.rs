@@ -178,6 +178,9 @@ const DESCRIBE: &str = r#"(function() { const el = this, s = getComputedStyle(el
   if (link) lines.push('link      ' + link.href);
   return {lines, selector}; }).call(globalThis.__kbInspected)"#;
 
+/// How long the address field stays orange after an agent's last command.
+const DRIVEN: Duration = Duration::from_secs(10);
+
 /// How long `kb ctl pick` waits for the user: at most a minute, so that the
 /// answer comes before `kb ctl` stops waiting for it.
 const PICK_WAIT: f64 = 60.0;
@@ -414,6 +417,8 @@ struct App {
     /// `kb ctl pick` waiting for the user to pick an element, and when each
     /// gives up.
     picks: Vec<(control::Reply, Instant)>,
+    /// When an agent last sent a command, while the field shows it.
+    driven: Option<Instant>,
     /// The ⋮ menu while it is open, and where it was drawn.
     menu: Option<Menu>,
     menu_rect: Option<ui::Rect>,
@@ -568,6 +573,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         inspecting: false,
         describe_request: None,
         picks: Vec::new(),
+        driven: None,
         menu: None,
         menu_rect: None,
         source_request: None,
@@ -741,6 +747,14 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 }
                 Msg::Control(request) => {
                     log(format_args!("control: {} {}", request.command, request.args));
+                    // An agent is at work: the address field says so, in
+                    // orange, until it has been quiet a while. kb list asking
+                    // every kb how it is isn't working this one.
+                    if request.args["listing"] != true {
+                        app.driven = Some(Instant::now());
+                        app.bar.set_driven(true);
+                        redraw = true;
+                    }
                     if request.command == "quit" {
                         let cancelled = app.devtools.cancel_downloads(&mut app.chrome);
                         let _ =
@@ -888,6 +902,11 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             }
             if app.notice.as_ref().is_some_and(|(_, at)| at.elapsed() >= NOTICE) {
                 app.notice = None;
+                redraw = true;
+            }
+            if app.driven.is_some_and(|at| at.elapsed() >= DRIVEN) {
+                app.driven = None;
+                app.bar.set_driven(false);
                 redraw = true;
             }
             if app.picks.iter().any(|(_, deadline)| *deadline <= Instant::now()) {

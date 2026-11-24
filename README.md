@@ -231,6 +231,9 @@ open kb in a pane beside its own, find which kb is its own, and work in it
 while you watch. Its text is [`skill/SKILL.md`](skill/SKILL.md); `kb skill
 show` prints it.
 
+While an agent sends kb commands, the address field turns orange, and it
+goes back 10 seconds after the last one.
+
 Any program can drive a running kb with `kb ctl`:
 
 ```sh
