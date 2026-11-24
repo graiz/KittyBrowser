@@ -418,17 +418,24 @@ struct App {
     /// `kb ctl pick` waiting for the user to pick an element, and when each
     /// gives up.
     picks: Vec<(control::Reply, Instant)>,
-    /// When an agent last sent a command, while the field shows it.
-    driven: Option<Instant>,
-    /// When an agent last sent a command, for its cursor, which fades after
-    /// the field goes back; and the cursor, once an agent has come.
+    /// Whether a pick turned inspect mode on, so that it goes off with it;
+    /// and whether the element being described was clicked for a pick.
+    inspect_for_pick: bool,
+    describe_for_pick: bool,
+    /// When an agent last sent a command: the field is orange for DRIVEN
+    /// after it, and its cursor fades out after that. And the cursor, once
+    /// an agent has come.
     agent_last: Option<Instant>,
     cursor: Option<AgentCursor>,
     /// The ⋮ menu while it is open, and where it was drawn.
     menu: Option<Menu>,
     menu_rect: Option<ui::Rect>,
-    /// The page's HTML, asked for to view it in the user's editor.
+    /// The page's HTML, asked for to view it in the user's editor; the
+    /// editor while it has the pane, and the command it was; and the
+    /// folders the source went in, removed as kb quits.
     source_request: Option<u64>,
+    editor: Option<(std::process::Child, String)>,
+    source_folders: Vec<std::path::PathBuf>,
     /// The page's timings, asked for to show its network performance.
     network_request: Option<u64>,
     /// Lines for the box, in place of the help: an element's details.
@@ -578,12 +585,15 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         inspecting: false,
         describe_request: None,
         picks: Vec::new(),
-        driven: None,
+        inspect_for_pick: false,
+        describe_for_pick: false,
         agent_last: None,
         cursor: None,
         menu: None,
         menu_rect: None,
         source_request: None,
+        editor: None,
+        source_folders: Vec::new(),
         network_request: None,
         panel: None,
         quit_clicked: false,
@@ -736,7 +746,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     if !ok && app.page.lost(id) {
                         // The terminal dropped an image the page was drawn
                         // with: start again from the whole page.
-                        term::write(graphics::DELETE);
+                        let mut out = Vec::new();
+                        graphics::delete_all(&mut out);
+                        term::write(&out);
                         new_frame = true;
                     }
                     if id == graphics::FILE_QUERY_ID {
@@ -761,8 +773,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     // orange, until it has been quiet a while. kb list asking
                     // every kb how it is isn't working this one.
                     if request.args["listing"] != true {
-                        app.driven = Some(Instant::now());
-                        app.agent_last = app.driven;
+                        app.agent_last = Some(Instant::now());
                         app.bar.set_driven(true);
                         redraw = true;
                     }
@@ -776,8 +787,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     if request.command == "pick" {
                         match pick_timeout(request.args["timeout"].as_str()) {
                             Ok(timeout) => {
-                                app.close_help();
-                                app.inspecting = true;
+                                // Ended with the pick only if the pick began it.
+                                app.inspect_for_pick |= !app.inspecting;
+                                app.start_inspecting();
                                 app.picks.push((request.reply, Instant::now() + timeout));
                                 redraw = true;
                             }
@@ -915,8 +927,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 app.notice = None;
                 redraw = true;
             }
-            if app.driven.is_some_and(|at| at.elapsed() >= DRIVEN) {
-                app.driven = None;
+            if app.bar.driven() && app.agent_last.is_none_or(|at| at.elapsed() >= DRIVEN) {
                 app.bar.set_driven(false);
                 redraw = true;
             }
@@ -942,6 +953,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             app.draw_splash();
         }
         app.move_cursor();
+        app.check_editor();
         // One frame per gap, or all of them while the page is in use.
         while app.chrome.ack_pending() && app.last_ack.elapsed() >= app.frame_gap() {
             app.chrome.ack();
@@ -953,6 +965,17 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     socket.remove();
     app.history.save();
     app.page.close();
+    // Quit while the editor had the pane: the source was a copy.
+    if let Some((mut child, _)) = app.editor.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+        INPUT_PAUSED.store(false, Ordering::SeqCst);
+        term::lend(false);
+        let _ = term::enter();
+    }
+    for folder in app.source_folders.drain(..) {
+        let _ = std::fs::remove_dir_all(folder);
+    }
     app.devtools.cancel_downloads(&mut app.chrome);
     app.chrome.close();
     result
@@ -986,12 +1009,10 @@ impl App {
     /// Wipe the screen, images included. The help and what the page asks,
     /// if shown, are drawn again with the next frame.
     fn clear(&mut self) {
-        term::write(b"\x1b[2J");
-        term::write(graphics::DELETE);
+        let mut out = b"\x1b[2J".to_vec();
+        graphics::delete_all(&mut out);
+        term::write(&out);
         self.page.forget();
-        if let Some(cursor) = &mut self.cursor {
-            cursor.forget();
-        }
         self.help_rect = None;
         self.modal_rects.clear();
     }
@@ -1429,6 +1450,8 @@ impl App {
     fn sync_questions(&mut self) -> bool {
         let mut changed = false;
         match self.devtools.dialog().cloned() {
+            // kb's own question is answered first; the page's waits for it.
+            Some(_) if self.dialog.as_ref().is_some_and(|dialog| dialog.id == dialog::QUIT) => {}
             Some(question) if self.dialog.as_ref().map(|dialog| dialog.id) != Some(question.id) => {
                 if let Asking::Dialog { kind, message, default } = &question.asking {
                     self.dialog =
@@ -1589,7 +1612,17 @@ impl App {
     /// Handle a key. Returns whether to quit.
     fn on_key(&mut self, key: Key) -> bool {
         let focused = self.bar.focused();
-        if let Some(menu) = &mut self.menu {
+        if self.menu.is_some() {
+            // The keys that opened it close it, and quitting still quits.
+            match self.bindings.action(&key, true) {
+                Some(Action::Quit) => return true,
+                Some(Action::Menu) => {
+                    self.close_menu();
+                    return false;
+                }
+                _ => {}
+            }
+            let Some(menu) = &mut self.menu else { return false };
             match menu.key(&key) {
                 menu::Outcome::Stay => {}
                 menu::Outcome::Close => self.close_menu(),
@@ -1667,10 +1700,7 @@ impl App {
             }
             Action::Menu => self.open_menu(),
             Action::Inspect if self.inspecting => self.stop_inspecting(),
-            Action::Inspect => {
-                self.close_help();
-                self.inspecting = true;
-            }
+            Action::Inspect => self.start_inspecting(),
             Action::Devtools => {
                 if let Err(error) = self.chrome.open_devtools() {
                     self.note(&format!("{error} (Ctrl+Shift+C inspects without it)"));
@@ -1718,9 +1748,8 @@ impl App {
     /// Draw the ⋮ menu, if it is open, below the bar.
     fn render_menu(&mut self, out: &mut Vec<u8>) {
         if let Some(old) = self.menu_rect.take() {
+            // Blank cells show the page image under them again.
             ui::blank(out, old);
-            // What the menu covered of the page is drawn again.
-            self.page.forget();
         }
         let Some(menu) = &self.menu else { return };
         let first = |action| self.bindings.keys_for(action).into_iter().next().unwrap_or_default();
@@ -1752,10 +1781,7 @@ impl App {
     fn choose(&mut self, item: menu::Item) {
         self.close_menu();
         match item {
-            menu::Item::SelectElement => {
-                self.close_help();
-                self.inspecting = true;
-            }
+            menu::Item::SelectElement => self.start_inspecting(),
             menu::Item::ViewSource => {
                 self.source_request = Some(self.chrome.evaluate_value(SOURCE));
             }
@@ -1767,17 +1793,24 @@ impl App {
     }
 
     /// Open `html`, the page's source, in the user's editor in this pane, as
-    /// git does for a commit message: kb gives the terminal to the editor and
-    /// takes it back when the editor exits. The file is kb's own and private,
-    /// and is gone afterwards.
+    /// git does for a commit message: kb lends the terminal to the editor and
+    /// takes it back when the editor exits (see `check_editor`). Meanwhile kb
+    /// goes on working, agents' commands included; only its drawing waits.
+    /// The file is kb's own and private, and stays until kb quits, as an
+    /// editor that opens a window of its own and exits at once still reads
+    /// it.
     fn view_source(&mut self, html: &str) {
+        if self.editor.is_some() {
+            return;
+        }
         let folder = match crate::files::private_temp_dir("kb-source-") {
             Ok(folder) => folder,
             Err(error) => return self.note(&format!("Couldn't save the source: {error}")),
         };
         let path = folder.join(source_name(&self.url));
-        if let Err(error) = crate::files::write_new(&path, html.as_bytes(), 0o600) {
-            let _ = std::fs::remove_dir_all(&folder);
+        let written = crate::files::write_new(&path, html.as_bytes(), 0o600);
+        self.source_folders.push(folder);
+        if let Err(error) = written {
             return self.note(&format!("Couldn't save the source: {error}"));
         }
         let editor = ["VISUAL", "EDITOR"]
@@ -1786,20 +1819,44 @@ impl App {
             .unwrap_or_else(|| "vi".to_owned());
         INPUT_PAUSED.store(true, Ordering::SeqCst);
         term::leave();
+        term::lend(true);
         // Through the shell, as $EDITOR can carry arguments (code --wait);
         // the file is passed as $1, never read as part of the command.
-        let status =
-            std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&path).status();
-        let _ = term::enter();
-        INPUT_PAUSED.store(false, Ordering::SeqCst);
-        let _ = std::fs::remove_dir_all(&folder);
-        self.clear();
-        self.draw(true);
+        let child =
+            std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&path).spawn();
+        match child {
+            Ok(child) => self.editor = Some((child, editor)),
+            Err(error) => {
+                self.take_terminal_back();
+                self.note(&format!("Couldn't start {editor}: {error}"));
+            }
+        }
+    }
+
+    /// Take the pane back once the editor has exited.
+    fn check_editor(&mut self) {
+        let Some((child, editor)) = &mut self.editor else { return };
+        let status = match child.try_wait() {
+            Ok(None) => return,
+            Ok(Some(status)) => Ok(status),
+            Err(error) => Err(error),
+        };
+        let editor = editor.clone();
+        self.editor = None;
+        self.take_terminal_back();
         match status {
             Ok(status) if status.success() => {}
             Ok(status) => self.note(&format!("{editor} ended: {status}")),
-            Err(error) => self.note(&format!("Couldn't start {editor}: {error}")),
+            Err(error) => self.note(&format!("Lost track of {editor}: {error}")),
         }
+    }
+
+    fn take_terminal_back(&mut self) {
+        term::lend(false);
+        let _ = term::enter();
+        INPUT_PAUSED.store(false, Ordering::SeqCst);
+        self.clear();
+        self.draw(true);
     }
 
     /// Draw the agent's cursor for this moment, or take it away: it shows
@@ -1842,7 +1899,12 @@ impl App {
             cursor.hide(&mut out);
         }
         if !out.is_empty() {
-            term::write(&out);
+            // Placing it moves the terminal's cursor: put that back where
+            // the bar left it, in the address field if it is being typed in.
+            let mut wrapped = b"\x1b7".to_vec();
+            wrapped.extend_from_slice(&out);
+            wrapped.extend_from_slice(b"\x1b8");
+            term::write(&wrapped);
         }
     }
 
@@ -1882,6 +1944,7 @@ impl App {
 
     fn stop_inspecting(&mut self) {
         self.inspecting = false;
+        self.inspect_for_pick = false;
         self.chrome.evaluate(UNHOVER);
         for (reply, _) in self.picks.drain(..) {
             let _ = reply.send(Err("the user stopped picking without choosing an element".to_owned()));
@@ -1901,9 +1964,14 @@ impl App {
             }
             *deadline > now
         });
-        if self.picks.is_empty() && self.inspecting {
+        if self.picks.is_empty() && self.inspecting && self.inspect_for_pick {
             self.stop_inspecting();
         }
+    }
+
+    fn start_inspecting(&mut self) {
+        self.close_help();
+        self.inspecting = true;
     }
 
     /// Handle Chrome's reply to a request the app made. Returns whether it
@@ -1945,9 +2013,16 @@ impl App {
             if lines.is_empty() {
                 // Nothing was under the click: keep picking for whoever waits.
                 self.inspecting = !self.picks.is_empty();
+                self.inspect_for_pick = self.inspecting && self.describe_for_pick;
                 return true;
             }
-            if !self.picks.is_empty() {
+            if self.describe_for_pick && self.picks.is_empty() {
+                // The pick ran out as the user clicked: it isn't theirs to
+                // copy, nor to show.
+                self.chrome.evaluate(UNHOVER);
+                return true;
+            }
+            if self.describe_for_pick {
                 // Asked for by kb ctl pick: the answer goes there, and the
                 // user's clipboard is left alone.
                 let answer = picked(&lines);
@@ -2147,6 +2222,10 @@ impl App {
                 MouseKind::Press if mouse.button == Some(Button::Left) => {
                     self.chrome.evaluate(&format!("{HOVER}({x}, {y})"));
                     self.inspecting = false;
+                    self.inspect_for_pick = false;
+                    // Whose click it was is settled now, should the pick
+                    // run out before the details come.
+                    self.describe_for_pick = !self.picks.is_empty();
                     self.describe_request = Some(self.chrome.evaluate_value(DESCRIBE));
                 }
                 _ => {}

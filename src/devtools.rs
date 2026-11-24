@@ -2712,11 +2712,11 @@ impl Devtools {
                          only at other widths (see: kb ctl box, kb ctl viewport)",
                     );
                 }
-                // The pane's agent cursor goes where this acts.
-                self.agent_point = Some(match (&then, then_at(&then)) {
-                    (Then::Click(..), Some((dx, dy))) => (x + dx, y + dy),
-                    _ => middle,
-                });
+                // The pane's agent cursor goes where this acts; a screenshot
+                // only looks.
+                if !matches!(then, Then::Screenshot(_)) {
+                    self.agent_point = Some(then_at(&then).map_or(middle, |(dx, dy)| (x + dx, y + dy)));
+                }
                 match then {
                     Then::Hover(selector) => {
                         let since = self.baseline(chrome.session());

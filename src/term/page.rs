@@ -64,7 +64,7 @@ impl PageImage {
     /// cover what the new one draws.
     fn hand_to(&mut self, out: &mut Vec<u8>, drawer: Drawer) {
         if self.on_screen != Some(drawer) {
-            out.extend_from_slice(graphics::DELETE);
+            graphics::delete_all(out);
             self.forget();
             self.on_screen = Some(drawer);
         }

@@ -116,6 +116,10 @@ impl AddressBar {
         self.driven = driven;
     }
 
+    pub fn driven(&self) -> bool {
+        self.driven
+    }
+
     /// The address as shown, completion included.
     pub fn text(&self) -> String {
         self.text.iter().chain(&self.completion).collect()

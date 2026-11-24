@@ -21,8 +21,11 @@ The input thread polls the terminal and reads its descriptor directly,
 with no buffer in between, so it can be paused: View source (in the ⋮
 menu) hands the terminal to `$EDITOR` the way git does for a commit
 message, and while the editor runs the input thread reads nothing, or it
-would take keys typed to the editor. The main thread waits for the editor;
-Chrome's messages queue meanwhile, and the screencast waits for its ack.
+would take keys typed to the editor. The main thread goes on meanwhile,
+answering Chrome and agents' commands, with the terminal lent (`term::lend`):
+what it would draw is dropped, and once the editor exits it takes the
+terminal back and draws everything again. The source file stays until kb
+quits, as an editor that opens a window of its own exits at once.
 
 Each pass of the loop drains everything waiting on the channel. If several
 frames arrived, only the newest is drawn, a burst of mouse moves collapses

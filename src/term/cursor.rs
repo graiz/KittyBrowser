@@ -103,8 +103,9 @@ pub struct AgentCursor {
     /// When the latest drift began.
     moved: Instant,
     /// The height and the opacity, in tenths, the image was sent at, once
-    /// the terminal has it.
-    sent: Option<(u32, u32)>,
+    /// the terminal has it, and how many times every image had been dropped
+    /// then: once that changes, the terminal hasn't got it any more.
+    sent: Option<(u32, u32, u64)>,
     /// Whether it is on screen.
     shown: bool,
     last_frame: Option<Instant>,
@@ -154,14 +155,14 @@ impl AgentCursor {
         let (cell_w, cell_h) = (cell.0.max(1) as f64, cell.1.max(1) as f64);
         let height = (cell_h * SIZE).round().max(8.0) as u32;
         let tenths = (opacity.clamp(0.0, 1.0) * 10.0).round() as u32;
-        if self.sent != Some((height, tenths)) {
+        if self.sent != Some((height, tenths, graphics::wipes())) {
             let mut pixels = arrow(height);
             for alpha in pixels.data.iter_mut().skip(3).step_by(4) {
                 *alpha = (*alpha as u32 * tenths / 10) as u8;
             }
             let keys = format!("a=t,f=32,s={},v={},i={ID},q=2", pixels.width, pixels.height);
             graphics::transmit(out, &keys, &crate::base64::encode(&pixels.data));
-            self.sent = Some((height, tenths));
+            self.sent = Some((height, tenths, graphics::wipes()));
         }
         let (x, y) = self.position(Instant::now(), (cell_h * WIGGLE.0, cell_h * WIGGLE.1));
         let (x, y) = (x.max(0.0), y.max(0.0));
@@ -180,13 +181,6 @@ impl AgentCursor {
             out.extend_from_slice(format!("\x1b_Ga=d,d=i,i={ID},q=2\x1b\\").as_bytes());
             self.shown = false;
         }
-    }
-
-    /// The terminal dropped every image (the screen was cleared): send the
-    /// cursor's again when next drawn.
-    pub fn forget(&mut self) {
-        self.sent = None;
-        self.shown = false;
     }
 }
 
