@@ -178,6 +178,7 @@ click the address to edit it, and click, drag and scroll the page.
 | Cmd+R or Ctrl+R | Reload |
 | Cmd+C or Ctrl+C | Copy the selection (or the address while editing it) to the system clipboard |
 | Ctrl+Shift+C or Cmd+Shift+C | Inspect: hover to outline elements, click one for its selector, size and styles |
+| Alt+F or Alt+E, or ⋮ in the bar | The menu: Select element (inspect), View source (the page's HTML in `$EDITOR`), Network performance (the slowest requests and load times) |
 | F12, Ctrl+Shift+I or Cmd+Alt+I | Open Chrome DevTools for the page (start kb with `--devtools`) |
 | Ctrl+= and Ctrl+- | Zoom in and out; the zoom shows at the right of the bar |
 | Ctrl+0 | Zoom to 100%, or out until a page too wide for the pane fits |

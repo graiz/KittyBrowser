@@ -17,6 +17,13 @@ messages from Chrome; the main thread owns all state, receives both on one
 channel, and is the only one that writes to the terminal or to Chrome. It
 draws only when something changed. There is no async runtime.
 
+The input thread polls the terminal and reads its descriptor directly,
+with no buffer in between, so it can be paused: View source (in the ⋮
+menu) hands the terminal to `$EDITOR` the way git does for a commit
+message, and while the editor runs the input thread reads nothing, or it
+would take keys typed to the editor. The main thread waits for the editor;
+Chrome's messages queue meanwhile, and the screencast waits for its ack.
+
 Each pass of the loop drains everything waiting on the channel. If several
 frames arrived, only the newest is drawn, a burst of mouse moves collapses
 to the last one, and a burst of wheel ticks to one scroll by all of them.
@@ -279,10 +286,17 @@ Command never arrives.
 
 ## UI (`src/ui.rs`)
 
-Row 1 is ordinary terminal text: three buttons and the address field. The
-field is a line editor (cursor, word moves, select-all on focus, horizontal
-scroll) with no terminal dependencies, so it is unit tested directly. Hit
-testing maps a column to a button or a position in the field.
+Row 1 is ordinary terminal text: three buttons, the address field, then
+the window switcher (‹ 2/3 ›), the badge (a note, the spinner, a
+download's progress, the zoom), ⋮ and ✕, the field giving up room to the
+rest down to a few columns. The field is a line editor (cursor, word
+moves, select-all on focus, horizontal scroll) with no terminal
+dependencies, so it is unit tested directly. Hit testing maps a column to a
+button or a position in the field, from the same layout the bar is drawn
+with. ⋮ opens the menu (`menu.rs`), as Chrome's does: Select element,
+View source, Network performance. Network performance reads the page's
+own Performance API (navigation and resource timings), not the DevTools
+network events, which carry no timings in kb's record.
 Zoom (Ctrl+= and Ctrl+-) divides the CSS viewport by the zoom, so Chrome
 lays the page out narrower or wider, as a desktop browser does. Chrome's
 screencast renders at the launch scale whatever scale is asked for (both a

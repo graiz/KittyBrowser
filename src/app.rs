@@ -9,6 +9,7 @@ use crate::dialog::{self, Dialog, Kind};
 use crate::engine::chrome::{self, Chrome, PageEvent};
 use crate::history::History;
 use crate::keys::{Action, Bindings};
+use crate::menu::{self, Menu};
 use crate::picker::{self, Picker};
 use crate::term::input::{Button, Event, Key, KeyCode, Mouse, MouseKind, Parser};
 use crate::term::page::{PageImage, Route};
@@ -16,7 +17,8 @@ use crate::term::size::{self, Window};
 use crate::term::{self, graphics};
 use crate::ui::{self, AddressBar, Edit, Hit};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -177,6 +179,87 @@ fn picked(lines: &[String]) -> String {
     lines.join("\n")
 }
 
+/// Set while an editor has the terminal, so that the input thread leaves
+/// the keys typed to it alone.
+static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// The page's HTML as it is now, with its doctype, for View source.
+const SOURCE: &str = "(document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + \
+  document.documentElement.outerHTML";
+
+/// The page's timings, from its own Performance API, for Network
+/// performance: when its first byte came, when the DOM was ready and when
+/// it loaded (0 for not yet), in milliseconds from the start, and each
+/// resource's time and bytes over the network.
+const TIMINGS: &str = "(() => { const nav = performance.getEntriesByType('navigation')[0]; \
+  const resources = performance.getEntriesByType('resource').map(r => ({url: r.name, kind: r.initiatorType, \
+    ms: r.duration, bytes: r.transferSize})); \
+  return {first_byte: nav ? nav.responseStart : 0, ready: nav ? nav.domContentLoadedEventEnd : 0, \
+    load: nav ? nav.loadEventEnd : 0, bytes: nav ? nav.transferSize : 0, resources}; })()";
+
+/// The slowest requests the network box lists.
+const SLOWEST: usize = 12;
+
+/// The lines of the network box, from `TIMINGS`, with `failed` requests
+/// counted by kb: the page's milestones, its totals, and its slowest
+/// requests.
+fn network_lines(timings: &serde_json::Value, failed: usize) -> Vec<String> {
+    let number = |value: &serde_json::Value| value.as_f64().unwrap_or(0.0);
+    let seconds = |ms: f64| format!("{:.2} s", ms / 1000.0);
+    let mut lines = vec![format!("{}Network performance", ui::TITLE_LINE)];
+    let milestone =
+        |name: &str, ms: f64| format!("{name} {}", if ms > 0.0 { seconds(ms) } else { "not yet".to_owned() });
+    lines.push(
+        [
+            milestone("first byte", number(&timings["first_byte"])),
+            milestone("DOM ready", number(&timings["ready"])),
+            milestone("loaded", number(&timings["load"])),
+        ]
+        .join(" · "),
+    );
+    let mut resources: Vec<&serde_json::Value> = timings["resources"].as_array().into_iter().flatten().collect();
+    let bytes = number(&timings["bytes"]) + resources.iter().map(|r| number(&r["bytes"])).sum::<f64>();
+    let mut totals =
+        format!("{} requests · {} over the network", resources.len() + 1, crate::downloads::size(bytes as u64));
+    if failed > 0 {
+        let _ = std::fmt::Write::write_fmt(&mut totals, format_args!(" · {failed} failed"));
+    }
+    lines.push(totals);
+    if !resources.is_empty() {
+        resources.sort_by(|a, b| number(&b["ms"]).total_cmp(&number(&a["ms"])));
+        lines.push(String::new());
+        lines.push("\tSlowest first (time, bytes, kind, address)".to_owned());
+        for resource in resources.iter().take(SLOWEST) {
+            // Nothing counted: from the cache, or another site that keeps
+            // its sizes to itself.
+            let size = match number(&resource["bytes"]) as u64 {
+                0 => "–".to_owned(),
+                bytes => crate::downloads::size(bytes),
+            };
+            let url = resource["url"].as_str().unwrap_or("");
+            let url = url.split_once("://").map_or(url, |(_, rest)| rest);
+            let kind = resource["kind"].as_str().unwrap_or("");
+            lines.push(format!("{:>7}  {size:>8}  {kind:<6}  {url}", seconds(number(&resource["ms"]))));
+        }
+        if resources.len() > SLOWEST {
+            lines.push(format!("\t…and {} more", resources.len() - SLOWEST));
+        }
+    }
+    lines.push(String::new());
+    lines.push("\tkb ctl network lists every request. Any key closes this.".to_owned());
+    lines
+}
+
+/// A file name for a page's source, from its host: example.com.html.
+fn source_name(url: &str) -> String {
+    let host: String = ui::host_of(url)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect();
+    let host = host.trim_matches('.');
+    format!("{}.html", if host.is_empty() { "page" } else { host })
+}
+
 enum Msg {
     Term(Event),
     TermClosed,
@@ -304,6 +387,13 @@ struct App {
     /// `kb ctl pick` waiting for the user to pick an element, and when each
     /// gives up.
     picks: Vec<(control::Reply, Instant)>,
+    /// The ⋮ menu while it is open, and where it was drawn.
+    menu: Option<Menu>,
+    menu_rect: Option<ui::Rect>,
+    /// The page's HTML, asked for to view it in the user's editor.
+    source_request: Option<u64>,
+    /// The page's timings, asked for to show its network performance.
+    network_request: Option<u64>,
     /// Lines for the box, in place of the help: an element's details.
     panel: Option<Vec<String>>,
     /// Whether the bar is asking to quit, after a click on its close
@@ -366,9 +456,20 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     std::thread::spawn(move || {
         let mut parser = Parser::default();
         let mut buf = [0; 4096];
-        let mut stdin = std::io::stdin().lock();
         loop {
-            match stdin.read(&mut buf) {
+            // While an editor has the terminal, its keys are its own. The
+            // descriptor is read directly, with nothing buffered in between,
+            // so that what poll says is there is all there is.
+            if INPUT_PAUSED.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            let mut ready = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut ready, 1, 50) } <= 0 || INPUT_PAUSED.load(Ordering::SeqCst) {
+                continue;
+            }
+            let read = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+            match usize::try_from(read) {
                 Ok(n) if n > 0 => {
                     for event in parser.feed(&buf[..n]) {
                         if input.send(Msg::Term(event)).is_err() {
@@ -376,6 +477,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         }
                     }
                 }
+                // Interrupted, as by a resize: read again.
+                Err(_) if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
                 _ => {
                     let _ = input.send(Msg::TermClosed);
                     return;
@@ -439,6 +542,10 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         inspecting: false,
         describe_request: None,
         picks: Vec::new(),
+        menu: None,
+        menu_rect: None,
+        source_request: None,
+        network_request: None,
         panel: None,
         asking_quit: false,
         quit_clicked: false,
@@ -1022,7 +1129,7 @@ impl App {
         // The bar isn't drawn again here, so the cursor goes back to the
         // address field, not left by the logo for each frame.
         let mut out = b"\x1b[?2026h\x1b7".to_vec();
-        if self.help {
+        if self.help || self.menu.is_some() {
             crate::splash::Splash::hide(&mut out);
         } else {
             splash.draw(&mut out, cols, rows, cell, 2, self.loading);
@@ -1032,6 +1139,7 @@ impl App {
         self.help_rect = None;
         self.modal_rects.clear();
         self.render_help(&mut out);
+        self.render_menu(&mut out);
         self.render_modal(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
@@ -1183,34 +1291,8 @@ impl App {
             log(format_args!("drew {drawn}"));
         }
         let cols = self.window.cols as usize;
-        let mut badge = String::new();
-        if let Some((note, _)) = &self.notice {
-            badge.push_str(note);
-            badge.push(' ');
-        } else if self.inspecting && !self.picks.is_empty() {
-            badge.push_str("Pick: click the element you mean, Esc to cancel ");
-        } else if self.inspecting {
-            badge.push_str("Inspect: click an element, Esc to stop ");
-        }
-        if self.loading {
-            const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
-            badge.push(SPINNER[step % SPINNER.len()]);
-        }
-        if let Some(downloading) = self.devtools.downloading() {
-            if !badge.is_empty() {
-                badge.push(' ');
-            }
-            badge.push_str(&downloading);
-        }
-        if (self.zoom - 1.0).abs() > 0.001 {
-            if !badge.is_empty() {
-                badge.push(' ');
-            }
-            badge.push_str(&format!("{:.0}%", self.zoom * 100.0));
-        }
-        let badge = badge.trim_end();
-        let badge = (!badge.is_empty()).then_some(badge);
+        let badge = self.badge();
+        let badge = (!badge.is_empty()).then_some(badge.as_str());
         match &mut self.find {
             _ if self.asking_quit => ui::render_question(&mut out, ui::QUIT_QUESTION, cols),
             Some(field) => {
@@ -1219,6 +1301,7 @@ impl App {
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge, self.chrome.windows()),
         }
         self.render_help(&mut out);
+        self.render_menu(&mut out);
         self.render_modal(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
@@ -1446,6 +1529,14 @@ impl App {
     /// Handle a key. Returns whether to quit.
     fn on_key(&mut self, key: Key) -> bool {
         let focused = self.bar.focused();
+        if let Some(menu) = &mut self.menu {
+            match menu.key(&key) {
+                menu::Outcome::Stay => {}
+                menu::Outcome::Close => self.close_menu(),
+                menu::Outcome::Choose(item) => self.choose(item),
+            }
+            return false;
+        }
         if self.inspecting && key.code == KeyCode::Esc {
             self.stop_inspecting();
             return false;
@@ -1514,6 +1605,7 @@ impl App {
                     None => self.chrome.key(&Key { code: KeyCode::Char('c'), ctrl: true, cmd: false, ..*key }),
                 }
             }
+            Action::Menu => self.open_menu(),
             Action::Inspect if self.inspecting => self.stop_inspecting(),
             Action::Inspect => {
                 self.close_help();
@@ -1529,6 +1621,125 @@ impl App {
             Action::Quit | Action::None => return false,
         }
         true
+    }
+
+    /// What the bar shows after the address: a note or the mode, the
+    /// spinner, a download's progress, the zoom. Empty when there's none.
+    fn badge(&self) -> String {
+        let mut badge = String::new();
+        if let Some((note, _)) = &self.notice {
+            badge.push_str(note);
+            badge.push(' ');
+        } else if self.inspecting && !self.picks.is_empty() {
+            badge.push_str("Pick: click the element you mean, Esc to cancel ");
+        } else if self.inspecting {
+            badge.push_str("Inspect: click an element, Esc to stop ");
+        }
+        if self.loading {
+            const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
+            badge.push(SPINNER[step % SPINNER.len()]);
+        }
+        if let Some(downloading) = self.devtools.downloading() {
+            if !badge.is_empty() {
+                badge.push(' ');
+            }
+            badge.push_str(&downloading);
+        }
+        if (self.zoom - 1.0).abs() > 0.001 {
+            if !badge.is_empty() {
+                badge.push(' ');
+            }
+            badge.push_str(&format!("{:.0}%", self.zoom * 100.0));
+        }
+        badge.trim_end().to_owned()
+    }
+
+    /// Draw the ⋮ menu, if it is open, below the bar.
+    fn render_menu(&mut self, out: &mut Vec<u8>) {
+        if let Some(old) = self.menu_rect.take() {
+            ui::blank(out, old);
+            // What the menu covered of the page is drawn again.
+            self.page.forget();
+        }
+        let Some(menu) = &self.menu else { return };
+        let inspect = self.bindings.keys_for(Action::Inspect).into_iter().next().unwrap_or_default();
+        let keys = |item| if item == menu::Item::SelectElement { inspect.clone() } else { String::new() };
+        self.menu_rect = Some(menu.render(out, self.window.cols, keys));
+    }
+
+    fn open_menu(&mut self) {
+        self.close_help();
+        self.menu = Some(Menu::default());
+        if let Some(splash) = &mut self.splash {
+            splash.again();
+        }
+    }
+
+    fn close_menu(&mut self) {
+        self.menu = None;
+        if let Some(splash) = &mut self.splash {
+            splash.again();
+        }
+    }
+
+    /// Do what the menu's item is for.
+    fn choose(&mut self, item: menu::Item) {
+        self.close_menu();
+        match item {
+            menu::Item::SelectElement => {
+                self.close_help();
+                self.inspecting = true;
+            }
+            menu::Item::ViewSource => {
+                self.source_request = Some(self.chrome.evaluate_value(SOURCE));
+            }
+            menu::Item::Network => {
+                self.network_request = Some(self.chrome.evaluate_value(TIMINGS));
+            }
+        }
+    }
+
+    /// Open `html`, the page's source, in the user's editor in this pane, as
+    /// git does for a commit message: kb gives the terminal to the editor and
+    /// takes it back when the editor exits. The file is kb's own and private,
+    /// and is gone afterwards.
+    fn view_source(&mut self, html: &str) {
+        let folder = match crate::files::private_temp_dir("kb-source-") {
+            Ok(folder) => folder,
+            Err(error) => return self.note(&format!("Couldn't save the source: {error}")),
+        };
+        let path = folder.join(source_name(&self.url));
+        if let Err(error) = crate::files::write_new(&path, html.as_bytes(), 0o600) {
+            let _ = std::fs::remove_dir_all(&folder);
+            return self.note(&format!("Couldn't save the source: {error}"));
+        }
+        let editor = ["VISUAL", "EDITOR"]
+            .iter()
+            .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
+            .unwrap_or_else(|| "vi".to_owned());
+        INPUT_PAUSED.store(true, Ordering::SeqCst);
+        term::leave();
+        // Through the shell, as $EDITOR can carry arguments (code --wait);
+        // the file is passed as $1, never read as part of the command.
+        let status =
+            std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&path).status();
+        let _ = term::enter();
+        INPUT_PAUSED.store(false, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&folder);
+        self.clear();
+        self.draw(true);
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => self.note(&format!("{editor} ended: {status}")),
+            Err(error) => self.note(&format!("Couldn't start {editor}: {error}")),
+        }
+    }
+
+    /// What a column of the top bar holds, as it is drawn now.
+    fn bar_hit(&self, col: usize) -> Hit {
+        let badge = self.badge();
+        ui::hit(col, self.window.cols as usize, self.chrome.windows(), (!badge.is_empty()).then_some(badge.as_str()))
     }
 
     /// Show a short note at the right of the bar.
@@ -1586,6 +1797,24 @@ impl App {
             if let Some((x, y)) = self.pointer_next.take() {
                 self.ask_pointer(x, y);
             }
+            return true;
+        }
+        if self.source_request == Some(id) {
+            self.source_request = None;
+            match message["result"]["result"]["value"].as_str() {
+                Some(html) => {
+                    let html = html.to_owned();
+                    self.view_source(&html);
+                }
+                None => self.note("Couldn't read the page's source"),
+            }
+            return true;
+        }
+        if self.network_request == Some(id) {
+            self.network_request = None;
+            let lines = network_lines(&message["result"]["result"]["value"], self.devtools.failed_requests());
+            self.panel = Some(lines);
+            self.open_help();
             return true;
         }
         if self.describe_request == Some(id) {
@@ -1679,6 +1908,27 @@ impl App {
         if (self.dialog.is_some() || self.picker.is_some()) && !held {
             return self.modal_mouse(mouse);
         }
+        // The menu takes the mouse while it is open: an item chooses, and a
+        // click anywhere else closes it.
+        if let (true, Some(rect)) = (self.menu.is_some(), self.menu_rect) {
+            let (cell_w, cell_h) = self.cell();
+            let (col, row) = if self.pixel_mouse {
+                (mouse.x as usize / cell_w.max(1) as usize + 1, mouse.y as usize / cell_h.max(1) as usize + 1)
+            } else {
+                (mouse.x as usize, mouse.y as usize)
+            };
+            let Some(menu) = &mut self.menu else { return false };
+            match mouse.kind {
+                MouseKind::Move => return menu.hover(rect, col, row),
+                MouseKind::Press => match menu.click(rect, col, row) {
+                    menu::Outcome::Stay => {}
+                    menu::Outcome::Close => self.close_menu(),
+                    menu::Outcome::Choose(item) => self.choose(item),
+                },
+                _ => {}
+            }
+            return true;
+        }
         // A click closes the help, and does nothing else.
         if self.help {
             if mouse.kind == MouseKind::Press {
@@ -1724,11 +1974,15 @@ impl App {
         if py < cell_h && self.buttons == 0 {
             let col = (px / cell_w) as usize + 1;
             if mouse.kind == MouseKind::Move {
-                let shape = match ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
+                let shape = match self.bar_hit(col) {
                     Hit::Address(_) => "text",
-                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Close | Hit::PreviousWindow | Hit::NextWindow => {
-                        "pointer"
-                    }
+                    Hit::Back
+                    | Hit::Forward
+                    | Hit::Reload
+                    | Hit::Menu
+                    | Hit::Close
+                    | Hit::PreviousWindow
+                    | Hit::NextWindow => "pointer",
                     Hit::Nothing => "default",
                 };
                 self.set_pointer(shape);
@@ -1736,17 +1990,18 @@ impl App {
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
                 return false;
             }
-            if ui::hit(col, self.window.cols as usize, self.chrome.windows()) == Hit::Close {
+            if self.bar_hit(col) == Hit::Close {
                 self.close_window();
                 return true;
             }
+            let hit = self.bar_hit(col);
             if let Some(field) = &mut self.find {
-                if let Hit::Address(offset) = ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
+                if let Hit::Address(offset) = hit {
                     field.click(offset);
                 }
                 return true;
             }
-            match ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
+            match self.bar_hit(col) {
                 Hit::Back => self.chrome.back(),
                 Hit::Forward => self.chrome.forward(),
                 Hit::Reload if self.loading => self.chrome.stop(),
@@ -1755,6 +2010,7 @@ impl App {
                 Hit::Address(_) => self.bar.focus(),
                 Hit::PreviousWindow => self.switch_window(-1),
                 Hit::NextWindow => self.switch_window(1),
+                Hit::Menu => self.open_menu(),
                 Hit::Close | Hit::Nothing => {}
             }
             return true;
@@ -1844,6 +2100,37 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_network_box_puts_the_slowest_first() {
+        let timings = serde_json::json!({
+            "first_byte": 120.0, "ready": 800.0, "load": 0.0, "bytes": 20_000,
+            "resources": [
+                {"url": "https://cdn.test/app.js", "kind": "script", "ms": 840.0, "bytes": 240_000},
+                {"url": "https://other.test/font.woff2", "kind": "css", "ms": 95.5, "bytes": 0},
+                {"url": "https://site.test/logo.png", "kind": "img", "ms": 300.0, "bytes": 12_000},
+            ],
+        });
+        let lines = network_lines(&timings, 2);
+        assert_eq!(lines[0], format!("{}Network performance", ui::TITLE_LINE));
+        assert_eq!(lines[1], "first byte 0.12 s · DOM ready 0.80 s · loaded not yet");
+        assert_eq!(lines[2], "4 requests · 272 KB over the network · 2 failed");
+        assert_eq!(lines[5], " 0.84 s    240 KB  script  cdn.test/app.js");
+        assert_eq!(lines[6], " 0.30 s     12 KB  img     site.test/logo.png");
+        // Cached, or another site's that hides its size.
+        assert_eq!(lines[7], " 0.10 s         –  css     other.test/font.woff2");
+        // A page with no timings yet still gets a box.
+        let empty = network_lines(&serde_json::Value::Null, 0);
+        assert_eq!(empty[2], "1 requests · 0 bytes over the network");
+    }
+
+    #[test]
+    fn source_is_named_for_its_site() {
+        assert_eq!(source_name("https://www.example.com/a/b?c"), "www.example.com.html");
+        assert_eq!(source_name("http://localhost:3000/"), "localhost_3000.html");
+        assert_eq!(source_name("file:///tmp/a.html"), "page.html");
+        assert_eq!(source_name("https://../../etc/"), "page.html");
+    }
 
     #[test]
     fn pick_waits_at_most_a_minute_and_answers_with_the_details() {

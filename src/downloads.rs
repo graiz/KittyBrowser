@@ -159,7 +159,7 @@ impl Downloads {
 }
 
 /// A size as people read it: "11 bytes", "240 KB", "4.2 MB".
-fn size(bytes: u64) -> String {
+pub fn size(bytes: u64) -> String {
     match unit(bytes) {
         (_, "bytes") if bytes == 1 => "1 byte".to_owned(),
         (_, "bytes") => format!("{bytes} bytes"),

@@ -19,6 +19,7 @@ mod headless;
 mod history;
 mod keys;
 mod mcp;
+mod menu;
 mod modal;
 mod picker;
 mod secrets;

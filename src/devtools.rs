@@ -2523,6 +2523,11 @@ impl Devtools {
         self.active = Some(Instant::now());
     }
 
+    /// How many of the page's requests failed, for the network box.
+    pub fn failed_requests(&self) -> usize {
+        self.requests.iter().filter(|request| request.failed()).count()
+    }
+
     /// What the bar shows while files download: "Downloading 4.2 of 20 MB".
     pub fn downloading(&self) -> Option<String> {
         self.downloads.bar()
