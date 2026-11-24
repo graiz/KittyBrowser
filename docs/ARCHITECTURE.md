@@ -296,9 +296,12 @@ The page and its tiles are placed with a z-index below -1,073,741,824, which
 the protocol defines as under text and under cells with a background colour
 of their own. So the help box (Ctrl+/) is ordinary coloured text drawn over
 the page, and blanking its cells shows the page again. The startup logo
-(`splash.rs`) is a separate image above the page, animated by sending a new
-frame every 60 ms for 12 seconds; the light's path is the ring's ellipse,
-measured from the logo, dimmed where it passes behind the sphere.
+(`splash.rs`) is a separate image above the page. While a page loads it is
+animated by sending a new frame every 60 ms; otherwise it is drawn once, as
+the plain logo, and costs nothing. The light's path is the ring's ellipse,
+measured from the logo, dimmed where it passes behind the sphere. Drawing a
+frame moves the cursor, and the bar isn't drawn with it, so each frame is
+drawn between a save and a restore of the cursor.
 
 Find (Command+F) puts a second such field in the address bar's place; each
 change runs `window.find` in the page, which selects the match and scrolls

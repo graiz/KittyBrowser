@@ -84,6 +84,13 @@ Notable changes to kb. The format follows
   Before, it read the field back, and a page that takes the files in its
   change handler and empties the field was reported as given no files; now
   kb says the page cleared the field.
+- The logo on a blank kb holds still, and spins only while a page loads,
+  until that page is drawn. Before, it spun for 12 seconds whether or not
+  anything was loading, then stopped with the light parked on its ring;
+  at rest it now shows the plain logo.
+- The cursor stays in the address field while the logo shows. Each frame of
+  the logo left it beside the logo until the bar was next drawn, so it
+  jumped back and forth.
 
 ## 0.2.0 — 2026-11-21
 
