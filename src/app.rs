@@ -132,24 +132,51 @@ const HOVER: &str = "((x, y) => { let e = document.elementFromPoint(x, y); \
 const UNHOVER: &str = "document.getElementById('__kb_inspect')?.remove(); delete globalThis.__kbInspected;";
 
 /// Describe the element inspected, as lines for a box: what it is, a
-/// selector for it, its box and its main styles.
-const DESCRIBE: &str = "(function() { const el = this, s = getComputedStyle(el), r = el.getBoundingClientRect(), n = Math.round; \
-  const name = el.localName + (el.id ? '#' + el.id : '') + [...el.classList].map(c => '.' + c).join(''); \
-  const path = []; \
-  for (let e = el; e && e.nodeType === 1; e = e.parentElement) { \
-    if (e.id && document.querySelectorAll('#' + CSS.escape(e.id)).length === 1) { path.unshift('#' + CSS.escape(e.id)); break; } \
-    const same = e.parentElement ? [...e.parentElement.children].filter(c => c.localName === e.localName) : []; \
-    path.unshift(e.localName + (same.length > 1 ? ':nth-of-type(' + (same.indexOf(e) + 1) + ')' : '')); \
-    if (e.localName === 'body') break; } \
-  const text = (el.innerText || el.value || '').replace(/\\s+/g, ' ').trim(); \
-  const lines = ['\\u0002' + name, 'selector  ' + path.join(' > '), \
-    'size      ' + n(r.width) + 'x' + n(r.height) + ' at ' + n(r.left + scrollX) + ',' + n(r.top + scrollY), \
-    'display   ' + s.display + (s.position !== 'static' ? ', position ' + s.position : ''), \
-    'font      ' + s.fontSize + ' ' + s.fontWeight + ' ' + s.fontFamily.split(',')[0], \
-    'color     ' + s.color + ' on ' + s.backgroundColor, \
-    'margin    ' + s.margin, 'padding   ' + s.padding]; \
-  if (text) lines.push('text      ' + (text.length > 60 ? text.slice(0, 60) + '…' : text)); \
-  return {lines, selector: path.join(' > ')}; }).call(globalThis.__kbInspected)";
+/// selector for it, its box and its main styles, and where it links to.
+///
+/// The selector is the sturdiest one that matches it alone: its own id,
+/// then attributes people put there to find it (test ids, names, labels, a
+/// link's address), then class names a person wrote; failing those, one of
+/// them on a close ancestor with the element's own; only then its position
+/// below the nearest ancestor that has one. Names a build made (React's `:r3:`, hashes such as
+/// `css-9l1wwj`) are skipped, as they change with the next build.
+const DESCRIBE: &str = r#"(function() { const el = this, s = getComputedStyle(el), r = el.getBoundingClientRect(), n = Math.round;
+  const name = el.localName + (el.id ? '#' + el.id : '') + [...el.classList].map(c => '.' + c).join('');
+  const one = sel => { try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
+  const quoted = v => '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+  const madeId = v => /^:|\d{4,}|^[0-9a-f-]{8,}$/i.test(v) || /[a-z]\d[a-z]|\d[a-z]\d/i.test(v);
+  const madeClass = v => /^(css|sc|jsx|emotion|svelte|tw)-/.test(v) || /[a-z]\d|\d[a-z]/i.test(v);
+  const own = e => { const tag = e.localName, out = [];
+    if (e.id && !madeId(e.id)) out.push('#' + CSS.escape(e.id));
+    for (const a of ['data-testid', 'data-test', 'data-test-id', 'data-qa', 'data-cy', 'name', 'aria-label', 'alt', 'title']) {
+      const v = e.getAttribute(a); if (v && v.length < 80) out.push(tag + '[' + a + '=' + quoted(v) + ']'); }
+    const href = tag === 'a' && e.getAttribute('href');
+    if (href && href.length < 200) out.push('a[href=' + quoted(href) + ']');
+    const classes = [...e.classList].filter(c => !madeClass(c)).slice(0, 2);
+    if (classes.length) out.push(tag + classes.map(c => '.' + CSS.escape(c)).join(''));
+    return out; };
+  let selector = own(el).find(one);
+  for (let up = el.parentElement, depth = 0; !selector && up && up !== document.documentElement && depth < 8; up = up.parentElement, depth++)
+    for (const a of own(up).filter(one)) { selector = [...own(el), el.localName].map(b => a + ' ' + b).find(one); if (selector) break; }
+  if (!selector) { const path = [];
+    for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
+      const named = e !== el && own(e).find(one);
+      if (named) { path.unshift(named); break; }
+      const same = e.parentElement ? [...e.parentElement.children].filter(c => c.localName === e.localName) : [];
+      path.unshift(e.localName + (same.length > 1 ? ':nth-of-type(' + (same.indexOf(e) + 1) + ')' : ''));
+      if (e.localName === 'body') break; }
+    selector = path.join(' > '); }
+  const text = (el.innerText || el.value || '').replace(/\s+/g, ' ').trim();
+  const lines = ['\u0002' + name, 'selector  ' + selector,
+    'size      ' + n(r.width) + 'x' + n(r.height) + ' at ' + n(r.left + scrollX) + ',' + n(r.top + scrollY),
+    'display   ' + s.display + (s.position !== 'static' ? ', position ' + s.position : ''),
+    'font      ' + s.fontSize + ' ' + s.fontWeight + ' ' + s.fontFamily.split(',')[0],
+    'color     ' + s.color + ' on ' + s.backgroundColor,
+    'margin    ' + s.margin, 'padding   ' + s.padding];
+  if (text) lines.push('text      ' + (text.length > 60 ? text.slice(0, 60) + '…' : text));
+  const link = el.closest('a[href]');
+  if (link) lines.push('link      ' + link.href);
+  return {lines, selector}; }).call(globalThis.__kbInspected)"#;
 
 /// How long `kb ctl pick` waits for the user: at most a minute, so that the
 /// answer comes before `kb ctl` stops waiting for it.

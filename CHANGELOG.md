@@ -20,6 +20,12 @@ Notable changes to kb. The format follows
   gets its selector, size, styles and text. The skill tells agents to ask
   for a pick rather than guess a selector from the user's words. The page
   gets no click; Esc cancels; it waits up to a minute.
+- The selector inspect mode and `pick` give for an element is the sturdiest
+  that matches it alone: its id, a test id, name or label, a link's address,
+  or class names a person wrote, on it or a close ancestor, before falling
+  back to its position. Ids and classes a build made (React's `:r3:`,
+  `css-9l1wwj`) are skipped. A link, or anything in one, also gets a `link`
+  line with where it goes.
 - `storage` only reads, and clearing is its own command, `clear-storage`,
   so an MCP client can allow one and ask before the other. `storage --clear`
   fails and names the new command.
