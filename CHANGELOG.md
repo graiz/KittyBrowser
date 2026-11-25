@@ -6,6 +6,8 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-24
+
 - The address field turns orange while an agent drives kb: any command over
   `kb ctl` or MCP lights it, and it goes back 10 seconds after the last.
   Typing in the field shows it as usual; `kb list` doesn't count.
