@@ -19,6 +19,7 @@ mod headless;
 mod history;
 mod keys;
 mod mcp;
+mod menu;
 mod modal;
 mod picker;
 mod secrets;
@@ -55,7 +56,7 @@ keys (kb keys lists them all; Ctrl+/ in kb shows them):
   Ctrl+[ / Ctrl+]   back / forward (also Alt+Left / Alt+Right, the mouse's buttons)
   Cmd+R or Ctrl+R   reload
   Ctrl+Shift+C      inspect an element
-  Ctrl+Q            quit (the ✕ at the right of the bar asks first)
+  Ctrl+Q            quit (Quit browser in the ⋮ menu asks first)
 Everything else, and the mouse, goes to the page.";
 
 fn usage_error(message: &str) -> ! {

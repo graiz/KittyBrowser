@@ -279,7 +279,9 @@ fn run_modes(
         }
         bench.settle(Duration::from_millis(500))?;
 
-        term::write(graphics::DELETE);
+        let mut wipe = Vec::new();
+        graphics::delete_all(&mut wipe);
+        term::write(&wipe);
         let mut tiles = graphics::Tiles::default();
         let mut layers = crate::term::layers::Layers::default();
         let mut samples = Vec::new();
@@ -309,7 +311,7 @@ fn run_modes(
                     if layers.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2).is_none() {
                         // What the app would do: the frame as it came.
                         layers.forget();
-                        out.extend_from_slice(graphics::DELETE);
+                        graphics::delete_all(&mut out);
                         graphics::put_png(&mut out, &data, cols, rows);
                         odd.push(graphics::png_size(&data));
                     }

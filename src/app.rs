@@ -9,14 +9,17 @@ use crate::dialog::{self, Dialog, Kind};
 use crate::engine::chrome::{self, Chrome, PageEvent};
 use crate::history::History;
 use crate::keys::{Action, Bindings};
+use crate::menu::{self, Menu};
 use crate::picker::{self, Picker};
+use crate::term::cursor::{self, AgentCursor};
 use crate::term::input::{Button, Event, Key, KeyCode, Mouse, MouseKind, Parser};
 use crate::term::page::{PageImage, Route};
 use crate::term::size::{self, Window};
 use crate::term::{self, graphics};
 use crate::ui::{self, AddressBar, Edit, Hit};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -130,24 +133,163 @@ const HOVER: &str = "((x, y) => { let e = document.elementFromPoint(x, y); \
 const UNHOVER: &str = "document.getElementById('__kb_inspect')?.remove(); delete globalThis.__kbInspected;";
 
 /// Describe the element inspected, as lines for a box: what it is, a
-/// selector for it, its box and its main styles.
-const DESCRIBE: &str = "(function() { const el = this, s = getComputedStyle(el), r = el.getBoundingClientRect(), n = Math.round; \
-  const name = el.localName + (el.id ? '#' + el.id : '') + [...el.classList].map(c => '.' + c).join(''); \
-  const path = []; \
-  for (let e = el; e && e.nodeType === 1; e = e.parentElement) { \
-    if (e.id && document.querySelectorAll('#' + CSS.escape(e.id)).length === 1) { path.unshift('#' + CSS.escape(e.id)); break; } \
-    const same = e.parentElement ? [...e.parentElement.children].filter(c => c.localName === e.localName) : []; \
-    path.unshift(e.localName + (same.length > 1 ? ':nth-of-type(' + (same.indexOf(e) + 1) + ')' : '')); \
-    if (e.localName === 'body') break; } \
-  const text = (el.innerText || el.value || '').replace(/\\s+/g, ' ').trim(); \
-  const lines = ['\\u0002' + name, 'selector  ' + path.join(' > '), \
-    'size      ' + n(r.width) + 'x' + n(r.height) + ' at ' + n(r.left + scrollX) + ',' + n(r.top + scrollY), \
-    'display   ' + s.display + (s.position !== 'static' ? ', position ' + s.position : ''), \
-    'font      ' + s.fontSize + ' ' + s.fontWeight + ' ' + s.fontFamily.split(',')[0], \
-    'color     ' + s.color + ' on ' + s.backgroundColor, \
-    'margin    ' + s.margin, 'padding   ' + s.padding]; \
-  if (text) lines.push('text      ' + (text.length > 60 ? text.slice(0, 60) + '…' : text)); \
-  return {lines, selector: path.join(' > ')}; }).call(globalThis.__kbInspected)";
+/// selector for it, its box and its main styles, and where it links to.
+///
+/// The selector is the sturdiest one that matches it alone: its own id,
+/// then attributes people put there to find it (test ids, names, labels, a
+/// link's address), then class names a person wrote; failing those, one of
+/// them on a close ancestor with the element's own; only then its position
+/// below the nearest ancestor that has one. Names a build made (React's `:r3:`, hashes such as
+/// `css-9l1wwj`) are skipped, as they change with the next build.
+const DESCRIBE: &str = r#"(function() { const el = this, s = getComputedStyle(el), r = el.getBoundingClientRect(), n = Math.round;
+  const name = el.localName + (el.id ? '#' + el.id : '') + [...el.classList].map(c => '.' + c).join('');
+  const one = sel => { try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
+  const quoted = v => '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+  const madeId = v => /^:|\d{4,}|^[0-9a-f-]{8,}$/i.test(v) || /[a-z]\d[a-z]|\d[a-z]\d/i.test(v);
+  const madeClass = v => /^(css|sc|jsx|emotion|svelte|tw)-/.test(v) || /[a-z]\d|\d[a-z]/i.test(v);
+  const own = e => { const tag = e.localName, out = [];
+    if (e.id && !madeId(e.id)) out.push('#' + CSS.escape(e.id));
+    for (const a of ['data-testid', 'data-test', 'data-test-id', 'data-qa', 'data-cy', 'name', 'aria-label', 'alt', 'title']) {
+      const v = e.getAttribute(a); if (v && v.length < 80) out.push(tag + '[' + a + '=' + quoted(v) + ']'); }
+    const href = tag === 'a' && e.getAttribute('href');
+    if (href && href.length < 200) out.push('a[href=' + quoted(href) + ']');
+    const classes = [...e.classList].filter(c => !madeClass(c)).slice(0, 2);
+    if (classes.length) out.push(tag + classes.map(c => '.' + CSS.escape(c)).join(''));
+    return out; };
+  let selector = own(el).find(one);
+  for (let up = el.parentElement, depth = 0; !selector && up && up !== document.documentElement && depth < 8; up = up.parentElement, depth++)
+    for (const a of own(up).filter(one)) { selector = [...own(el), el.localName].map(b => a + ' ' + b).find(one); if (selector) break; }
+  if (!selector) { const path = [];
+    for (let e = el; e && e.nodeType === 1; e = e.parentElement) {
+      const named = e !== el && own(e).find(one);
+      if (named) { path.unshift(named); break; }
+      const same = e.parentElement ? [...e.parentElement.children].filter(c => c.localName === e.localName) : [];
+      path.unshift(e.localName + (same.length > 1 ? ':nth-of-type(' + (same.indexOf(e) + 1) + ')' : ''));
+      if (e.localName === 'body') break; }
+    selector = path.join(' > '); }
+  const text = (el.innerText || el.value || '').replace(/\s+/g, ' ').trim();
+  const lines = ['\u0002' + name, 'selector  ' + selector,
+    'size      ' + n(r.width) + 'x' + n(r.height) + ' at ' + n(r.left + scrollX) + ',' + n(r.top + scrollY),
+    'display   ' + s.display + (s.position !== 'static' ? ', position ' + s.position : ''),
+    'font      ' + s.fontSize + ' ' + s.fontWeight + ' ' + s.fontFamily.split(',')[0],
+    'color     ' + s.color + ' on ' + s.backgroundColor,
+    'margin    ' + s.margin, 'padding   ' + s.padding];
+  if (text) lines.push('text      ' + (text.length > 60 ? text.slice(0, 60) + '…' : text));
+  const link = el.closest('a[href]');
+  if (link) lines.push('link      ' + link.href);
+  return {lines, selector}; }).call(globalThis.__kbInspected)"#;
+
+/// How long the address field stays orange after an agent's last command.
+const DRIVEN: Duration = Duration::from_secs(10);
+
+/// How long `kb ctl pick` waits for the user: at most a minute, so that the
+/// answer comes before `kb ctl` stops waiting for it.
+const PICK_WAIT: f64 = 60.0;
+
+/// `kb ctl pick --timeout`, in seconds.
+fn pick_timeout(seconds: Option<&str>) -> Result<Duration, String> {
+    let seconds = match seconds {
+        Some(seconds) => {
+            seconds.parse::<f64>().ok().filter(|s| *s > 0.0).ok_or("--timeout needs a number of seconds")?
+        }
+        None => PICK_WAIT,
+    };
+    Ok(Duration::from_secs_f64(seconds.min(PICK_WAIT)))
+}
+
+/// The answer to `kb ctl pick`: the element's details as inspect mode
+/// shows them, its name first.
+fn picked(lines: &[String]) -> String {
+    let lines: Vec<String> = lines
+        .iter()
+        .map(|line| match line.strip_prefix('\u{2}') {
+            Some(name) => format!("picked {name}"),
+            None => line.clone(),
+        })
+        .collect();
+    lines.join("\n")
+}
+
+/// Set while an editor has the terminal, so that the input thread leaves
+/// the keys typed to it alone.
+static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// The page's HTML as it is now, with its doctype, for View source.
+const SOURCE: &str = "(document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + \
+  document.documentElement.outerHTML";
+
+/// The page's timings, from its own Performance API, for Network
+/// performance: when its first byte came, when the DOM was ready and when
+/// it loaded (0 for not yet), in milliseconds from the start, and each
+/// resource's time and bytes over the network.
+const TIMINGS: &str = "(() => { const nav = performance.getEntriesByType('navigation')[0]; \
+  const resources = performance.getEntriesByType('resource').map(r => ({url: r.name, kind: r.initiatorType, \
+    ms: r.duration, bytes: r.transferSize})); \
+  return {first_byte: nav ? nav.responseStart : 0, ready: nav ? nav.domContentLoadedEventEnd : 0, \
+    load: nav ? nav.loadEventEnd : 0, bytes: nav ? nav.transferSize : 0, resources}; })()";
+
+/// The slowest requests the network box lists.
+const SLOWEST: usize = 12;
+
+/// The lines of the network box, from `TIMINGS`, with `failed` requests
+/// counted by kb: the page's milestones, its totals, and its slowest
+/// requests.
+fn network_lines(timings: &serde_json::Value, failed: usize) -> Vec<String> {
+    let number = |value: &serde_json::Value| value.as_f64().unwrap_or(0.0);
+    let seconds = |ms: f64| format!("{:.2} s", ms / 1000.0);
+    let mut lines = vec![format!("{}Network performance", ui::TITLE_LINE)];
+    let milestone =
+        |name: &str, ms: f64| format!("{name} {}", if ms > 0.0 { seconds(ms) } else { "not yet".to_owned() });
+    lines.push(
+        [
+            milestone("first byte", number(&timings["first_byte"])),
+            milestone("DOM ready", number(&timings["ready"])),
+            milestone("loaded", number(&timings["load"])),
+        ]
+        .join(" · "),
+    );
+    let mut resources: Vec<&serde_json::Value> = timings["resources"].as_array().into_iter().flatten().collect();
+    let bytes = number(&timings["bytes"]) + resources.iter().map(|r| number(&r["bytes"])).sum::<f64>();
+    let mut totals =
+        format!("{} requests · {} over the network", resources.len() + 1, crate::downloads::size(bytes as u64));
+    if failed > 0 {
+        let _ = std::fmt::Write::write_fmt(&mut totals, format_args!(" · {failed} failed"));
+    }
+    lines.push(totals);
+    if !resources.is_empty() {
+        resources.sort_by(|a, b| number(&b["ms"]).total_cmp(&number(&a["ms"])));
+        lines.push(String::new());
+        lines.push("\tSlowest first (time, bytes, kind, address)".to_owned());
+        for resource in resources.iter().take(SLOWEST) {
+            // Nothing counted: from the cache, or another site that keeps
+            // its sizes to itself.
+            let size = match number(&resource["bytes"]) as u64 {
+                0 => "–".to_owned(),
+                bytes => crate::downloads::size(bytes),
+            };
+            let url = resource["url"].as_str().unwrap_or("");
+            let url = url.split_once("://").map_or(url, |(_, rest)| rest);
+            let kind = resource["kind"].as_str().unwrap_or("");
+            lines.push(format!("{:>7}  {size:>8}  {kind:<6}  {url}", seconds(number(&resource["ms"]))));
+        }
+        if resources.len() > SLOWEST {
+            lines.push(format!("\t…and {} more", resources.len() - SLOWEST));
+        }
+    }
+    lines.push(String::new());
+    lines.push("\tkb ctl network lists every request. Any key closes this.".to_owned());
+    lines
+}
+
+/// A file name for a page's source, from its host: example.com.html.
+fn source_name(url: &str) -> String {
+    let host: String = ui::host_of(url)
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect();
+    let host = host.trim_matches('.');
+    format!("{}.html", if host.is_empty() { "page" } else { host })
+}
 
 enum Msg {
     Term(Event),
@@ -273,11 +415,33 @@ struct App {
     /// picked.
     inspecting: bool,
     describe_request: Option<u64>,
+    /// `kb ctl pick` waiting for the user to pick an element, and when each
+    /// gives up.
+    picks: Vec<(control::Reply, Instant)>,
+    /// Whether a pick turned inspect mode on, so that it goes off with it;
+    /// and whether the element being described was clicked for a pick.
+    inspect_for_pick: bool,
+    describe_for_pick: bool,
+    /// When an agent last sent a command: the field is orange for DRIVEN
+    /// after it, and its cursor fades out after that. And the cursor, once
+    /// an agent has come.
+    agent_last: Option<Instant>,
+    cursor: Option<AgentCursor>,
+    /// The ⋮ menu while it is open, and where it was drawn.
+    menu: Option<Menu>,
+    menu_rect: Option<ui::Rect>,
+    /// The page's HTML, asked for to view it in the user's editor; the
+    /// editor while it has the pane, and the command it was; and the
+    /// folders the source went in, removed as kb quits.
+    source_request: Option<u64>,
+    editor: Option<(std::process::Child, String)>,
+    source_folders: Vec<std::path::PathBuf>,
+    /// The page's timings, asked for to show its network performance.
+    network_request: Option<u64>,
     /// Lines for the box, in place of the help: an element's details.
     panel: Option<Vec<String>>,
     /// Whether the bar is asking to quit, after a click on its close
     /// button, and whether it was answered yes.
-    asking_quit: bool,
     quit_clicked: bool,
     /// What the page is asking the user, shown over it: a dialog, and a
     /// file chooser (under the dialog, if both), and where they were drawn.
@@ -335,9 +499,20 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     std::thread::spawn(move || {
         let mut parser = Parser::default();
         let mut buf = [0; 4096];
-        let mut stdin = std::io::stdin().lock();
         loop {
-            match stdin.read(&mut buf) {
+            // While an editor has the terminal, its keys are its own. The
+            // descriptor is read directly, with nothing buffered in between,
+            // so that what poll says is there is all there is.
+            if INPUT_PAUSED.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+            let mut ready = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut ready, 1, 50) } <= 0 || INPUT_PAUSED.load(Ordering::SeqCst) {
+                continue;
+            }
+            let read = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+            match usize::try_from(read) {
                 Ok(n) if n > 0 => {
                     for event in parser.feed(&buf[..n]) {
                         if input.send(Msg::Term(event)).is_err() {
@@ -345,6 +520,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         }
                     }
                 }
+                // Interrupted, as by a resize: read again.
+                Err(_) if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
                 _ => {
                     let _ = input.send(Msg::TermClosed);
                     return;
@@ -407,8 +584,18 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         dark: options.dark,
         inspecting: false,
         describe_request: None,
+        picks: Vec::new(),
+        inspect_for_pick: false,
+        describe_for_pick: false,
+        agent_last: None,
+        cursor: None,
+        menu: None,
+        menu_rect: None,
+        source_request: None,
+        editor: None,
+        source_folders: Vec::new(),
+        network_request: None,
         panel: None,
-        asking_quit: false,
         quit_clicked: false,
         dialog: None,
         picker: None,
@@ -452,6 +639,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             app.splash.as_ref().filter(|_| app.by_file).and_then(|splash| splash.wait(app.loading))
         {
             wait = wait.min(splash_wait);
+        }
+        if app.agent_last.is_some() {
+            wait = wait.min(cursor::FRAME_GAP);
         }
         match rx.recv_timeout(wait) {
             Ok(message) => messages.push(message),
@@ -499,20 +689,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         break;
                     }
                     app.modal_key(&key);
-                    redraw = true;
-                }
-                Msg::Term(Event::Key(key)) if app.asking_quit => {
-                    match key.code {
-                        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                            quit = Some(Ok(()));
-                            break;
-                        }
-                        _ if app.bindings.action(&key, false) == Some(Action::Quit) => {
-                            quit = Some(Ok(()));
-                            break;
-                        }
-                        KeyCode::Char('n' | 'N') | KeyCode::Esc => app.asking_quit = false,
-                        _ => {}
+                    if app.quit_clicked {
+                        quit = Some(Ok(()));
+                        break;
                     }
                     redraw = true;
                 }
@@ -567,7 +746,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     if !ok && app.page.lost(id) {
                         // The terminal dropped an image the page was drawn
                         // with: start again from the whole page.
-                        term::write(graphics::DELETE);
+                        let mut out = Vec::new();
+                        graphics::delete_all(&mut out);
+                        term::write(&out);
                         new_frame = true;
                     }
                     if id == graphics::FILE_QUERY_ID {
@@ -588,12 +769,35 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 }
                 Msg::Control(request) => {
                     log(format_args!("control: {} {}", request.command, request.args));
+                    // An agent is at work: the address field says so, in
+                    // orange, until it has been quiet a while. kb list asking
+                    // every kb how it is isn't working this one.
+                    if request.args["listing"] != true {
+                        app.agent_last = Some(Instant::now());
+                        app.bar.set_driven(true);
+                        redraw = true;
+                    }
                     if request.command == "quit" {
                         let cancelled = app.devtools.cancel_downloads(&mut app.chrome);
                         let _ =
                             request.reply.send(Ok(Output::Text(format!("kb is quitting{cancelled}; its pane closes"))));
                         quit = Some(Ok(()));
                         break;
+                    }
+                    if request.command == "pick" {
+                        match pick_timeout(request.args["timeout"].as_str()) {
+                            Ok(timeout) => {
+                                // Ended with the pick only if the pick began it.
+                                app.inspect_for_pick |= !app.inspecting;
+                                app.start_inspecting();
+                                app.picks.push((request.reply, Instant::now() + timeout));
+                                redraw = true;
+                            }
+                            Err(error) => {
+                                let _ = request.reply.send(Err(error));
+                            }
+                        }
+                        continue;
                     }
                     if request.command == "scheme" {
                         let _ = request.reply.send(app.set_scheme(request.args["scheme"].as_str().unwrap_or("")));
@@ -723,6 +927,14 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 app.notice = None;
                 redraw = true;
             }
+            if app.bar.driven() && app.agent_last.is_none_or(|at| at.elapsed() >= DRIVEN) {
+                app.bar.set_driven(false);
+                redraw = true;
+            }
+            if app.picks.iter().any(|(_, deadline)| *deadline <= Instant::now()) {
+                app.expire_picks();
+                redraw = true;
+            }
             if let Some(window) = size::window().filter(|w| *w != app.window) {
                 app.window = window;
                 if window.width_px == 0 {
@@ -740,6 +952,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         if app.by_file && app.splash.as_ref().is_some_and(|splash| splash.due(app.loading)) {
             app.draw_splash();
         }
+        app.move_cursor();
+        app.check_editor();
         // One frame per gap, or all of them while the page is in use.
         while app.chrome.ack_pending() && app.last_ack.elapsed() >= app.frame_gap() {
             app.chrome.ack();
@@ -751,6 +965,17 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     socket.remove();
     app.history.save();
     app.page.close();
+    // Quit while the editor had the pane: the source was a copy.
+    if let Some((mut child, _)) = app.editor.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+        INPUT_PAUSED.store(false, Ordering::SeqCst);
+        term::lend(false);
+        let _ = term::enter();
+    }
+    for folder in app.source_folders.drain(..) {
+        let _ = std::fs::remove_dir_all(folder);
+    }
     app.devtools.cancel_downloads(&mut app.chrome);
     app.chrome.close();
     result
@@ -784,8 +1009,9 @@ impl App {
     /// Wipe the screen, images included. The help and what the page asks,
     /// if shown, are drawn again with the next frame.
     fn clear(&mut self) {
-        term::write(b"\x1b[2J");
-        term::write(graphics::DELETE);
+        let mut out = b"\x1b[2J".to_vec();
+        graphics::delete_all(&mut out);
+        term::write(&out);
         self.page.forget();
         self.help_rect = None;
         self.modal_rects.clear();
@@ -907,9 +1133,9 @@ impl App {
             (Action::Devtools, "Chrome DevTools (start kb with --devtools)"),
             (Action::NextWindow, "next window: a popup, a new tab (‹ › in the bar)"),
             (Action::PreviousWindow, "previous window"),
-            (Action::CloseWindow, "close the window shown (✕); on the last one, ask to quit"),
+            (Action::CloseWindow, "close the window shown; on the last one, ask to quit"),
             (Action::Help, "this help"),
-            (Action::Quit, "quit (the ✕ in the bar closes a popup, or asks first)"),
+            (Action::Quit, "quit (Quit browser in the ⋮ menu asks first)"),
         ]
         .map(|(action, does)| (keys(action), does))
         .into_iter()
@@ -972,7 +1198,7 @@ impl App {
         // The bar isn't drawn again here, so the cursor goes back to the
         // address field, not left by the logo for each frame.
         let mut out = b"\x1b[?2026h\x1b7".to_vec();
-        if self.help {
+        if self.help || self.menu.is_some() {
             crate::splash::Splash::hide(&mut out);
         } else {
             splash.draw(&mut out, cols, rows, cell, 2, self.loading);
@@ -982,6 +1208,7 @@ impl App {
         self.help_rect = None;
         self.modal_rects.clear();
         self.render_help(&mut out);
+        self.render_menu(&mut out);
         self.render_modal(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
@@ -1010,11 +1237,18 @@ impl App {
 
     /// Close the window shown, as a browser's tab closes; the last one is
     /// kb itself, so that asks first.
+    /// Ask before quitting, in a dialog as a page's confirm is asked.
+    fn ask_quit(&mut self) {
+        self.close_menu();
+        self.close_help();
+        self.dialog = Some(Dialog::quit());
+    }
+
     fn close_window(&mut self) {
         if self.chrome.windows().1 > 1 {
             self.chrome.close_window();
         } else {
-            self.asking_quit = true;
+            self.ask_quit();
         }
     }
 
@@ -1133,40 +1367,16 @@ impl App {
             log(format_args!("drew {drawn}"));
         }
         let cols = self.window.cols as usize;
-        let mut badge = String::new();
-        if let Some((note, _)) = &self.notice {
-            badge.push_str(note);
-            badge.push(' ');
-        } else if self.inspecting {
-            badge.push_str("Inspect: click an element, Esc to stop ");
-        }
-        if self.loading {
-            const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
-            badge.push(SPINNER[step % SPINNER.len()]);
-        }
-        if let Some(downloading) = self.devtools.downloading() {
-            if !badge.is_empty() {
-                badge.push(' ');
-            }
-            badge.push_str(&downloading);
-        }
-        if (self.zoom - 1.0).abs() > 0.001 {
-            if !badge.is_empty() {
-                badge.push(' ');
-            }
-            badge.push_str(&format!("{:.0}%", self.zoom * 100.0));
-        }
-        let badge = badge.trim_end();
-        let badge = (!badge.is_empty()).then_some(badge);
+        let badge = self.badge();
+        let badge = (!badge.is_empty()).then_some(badge.as_str());
         match &mut self.find {
-            _ if self.asking_quit => ui::render_question(&mut out, ui::QUIT_QUESTION, cols),
             Some(field) => {
                 ui::render_bar(&mut out, field, cols, self.loading, Some("Find"), badge, self.chrome.windows())
             }
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge, self.chrome.windows()),
         }
         self.render_help(&mut out);
+        self.render_menu(&mut out);
         self.render_modal(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
@@ -1240,6 +1450,8 @@ impl App {
     fn sync_questions(&mut self) -> bool {
         let mut changed = false;
         match self.devtools.dialog().cloned() {
+            // kb's own question is answered first; the page's waits for it.
+            Some(_) if self.dialog.as_ref().is_some_and(|dialog| dialog.id == dialog::QUIT) => {}
             Some(question) if self.dialog.as_ref().map(|dialog| dialog.id) != Some(question.id) => {
                 if let Asking::Dialog { kind, message, default } = &question.asking {
                     self.dialog =
@@ -1249,6 +1461,8 @@ impl App {
                 }
             }
             Some(_) => {}
+            // kb's own question isn't the page's to take away.
+            None if self.dialog.as_ref().is_some_and(|dialog| dialog.id == dialog::QUIT) => {}
             None => changed |= self.dialog.take().is_some(),
         }
         match self.devtools.chooser().cloned() {
@@ -1293,6 +1507,10 @@ impl App {
 
     fn answer_dialog(&mut self, ok: bool, typed: Option<String>) {
         let Some(dialog) = self.dialog.take() else { return };
+        if dialog.id == dialog::QUIT {
+            self.quit_clicked = ok;
+            return;
+        }
         self.devtools.answer_dialog(dialog.id, ok, typed, &mut self.chrome);
         if dialog.kind() == Kind::BeforeUnload && !ok {
             // Staying: the page and its address are as they were.
@@ -1394,6 +1612,24 @@ impl App {
     /// Handle a key. Returns whether to quit.
     fn on_key(&mut self, key: Key) -> bool {
         let focused = self.bar.focused();
+        if self.menu.is_some() {
+            // The keys that opened it close it, and quitting still quits.
+            match self.bindings.action(&key, true) {
+                Some(Action::Quit) => return true,
+                Some(Action::Menu) => {
+                    self.close_menu();
+                    return false;
+                }
+                _ => {}
+            }
+            let Some(menu) = &mut self.menu else { return false };
+            match menu.key(&key) {
+                menu::Outcome::Stay => {}
+                menu::Outcome::Close => self.close_menu(),
+                menu::Outcome::Choose(item) => self.choose(item),
+            }
+            return false;
+        }
         if self.inspecting && key.code == KeyCode::Esc {
             self.stop_inspecting();
             return false;
@@ -1462,11 +1698,9 @@ impl App {
                     None => self.chrome.key(&Key { code: KeyCode::Char('c'), ctrl: true, cmd: false, ..*key }),
                 }
             }
+            Action::Menu => self.open_menu(),
             Action::Inspect if self.inspecting => self.stop_inspecting(),
-            Action::Inspect => {
-                self.close_help();
-                self.inspecting = true;
-            }
+            Action::Inspect => self.start_inspecting(),
             Action::Devtools => {
                 if let Err(error) = self.chrome.open_devtools() {
                     self.note(&format!("{error} (Ctrl+Shift+C inspects without it)"));
@@ -1477,6 +1711,217 @@ impl App {
             Action::Quit | Action::None => return false,
         }
         true
+    }
+
+    /// What the bar shows after the address: a note or the mode, the
+    /// spinner, a download's progress, the zoom. Empty when there's none.
+    fn badge(&self) -> String {
+        let mut badge = String::new();
+        if let Some((note, _)) = &self.notice {
+            badge.push_str(note);
+            badge.push(' ');
+        } else if self.inspecting && !self.picks.is_empty() {
+            badge.push_str("Pick: click the element you mean, Esc to cancel ");
+        } else if self.inspecting {
+            badge.push_str("Inspect: click an element, Esc to stop ");
+        }
+        if self.loading {
+            const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let step = (self.started.elapsed().as_millis() / TICK.as_millis()) as usize;
+            badge.push(SPINNER[step % SPINNER.len()]);
+        }
+        if let Some(downloading) = self.devtools.downloading() {
+            if !badge.is_empty() {
+                badge.push(' ');
+            }
+            badge.push_str(&downloading);
+        }
+        if (self.zoom - 1.0).abs() > 0.001 {
+            if !badge.is_empty() {
+                badge.push(' ');
+            }
+            badge.push_str(&format!("{:.0}%", self.zoom * 100.0));
+        }
+        badge.trim_end().to_owned()
+    }
+
+    /// Draw the ⋮ menu, if it is open, below the bar.
+    fn render_menu(&mut self, out: &mut Vec<u8>) {
+        if let Some(old) = self.menu_rect.take() {
+            // Blank cells show the page image under them again.
+            ui::blank(out, old);
+        }
+        let Some(menu) = &self.menu else { return };
+        let first = |action| self.bindings.keys_for(action).into_iter().next().unwrap_or_default();
+        let (inspect, quit) = (first(Action::Inspect), first(Action::Quit));
+        let keys = |item| match item {
+            menu::Item::SelectElement => inspect.clone(),
+            menu::Item::Quit => quit.clone(),
+            _ => String::new(),
+        };
+        self.menu_rect = Some(menu.render(out, self.window.cols, keys));
+    }
+
+    fn open_menu(&mut self) {
+        self.close_help();
+        self.menu = Some(Menu::default());
+        if let Some(splash) = &mut self.splash {
+            splash.again();
+        }
+    }
+
+    fn close_menu(&mut self) {
+        self.menu = None;
+        if let Some(splash) = &mut self.splash {
+            splash.again();
+        }
+    }
+
+    /// Do what the menu's item is for.
+    fn choose(&mut self, item: menu::Item) {
+        self.close_menu();
+        match item {
+            menu::Item::SelectElement => self.start_inspecting(),
+            menu::Item::ViewSource => {
+                self.source_request = Some(self.chrome.evaluate_value(SOURCE));
+            }
+            menu::Item::Network => {
+                self.network_request = Some(self.chrome.evaluate_value(TIMINGS));
+            }
+            menu::Item::Quit => self.ask_quit(),
+        }
+    }
+
+    /// Open `html`, the page's source, in the user's editor in this pane, as
+    /// git does for a commit message: kb lends the terminal to the editor and
+    /// takes it back when the editor exits (see `check_editor`). Meanwhile kb
+    /// goes on working, agents' commands included; only its drawing waits.
+    /// The file is kb's own and private, and stays until kb quits, as an
+    /// editor that opens a window of its own and exits at once still reads
+    /// it.
+    fn view_source(&mut self, html: &str) {
+        if self.editor.is_some() {
+            return;
+        }
+        let folder = match crate::files::private_temp_dir("kb-source-") {
+            Ok(folder) => folder,
+            Err(error) => return self.note(&format!("Couldn't save the source: {error}")),
+        };
+        let path = folder.join(source_name(&self.url));
+        let written = crate::files::write_new(&path, html.as_bytes(), 0o600);
+        self.source_folders.push(folder);
+        if let Err(error) = written {
+            return self.note(&format!("Couldn't save the source: {error}"));
+        }
+        let editor = ["VISUAL", "EDITOR"]
+            .iter()
+            .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
+            .unwrap_or_else(|| "vi".to_owned());
+        INPUT_PAUSED.store(true, Ordering::SeqCst);
+        term::leave();
+        term::lend(true);
+        // Through the shell, as $EDITOR can carry arguments (code --wait);
+        // the file is passed as $1, never read as part of the command.
+        let child =
+            std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&path).spawn();
+        match child {
+            Ok(child) => self.editor = Some((child, editor)),
+            Err(error) => {
+                self.take_terminal_back();
+                self.note(&format!("Couldn't start {editor}: {error}"));
+            }
+        }
+    }
+
+    /// Take the pane back once the editor has exited.
+    fn check_editor(&mut self) {
+        let Some((child, editor)) = &mut self.editor else { return };
+        let status = match child.try_wait() {
+            Ok(None) => return,
+            Ok(Some(status)) => Ok(status),
+            Err(error) => Err(error),
+        };
+        let editor = editor.clone();
+        self.editor = None;
+        self.take_terminal_back();
+        match status {
+            Ok(status) if status.success() => {}
+            Ok(status) => self.note(&format!("{editor} ended: {status}")),
+            Err(error) => self.note(&format!("Lost track of {editor}: {error}")),
+        }
+    }
+
+    fn take_terminal_back(&mut self) {
+        term::lend(false);
+        let _ = term::enter();
+        INPUT_PAUSED.store(false, Ordering::SeqCst);
+        self.clear();
+        self.draw(true);
+    }
+
+    /// Draw the agent's cursor for this moment, or take it away: it shows
+    /// while the address field is orange and fades out after, and steps
+    /// aside for anything drawn over the page.
+    fn move_cursor(&mut self) {
+        let now = Instant::now();
+        let since = self.agent_last.map(|at| now.saturating_duration_since(at));
+        let opacity = match since {
+            Some(since) if since < DRIVEN => 1.0,
+            Some(since) if since < DRIVEN + cursor::FADE => {
+                1.0 - (since - DRIVEN).as_secs_f64() / cursor::FADE.as_secs_f64()
+            }
+            _ => 0.0,
+        };
+        if opacity == 0.0 {
+            self.agent_last = None;
+        }
+        let covered = self.splash.is_some()
+            || self.help
+            || self.menu.is_some()
+            || self.dialog.is_some()
+            || self.picker.is_some()
+            || self.inspecting;
+        let point = self.devtools.take_agent_point().map(|point| self.to_pane(point));
+        // It first appears in the middle of the page, if not where the
+        // agent is acting.
+        let middle = self.to_pane((self.viewport.0 as f64 / 2.0, self.viewport.1 as f64 / 2.0));
+        let cell = self.cell();
+        let cursor = self.cursor.get_or_insert_with(|| AgentCursor::new(point.unwrap_or(middle)));
+        if let Some(point) = point {
+            cursor.aim(point);
+        }
+        let mut out = Vec::new();
+        if opacity > 0.0 && !covered {
+            if cursor.due() {
+                cursor.draw(&mut out, cell, opacity);
+            }
+        } else {
+            cursor.hide(&mut out);
+        }
+        if !out.is_empty() {
+            // Placing it moves the terminal's cursor: put that back where
+            // the bar left it, in the address field if it is being typed in.
+            let mut wrapped = b"\x1b7".to_vec();
+            wrapped.extend_from_slice(&out);
+            wrapped.extend_from_slice(b"\x1b8");
+            term::write(&wrapped);
+        }
+    }
+
+    /// A point on the page, in CSS pixels in the window, as pixels from the
+    /// pane's top left.
+    fn to_pane(&self, (x, y): (f64, f64)) -> (f64, f64) {
+        let (cell_w, cell_h) = self.cell();
+        let (cell_w, cell_h) = (cell_w as f64, cell_h as f64);
+        let across = self.shown.0 as f64 * cell_w / self.viewport.0.max(1) as f64;
+        let down = self.shown.1 as f64 * cell_h / self.viewport.1.max(1) as f64;
+        (x * across, cell_h + y * down)
+    }
+
+    /// What a column of the top bar holds, as it is drawn now.
+    fn bar_hit(&self, col: usize) -> Hit {
+        let badge = self.badge();
+        ui::hit(col, self.window.cols as usize, self.chrome.windows(), (!badge.is_empty()).then_some(badge.as_str()))
     }
 
     /// Show a short note at the right of the bar.
@@ -1499,7 +1944,34 @@ impl App {
 
     fn stop_inspecting(&mut self) {
         self.inspecting = false;
+        self.inspect_for_pick = false;
         self.chrome.evaluate(UNHOVER);
+        for (reply, _) in self.picks.drain(..) {
+            let _ = reply.send(Err("the user stopped picking without choosing an element".to_owned()));
+        }
+    }
+
+    /// Fail the picks no one answered in time, and leave inspect mode once
+    /// none is waiting.
+    fn expire_picks(&mut self) {
+        let now = Instant::now();
+        self.picks.retain(|(reply, deadline)| {
+            if *deadline <= now {
+                let _ = reply.send(Err(
+                    "nothing was picked in time; ask the user to click the element in the pane, then pick again"
+                        .to_owned(),
+                ));
+            }
+            *deadline > now
+        });
+        if self.picks.is_empty() && self.inspecting && self.inspect_for_pick {
+            self.stop_inspecting();
+        }
+    }
+
+    fn start_inspecting(&mut self) {
+        self.close_help();
+        self.inspecting = true;
     }
 
     /// Handle Chrome's reply to a request the app made. Returns whether it
@@ -1515,12 +1987,51 @@ impl App {
             }
             return true;
         }
+        if self.source_request == Some(id) {
+            self.source_request = None;
+            match message["result"]["result"]["value"].as_str() {
+                Some(html) => {
+                    let html = html.to_owned();
+                    self.view_source(&html);
+                }
+                None => self.note("Couldn't read the page's source"),
+            }
+            return true;
+        }
+        if self.network_request == Some(id) {
+            self.network_request = None;
+            let lines = network_lines(&message["result"]["result"]["value"], self.devtools.failed_requests());
+            self.panel = Some(lines);
+            self.open_help();
+            return true;
+        }
         if self.describe_request == Some(id) {
             self.describe_request = None;
             let value = &message["result"]["result"]["value"];
             let mut lines: Vec<String> =
                 value["lines"].as_array().into_iter().flatten().filter_map(|l| l.as_str().map(str::to_owned)).collect();
             if lines.is_empty() {
+                // Nothing was under the click: keep picking for whoever waits.
+                self.inspecting = !self.picks.is_empty();
+                self.inspect_for_pick = self.inspecting && self.describe_for_pick;
+                return true;
+            }
+            if self.describe_for_pick && self.picks.is_empty() {
+                // The pick ran out as the user clicked: it isn't theirs to
+                // copy, nor to show.
+                self.chrome.evaluate(UNHOVER);
+                return true;
+            }
+            if self.describe_for_pick {
+                // Asked for by kb ctl pick: the answer goes there, and the
+                // user's clipboard is left alone.
+                let answer = picked(&lines);
+                for (reply, _) in self.picks.drain(..) {
+                    let _ = reply.send(Ok(Output::Text(answer.clone())));
+                }
+                self.chrome.evaluate(UNHOVER);
+                let selector = value["selector"].as_str().unwrap_or("the element");
+                self.note(&format!("Picked {selector}"));
                 return true;
             }
             if let Some(selector) = value["selector"].as_str() {
@@ -1592,6 +2103,27 @@ impl App {
         if (self.dialog.is_some() || self.picker.is_some()) && !held {
             return self.modal_mouse(mouse);
         }
+        // The menu takes the mouse while it is open: an item chooses, and a
+        // click anywhere else closes it.
+        if let (true, Some(rect)) = (self.menu.is_some(), self.menu_rect) {
+            let (cell_w, cell_h) = self.cell();
+            let (col, row) = if self.pixel_mouse {
+                (mouse.x as usize / cell_w.max(1) as usize + 1, mouse.y as usize / cell_h.max(1) as usize + 1)
+            } else {
+                (mouse.x as usize, mouse.y as usize)
+            };
+            let Some(menu) = &mut self.menu else { return false };
+            match mouse.kind {
+                MouseKind::Move => return menu.hover(rect, col, row),
+                MouseKind::Press => match menu.click(rect, col, row) {
+                    menu::Outcome::Stay => {}
+                    menu::Outcome::Close => self.close_menu(),
+                    menu::Outcome::Choose(item) => self.choose(item),
+                },
+                _ => {}
+            }
+            return true;
+        }
         // A click closes the help, and does nothing else.
         if self.help {
             if mouse.kind == MouseKind::Press {
@@ -1619,27 +2151,13 @@ impl App {
         if matches!(mouse.button, Some(Button::Back | Button::Forward)) {
             return false;
         }
-        // While the bar asks whether to quit, only its buttons answer.
-        if self.asking_quit {
-            let answer = (py < cell_h).then(|| ui::answer((px / cell_w) as usize + 1, ui::QUIT_QUESTION)).flatten();
-            match mouse.kind {
-                MouseKind::Move => self.set_pointer(if answer.is_some() { "pointer" } else { "default" }),
-                MouseKind::Press if mouse.button == Some(Button::Left) => match answer {
-                    Some(true) => self.quit_clicked = true,
-                    Some(false) => self.asking_quit = false,
-                    None => {}
-                },
-                _ => {}
-            }
-            return true;
-        }
         // A drag that began on the page stays with the page.
         if py < cell_h && self.buttons == 0 {
             let col = (px / cell_w) as usize + 1;
             if mouse.kind == MouseKind::Move {
-                let shape = match ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
+                let shape = match self.bar_hit(col) {
                     Hit::Address(_) => "text",
-                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Close | Hit::PreviousWindow | Hit::NextWindow => {
+                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Menu | Hit::PreviousWindow | Hit::NextWindow => {
                         "pointer"
                     }
                     Hit::Nothing => "default",
@@ -1649,17 +2167,14 @@ impl App {
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
                 return false;
             }
-            if ui::hit(col, self.window.cols as usize, self.chrome.windows()) == Hit::Close {
-                self.close_window();
-                return true;
-            }
+            let hit = self.bar_hit(col);
             if let Some(field) = &mut self.find {
-                if let Hit::Address(offset) = ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
+                if let Hit::Address(offset) = hit {
                     field.click(offset);
                 }
                 return true;
             }
-            match ui::hit(col, self.window.cols as usize, self.chrome.windows()) {
+            match self.bar_hit(col) {
                 Hit::Back => self.chrome.back(),
                 Hit::Forward => self.chrome.forward(),
                 Hit::Reload if self.loading => self.chrome.stop(),
@@ -1668,7 +2183,8 @@ impl App {
                 Hit::Address(_) => self.bar.focus(),
                 Hit::PreviousWindow => self.switch_window(-1),
                 Hit::NextWindow => self.switch_window(1),
-                Hit::Close | Hit::Nothing => {}
+                Hit::Menu => self.open_menu(),
+                Hit::Nothing => {}
             }
             return true;
         }
@@ -1706,6 +2222,10 @@ impl App {
                 MouseKind::Press if mouse.button == Some(Button::Left) => {
                     self.chrome.evaluate(&format!("{HOVER}({x}, {y})"));
                     self.inspecting = false;
+                    self.inspect_for_pick = false;
+                    // Whose click it was is settled now, should the pick
+                    // run out before the details come.
+                    self.describe_for_pick = !self.picks.is_empty();
                     self.describe_request = Some(self.chrome.evaluate_value(DESCRIBE));
                 }
                 _ => {}
@@ -1757,6 +2277,47 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_network_box_puts_the_slowest_first() {
+        let timings = serde_json::json!({
+            "first_byte": 120.0, "ready": 800.0, "load": 0.0, "bytes": 20_000,
+            "resources": [
+                {"url": "https://cdn.test/app.js", "kind": "script", "ms": 840.0, "bytes": 240_000},
+                {"url": "https://other.test/font.woff2", "kind": "css", "ms": 95.5, "bytes": 0},
+                {"url": "https://site.test/logo.png", "kind": "img", "ms": 300.0, "bytes": 12_000},
+            ],
+        });
+        let lines = network_lines(&timings, 2);
+        assert_eq!(lines[0], format!("{}Network performance", ui::TITLE_LINE));
+        assert_eq!(lines[1], "first byte 0.12 s · DOM ready 0.80 s · loaded not yet");
+        assert_eq!(lines[2], "4 requests · 272 KB over the network · 2 failed");
+        assert_eq!(lines[5], " 0.84 s    240 KB  script  cdn.test/app.js");
+        assert_eq!(lines[6], " 0.30 s     12 KB  img     site.test/logo.png");
+        // Cached, or another site's that hides its size.
+        assert_eq!(lines[7], " 0.10 s         –  css     other.test/font.woff2");
+        // A page with no timings yet still gets a box.
+        let empty = network_lines(&serde_json::Value::Null, 0);
+        assert_eq!(empty[2], "1 requests · 0 bytes over the network");
+    }
+
+    #[test]
+    fn source_is_named_for_its_site() {
+        assert_eq!(source_name("https://www.example.com/a/b?c"), "www.example.com.html");
+        assert_eq!(source_name("http://localhost:3000/"), "localhost_3000.html");
+        assert_eq!(source_name("file:///tmp/a.html"), "page.html");
+        assert_eq!(source_name("https://../../etc/"), "page.html");
+    }
+
+    #[test]
+    fn pick_waits_at_most_a_minute_and_answers_with_the_details() {
+        assert_eq!(pick_timeout(None).unwrap(), Duration::from_secs(60));
+        assert_eq!(pick_timeout(Some("5")).unwrap(), Duration::from_secs(5));
+        assert_eq!(pick_timeout(Some("600")).unwrap(), Duration::from_secs(60));
+        assert!(pick_timeout(Some("0")).is_err() && pick_timeout(Some("soon")).is_err());
+        let lines = ["\u{2}button#signup.primary", "selector  #signup", "text      Sign up"].map(str::to_owned);
+        assert_eq!(picked(&lines), "picked button#signup.primary\nselector  #signup\ntext      Sign up");
+    }
 
     #[test]
     fn a_wheel_tick_scrolls_the_page_one_row_of_the_pane() {

@@ -335,6 +335,12 @@ pub const COMMANDS: &[Command] = &[
         params: &[required("key", "key name")],
     },
     Command {
+        name: "pick",
+        effect: Effect::Reads,
+        help: "Ask the user to point at an element in the pane: kb goes into inspect mode, the user clicks the element they mean, and the answer is a CSS selector for it (on the selector line, ready for click, text, box and the rest), with its size, styles and text, and for a link where it goes; to see what they pointed at, follow with screenshot --selector and that selector. Use it when the user can show something more easily than describe it (\"this button\", \"that box looks wrong\"): ask them to pick it, then run kb ctl pick. Fails if the user presses Esc, if nothing is picked in time, or in a headless kb, which has no pane to point in. The page gets no click.",
+        params: &[number("timeout", "SECONDS", "how long to wait for the user (default 60, at most 60; to wait longer, pick again)")],
+    },
+    Command {
         name: "wait",
         effect: Effect::Reads,
         help: "Wait until an element matching a selector exists, or until one of the matching elements contains some text, or until none is left. Keeps waiting across page loads.",

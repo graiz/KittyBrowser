@@ -10,7 +10,22 @@
 const IMAGE_ID: u32 = 1;
 
 /// Removes every image from the screen.
-pub const DELETE: &[u8] = b"\x1b_Ga=d,d=A,q=2\x1b\\";
+const DELETE: &[u8] = b"\x1b_Ga=d,d=A,q=2\x1b\\";
+
+/// How many times kb has told the terminal to drop every image, so that an
+/// image kept for later (the agent's cursor) knows to be sent again.
+static WIPES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Append the escape that drops every image, their data too.
+pub fn delete_all(out: &mut Vec<u8>) {
+    WIPES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    out.extend_from_slice(DELETE);
+}
+
+/// How many times every image has been dropped.
+pub fn wipes() -> u64 {
+    WIPES.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Where the page and the tiles over it sit relative to text. Below this
 /// threshold an image is drawn under text and under any cell with a

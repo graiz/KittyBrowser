@@ -34,6 +34,7 @@ src/files.rs           private folders and files: the data directory, frames, sc
 src/app.rs             the event loop: terminal input, Chrome's messages, drawing
 src/ui.rs              the top bar: buttons, address field, completion, find
 src/history.rs         visited pages, for address completion
+src/menu.rs            the ⋮ menu: select element, view source, network performance
 src/modal.rs           boxes drawn over the page: a grid of cells, frames, buttons
 src/dialog.rs          a page's alert, confirm, prompt or leave-site dialog, asked in the pane
 src/picker.rs          the file chooser a page opens, asked in the pane

@@ -17,6 +17,16 @@ messages from Chrome; the main thread owns all state, receives both on one
 channel, and is the only one that writes to the terminal or to Chrome. It
 draws only when something changed. There is no async runtime.
 
+The input thread polls the terminal and reads its descriptor directly,
+with no buffer in between, so it can be paused: View source (in the ⋮
+menu) hands the terminal to `$EDITOR` the way git does for a commit
+message, and while the editor runs the input thread reads nothing, or it
+would take keys typed to the editor. The main thread goes on meanwhile,
+answering Chrome and agents' commands, with the terminal lent (`term::lend`):
+what it would draw is dropped, and once the editor exits it takes the
+terminal back and draws everything again. The source file stays until kb
+quits, as an editor that opens a window of its own exits at once.
+
 Each pass of the loop drains everything waiting on the channel. If several
 frames arrived, only the newest is drawn, a burst of mouse moves collapses
 to the last one, and a burst of wheel ticks to one scroll by all of them.
@@ -70,7 +80,7 @@ Things it takes care of itself:
   same settings (the domains kb listens to, the user agent, the viewport,
   the colour scheme) and its own headless window, fitted like the first.
   Only the window shown sends events the app looks at. When it closes, by
-  itself, with ✕, or with Back on its first page, the one before it is
+  itself, with Ctrl+W, or with Back on its first page, the one before it is
   shown again.
 - **Looking like a browser.** Sites such as Google answer what looks like a
   robot with captchas, and headless Chrome looks like one in four ways, each
@@ -279,10 +289,22 @@ Command never arrives.
 
 ## UI (`src/ui.rs`)
 
-Row 1 is ordinary terminal text: three buttons and the address field. The
-field is a line editor (cursor, word moves, select-all on focus, horizontal
-scroll) with no terminal dependencies, so it is unit tested directly. Hit
-testing maps a column to a button or a position in the field.
+Row 1 is ordinary terminal text: three buttons, the address field, then
+the window switcher (‹ 2/3 ›), the badge (a note, the spinner, a
+download's progress, the zoom) and ⋮ at the end, the field giving up room to the
+rest down to a few columns. The field is a line editor (cursor, word
+moves, select-all on focus, horizontal scroll) with no terminal
+dependencies, so it is unit tested directly. Hit testing maps a column to a
+button or a position in the field, from the same layout the bar is drawn
+with. While an agent sends commands, the field is orange, until 10 s
+after the last one: the user sees whenever an agent is reading or working
+the page. With it, an orange pointer (`term/cursor.rs`) drifts to where
+the agent clicks, hovers or types: an image kb places above the page and
+below text, moved by placing it again with pixel offsets about 30 times a
+second while it shows, never part of the page. ⋮ opens the menu (`menu.rs`), as Chrome's does: Select element,
+View source, Network performance, Quit browser. Network performance reads the page's
+own Performance API (navigation and resource timings), not the DevTools
+network events, which carry no timings in kb's record.
 Zoom (Ctrl+= and Ctrl+-) divides the CSS viewport by the zoom, so Chrome
 lays the page out narrower or wider, as a desktop browser does. Chrome's
 screencast renders at the launch scale whatever scale is asked for (both a

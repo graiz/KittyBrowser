@@ -6,6 +6,34 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- The address field turns orange while an agent drives kb: any command over
+  `kb ctl` or MCP lights it, and it goes back 10 seconds after the last.
+  Typing in the field shows it as usual; `kb list` doesn't count.
+- An orange pointer shows the agent at work on the page: it drifts to where
+  the agent clicks, hovers or types, wiggles slowly there between commands,
+  and fades away a second after the address field goes back. kb draws it in
+  the terminal, over the page, so the page, its screenshots and its HTML
+  never see it.
+- The bar ends with Chrome's ⋮ menu, in place of ✕ (Alt+F or Alt+E opens
+  it from the keyboard): Select element (inspect mode), View source (the
+  page's HTML, as it is now, opened in `$EDITOR` in the pane, as git opens
+  one for a commit message), Network performance (when the page's first
+  byte came, when it was ready and loaded, its requests and bytes, and its
+  slowest requests), and Quit browser, which asks first in a dialog like
+  a page's confirm, as Ctrl+W on the last window does now too. A popup
+  is closed with Ctrl+W, or Back on its first page. The window switcher now
+  comes before the badge, so a download's progress sits next to ⋮.
+- `kb ctl pick` asks the user to point at an element: kb goes into inspect
+  mode in the pane, the user clicks the element they mean, and the agent
+  gets its selector, size, styles and text. The skill tells agents to ask
+  for a pick rather than guess a selector from the user's words. The page
+  gets no click; Esc cancels; it waits up to a minute.
+- The selector inspect mode and `pick` give for an element is the sturdiest
+  that matches it alone: its id, a test id, name or label, a link's address,
+  or class names a person wrote, on it or a close ancestor, before falling
+  back to its position. Ids and classes a build made (React's `:r3:`,
+  `css-9l1wwj`) are skipped. A link, or anything in one, also gets a `link`
+  line with where it goes.
 - `storage` only reads, and clearing is its own command, `clear-storage`,
   so an MCP client can allow one and ask before the other. `storage --clear`
   fails and names the new command.

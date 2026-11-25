@@ -57,7 +57,9 @@ release, with credit if you'd like it.
   or if kb was killed, by the next kb to start. `kb ctl screenshot` saves
   to `kb-screenshots-UID` in the temporary directory, mode 0700 (or, should
   another user have made that first, a new folder no one can guess); with
-  `--out`, the file you name, written as `cp` would.
+  `--out`, the file you name, written as `cp` would. View source (in the ⋮ menu)
+  copies the page's HTML to a new folder under the temporary directory,
+  mode 0700, for your editor, and removes it as kb quits.
 - **Page text in your terminal.** Titles, page text, console messages and
   errors printed by `kb ctl`, `kb list` and kb itself have their control
   characters shown as �, so a page can't send your terminal escape

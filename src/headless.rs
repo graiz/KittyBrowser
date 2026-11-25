@@ -191,6 +191,12 @@ fn browse(options: Options, profile: &std::path::Path, claim: control::Claim) ->
                         let _ = request.reply.send(Ok(Output::Text(format!("kb is quitting{cancelled}"))));
                         break;
                     }
+                    "pick" => {
+                        let _ = request
+                            .reply
+                            .send(Err("a headless kb has no pane for the user to point in; pick needs a kb in a pane"
+                                .to_owned()));
+                    }
                     "window" => {
                         let (answer, event) = crate::devtools::window(&request.args, &mut chrome, &devtools);
                         let _ = request.reply.send(answer);

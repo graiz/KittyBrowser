@@ -612,6 +612,14 @@ enum Then {
     Screenshot(ShotSize),
 }
 
+/// Where in the element a click aims, if not its middle.
+fn then_at(then: &Then) -> Option<(f64, f64)> {
+    match then {
+        Then::Click(_, _, at) => *at,
+        _ => None,
+    }
+}
+
 /// How big a screenshot comes out.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ShotSize {
@@ -1028,6 +1036,9 @@ pub struct Devtools {
     /// The request for a file field's attributes, and the question it's for.
     accept_request: Option<(u64, u64)>,
     downloads: Downloads,
+    /// Where on the page, in CSS pixels in the window, the agent last
+    /// clicked, hovered or typed, for the pane to show its cursor there.
+    agent_point: Option<(f64, f64)>,
     /// A download that ended, for the bar's note.
     download_note: Option<String>,
     /// The question put to the page to learn whether it can answer at all,
@@ -2523,6 +2534,16 @@ impl Devtools {
         self.active = Some(Instant::now());
     }
 
+    /// Where the agent last acted on the page, once: for the pane's cursor.
+    pub fn take_agent_point(&mut self) -> Option<(f64, f64)> {
+        self.agent_point.take()
+    }
+
+    /// How many of the page's requests failed, for the network box.
+    pub fn failed_requests(&self) -> usize {
+        self.requests.iter().filter(|request| request.failed()).count()
+    }
+
     /// What the bar shows while files download: "Downloading 4.2 of 20 MB".
     pub fn downloading(&self) -> Option<String> {
         self.downloads.bar()
@@ -2690,6 +2711,11 @@ impl Devtools {
                         "the element has no size, so it isn't visible; it may be in a collapsed menu, or shown \
                          only at other widths (see: kb ctl box, kb ctl viewport)",
                     );
+                }
+                // The pane's agent cursor goes where this acts; a screenshot
+                // only looks.
+                if !matches!(then, Then::Screenshot(_)) {
+                    self.agent_point = Some(then_at(&then).map_or(middle, |(dx, dy)| (x + dx, y + dy)));
                 }
                 match then {
                     Then::Hover(selector) => {

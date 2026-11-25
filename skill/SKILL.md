@@ -105,6 +105,24 @@ picks `b` inside `a`'s shadow root, or inside the page in iframe `a`),
 `text=Some words` (the element showing them), `@N` (a number from `links`),
 or `:focus`.
 
+While you send commands, kb's address field turns orange, and it goes
+back 10 seconds after your last: the user can see when you're at work in
+their browser.
+
+## Asking the user to point
+
+When the user means something on the page ("this button", "that box is
+off", "the second card"), don't guess a selector from their words: ask them
+to show you. Say "click it in kb", then run `kb ctl pick`. kb goes into
+inspect mode in the pane, outlining what the mouse is over; the user's
+click picks the element (the page gets no click), and `pick` answers with
+its `selector` line, ready for `click`, `text`, `box`, `style` and the
+rest, with its size, styles and text (and a `link` line for a link). To
+see exactly what they pointed at, run `kb ctl screenshot --selector` with
+that selector. It waits up to a minute; if the user
+presses Esc, or nothing is picked, it fails and says so. It needs kb in a
+pane the user can see; a headless kb can't pick.
+
 ## Testing your own pages
 
 After each change:

@@ -1,5 +1,6 @@
 //! Everything that touches the terminal.
 
+pub mod cursor;
 pub mod graphics;
 pub mod input;
 pub mod layers;
@@ -63,7 +64,19 @@ pub fn drawable(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// Set while another program (an editor) has the terminal: kb goes on
+/// working, and what it would draw is dropped.
+static LENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lend the terminal to another program, or take it back.
+pub fn lend(lent: bool) {
+    LENT.store(lent, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub fn write(bytes: &[u8]) {
+    if LENT.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let mut out = io::stdout().lock();
     let _ = out.write_all(bytes);
     let _ = out.flush();
