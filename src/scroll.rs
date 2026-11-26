@@ -9,6 +9,15 @@ const PAUSE: Duration = Duration::from_millis(300);
 /// milliseconds.
 const START: f64 = 100.0;
 
+/// The least the glide sends at once, in pixels: less isn't seen, and
+/// would only cost Chrome a frame.
+const MIN_STEP: f64 = 0.5;
+
+/// How far short of `MIN_STEP` a step may still go: `next_due` says when
+/// one comes due, and a wake at that moment, a hair early by rounding,
+/// should find it.
+const SLACK: f64 = 0.01;
+
 /// Keeps a scroll on one axis, as browsers do for a trackpad. Fingers
 /// drawn down a trackpad drift a little sideways, and terminals report
 /// that drift as ticks left and right among the ticks down; sent on, they
@@ -104,7 +113,7 @@ impl Glide {
     pub fn due(&mut self, now: Instant) -> Option<f64> {
         self.start?;
         let step = self.target(now) - self.sent;
-        if step.abs() < 0.5 {
+        if step.abs() < MIN_STEP - SLACK {
             return None;
         }
         self.sent += step;
@@ -116,11 +125,27 @@ impl Glide {
         self.start.is_some() && self.ms(now) - self.last.0 < PAUSE.as_secs_f64() * 1000.0
     }
 
-    /// Whether the page still has some way to go, so `due` is worth asking.
-    pub fn gliding(&self, now: Instant) -> bool {
-        let speed = self.speed().abs();
-        let gliding_until = self.last.0 + if speed > 0.0 { self.lead / speed } else { 0.0 };
-        self.start.is_some() && (self.ms(now) < gliding_until || (self.target(now) - self.sent).abs() >= 0.5)
+    /// How long from `now` until `due` will have a step to send, or `None`
+    /// if it won't until the next tick. On a slow drag the page is owed
+    /// half a pixel only every 10 or 20 ms; asking `due` more often than
+    /// that would find nothing, and a loop that woke to ask would spin.
+    pub fn next_due(&self, now: Instant) -> Option<Duration> {
+        self.start?;
+        let behind = self.target(now) - self.sent;
+        if behind.abs() >= MIN_STEP - SLACK {
+            return Some(Duration::ZERO);
+        }
+        let speed = self.speed();
+        // The page stops a lead past the last tick; if that is less than
+        // a step on from where it was sent, there is nothing more.
+        let end = self.last.1 + self.lead.copysign(speed);
+        if speed == 0.0 || (end - self.sent).abs() < MIN_STEP - SLACK {
+            return None;
+        }
+        // The target moves on at `speed` until it reaches `end`: when it
+        // is a step past what was sent.
+        let at = self.last.0 + (self.sent + MIN_STEP.copysign(speed) - self.last.1) / speed;
+        Some(Duration::from_secs_f64((at - self.ms(now)).max(0.0) / 1000.0))
     }
 }
 
@@ -196,6 +221,95 @@ mod tests {
         let ticks = [(0, 1), (96, 1), (192, 1), (288, -1), (384, -1)];
         let steps = glide(&ticks, 14.0, 80);
         assert!(steps.iter().all(|step| step.abs() <= 14.0), "{steps:?}");
+    }
+
+    /// Run the glide as the app does: woken by each tick, and otherwise
+    /// only when `next_due` says, no sooner than 8 ms after the last step.
+    /// Returns what was sent and how many wakes found nothing to send.
+    fn run_like_the_app(ticks: &[(u64, i32)], row: f64, until_ms: u64) -> (Vec<f64>, usize) {
+        let mut glide = Glide::default();
+        let start = Instant::now();
+        // In tenths of a millisecond, to be finer than the glide.
+        let at = |tenths: u64| start + Duration::from_micros(tenths * 100);
+        let (mut sent, mut idle) = (Vec::new(), 0);
+        let (mut now, mut glided, mut ticks) = (0u64, 0u64, ticks.iter().peekable());
+        while now <= until_ms * 10 {
+            let mut ticked = false;
+            while let Some(&&(_, n)) = ticks.peek().filter(|(ms, _)| ms * 10 <= now) {
+                glide.tick(n, row, at(now));
+                ticks.next();
+                ticked = true;
+            }
+            if ticked || now - glided >= 80 {
+                match glide.due(at(now)) {
+                    Some(step) => {
+                        sent.push(step);
+                        glided = now;
+                    }
+                    None if !ticked => idle += 1,
+                    None => {}
+                }
+            }
+            let tick = ticks.peek().map(|(ms, _)| ms * 10);
+            let due = glide.next_due(at(now)).map(|due| {
+                let due = due.as_micros().div_ceil(100) as u64;
+                now + due.max((glided + 80).saturating_sub(now)).max(1)
+            });
+            now = match (tick, due) {
+                (Some(tick), Some(due)) => tick.min(due),
+                (tick, due) => match tick.or(due) {
+                    Some(next) => next,
+                    None => break,
+                },
+            };
+        }
+        (sent, idle)
+    }
+
+    #[test]
+    fn a_slow_drag_wakes_only_to_send() {
+        // A tick of 7 pixels every 280 ms: half a pixel is owed only every
+        // 20 ms, so most 8 ms steps would find nothing to send.
+        let ticks: Vec<(u64, i32)> = (0..10).map(|n| (n * 280, 1)).collect();
+        let (sent, idle) = run_like_the_app(&ticks, 7.0, 4000);
+        assert!(idle <= 2, "{idle} wakes sent nothing; sent {sent:?}");
+        // Still all of it: ten rows and the glide's one past them.
+        assert!((sent.iter().sum::<f64>() - 7.0 * 11.0).abs() < 0.5, "{sent:?}");
+        // And steadily, a little at a time, with no wait of more than
+        // half a pixel's worth before each step.
+        assert!(sent[2..].iter().all(|step| step.abs() <= 1.0), "{sent:?}");
+    }
+
+    #[test]
+    fn a_fast_drag_still_steps_every_8_ms() {
+        // A tick of 14 pixels every 30 ms: a step is owed at every chance.
+        let ticks: Vec<(u64, i32)> = (0..20).map(|n| (n * 30, 1)).collect();
+        let (sent, idle) = run_like_the_app(&ticks, 14.0, 1500);
+        assert_eq!(idle, 0, "{sent:?}");
+        assert!((sent.iter().sum::<f64>() - 14.0 * 21.0).abs() < 0.5, "{sent:?}");
+        // About 600 ms of drag at one step each 8 ms, and no more.
+        assert!((60..=90).contains(&sent.len()), "{} steps", sent.len());
+    }
+
+    #[test]
+    fn nothing_is_due_once_the_glide_is_over() {
+        let mut glide = Glide::default();
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        assert_eq!(glide.next_due(at(0)), None);
+        // A lone tick goes at once, and leaves nothing to glide.
+        glide.tick(1, 14.0, at(0));
+        assert_eq!(glide.next_due(at(0)), Some(Duration::ZERO));
+        glide.due(at(0));
+        assert_eq!(glide.next_due(at(0)), None);
+        // A second tick sets a speed: the next half pixel is due in about
+        // 0.5 / (14 / 100) ms, and after the row past it, nothing.
+        glide.tick(1, 14.0, at(100));
+        glide.due(at(100));
+        let next = glide.next_due(at(100)).unwrap();
+        assert!((3..=4).contains(&next.as_millis()), "{next:?}");
+        while glide.due(at(500)).is_some() {}
+        assert_eq!(glide.next_due(at(500)), None);
     }
 
     #[test]

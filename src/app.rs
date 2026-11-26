@@ -683,8 +683,10 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             true => app.frame_gap().saturating_sub(app.last_ack.elapsed()).min(TICK),
             false => TICK,
         };
-        if app.glide.gliding(Instant::now()) {
-            wait = wait.min(GLIDE_STEP.saturating_sub(app.glided.elapsed()));
+        // Wake when the glide next has a step to send, but no sooner than
+        // a step after the last.
+        if let Some(due) = app.glide.next_due(Instant::now()) {
+            wait = wait.min(due.max(GLIDE_STEP.saturating_sub(app.glided.elapsed())));
         }
         if let Some(splash_wait) =
             app.splash.as_ref().filter(|_| app.by_file).and_then(|splash| splash.wait(app.loading))
@@ -2354,7 +2356,13 @@ impl App {
                     crate::trace::event("send", format_args!("{:.1}\t0", dx as f64 * step_x));
                     self.chrome.wheel(x, y, dx as f64 * step_x, 0.0, modifiers);
                 }
-                if dy != 0 {
+                // With Ctrl held the wheel zooms, on pages that zoom (maps,
+                // viewers); some zoom a step for each event, however small,
+                // so it goes as the ticks came, unspread.
+                if dy != 0 && modifiers & chrome::CTRL != 0 {
+                    crate::trace::event("send", format_args!("0\t{:.1}", dy as f64 * step_y));
+                    self.chrome.wheel(x, y, 0.0, dy as f64 * step_y, modifiers);
+                } else if dy != 0 {
                     self.glide.tick(dy, step_y, Instant::now());
                     self.glide_at = WheelAt { x, y, modifiers };
                     self.glide();

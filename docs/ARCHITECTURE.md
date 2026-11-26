@@ -311,8 +311,12 @@ within 20 ms) but resolution. Three things make it follow the finger:
   passed. The page goes to it, and on from it at the speed the ticks have
   been coming, for at most one more row: at a steady speed it reaches each
   row just as the next tick arrives, so it never jumps. The main loop wakes
-  every 8 ms while the page has some way to go and sends Chrome what the
-  glide says it is owed, no more often: stepping at every wake (Chrome's
+  when the page is next owed half a pixel (`Glide::next_due`), but no
+  sooner than 8 ms after the last step, and sends Chrome what the glide
+  says it is owed. Waking every 8 ms instead found nothing to send on a
+  slow drag, where half a pixel comes due only every 10 to 20 ms, and the
+  loop spun until it did: about 40% of a core, against 5% now. Stepping at
+  every wake (Chrome's
   answer to each step is one) sent three times as many scrolls for 4 to 8
   ms less lag, and every 16 ms added 4 to 8. When the finger stops, the page goes on to the end
   of that row, up to 14 pixels; holding it back half a row (to rest where
@@ -322,7 +326,10 @@ within 20 ms) but resolution. Three things make it follow the finger:
   spun notch after notch may end a row further). Gliding only on single
   ticks, to keep spins exact too, cost 20 ms of lag: a fast trackpad's ticks
   also reach kb several at once. Turning back starts from where the page is, which may be past
-  the last tick, so it doesn't leap back.
+  the last tick, so it doesn't leap back. With Ctrl held the wheel zooms
+  on pages that zoom (maps, viewers), and some zoom a step for each
+  event, however small; those ticks go as they came, not glided, which
+  would have made six ticks 45 events.
 - **Rails** (`Rails`). Fingers drawn down a trackpad drift sideways, and
   terminals report the drift as ticks left and right among the ticks down
   (about a third of them in a recorded scroll). Sent on, they shake

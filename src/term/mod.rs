@@ -231,17 +231,24 @@ fn drain(limit: std::time::Duration) -> bool {
 /// Write `bytes` to the terminal now, past the writer and its lock on
 /// stdout, giving up after a moment if the terminal isn't reading.
 fn write_past_the_writer(bytes: &[u8]) {
-    unsafe {
-        let flags = libc::fcntl(1, libc::F_GETFL);
-        libc::fcntl(1, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        let (mut left, start) = (bytes, std::time::Instant::now());
-        while !left.is_empty() && start.elapsed() < std::time::Duration::from_millis(200) {
-            match usize::try_from(libc::write(1, left.as_ptr().cast(), left.len())) {
-                Ok(n) => left = &left[n..],
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
-            }
+    use std::os::unix::fs::OpenOptionsExt;
+    // The terminal opened afresh, not stdout made non-blocking: stdout
+    // shares its open file with stdin and with the shell, which would find
+    // their reads failing with EAGAIN while it was.
+    let Ok(tty) =
+        std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY).open("/dev/tty")
+    else {
+        return;
+    };
+    // The writer may be stuck partway through an image's escape; ST ends
+    // it, so that what follows is read as escapes and not as its pixels.
+    let bytes = [b"\x1b\\".as_slice(), bytes].concat();
+    let (mut left, start) = (bytes.as_slice(), std::time::Instant::now());
+    while !left.is_empty() && start.elapsed() < std::time::Duration::from_millis(200) {
+        match (&tty).write(left) {
+            Ok(n) => left = &left[n..],
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
-        libc::fcntl(1, libc::F_SETFL, flags);
     }
 }
 
