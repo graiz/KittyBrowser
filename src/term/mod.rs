@@ -114,7 +114,15 @@ struct Queue {
     queued: u64,
     written: u64,
     wake_at: Option<u64>,
+    /// How many times `drain` has given up and dropped what was queued.
+    drops: u64,
 }
+
+/// The writer hands the terminal this much at a time, and between pieces
+/// checks whether `drain` gave up: what it held then is dropped too, so
+/// that at most a piece of it is left to land on an editor's screen once
+/// the terminal reads again, not a whole frame.
+const PIECE: usize = 16 * 1024;
 
 impl Writer {
     fn new(written: u64, wake: impl Fn() + Send + Sync + 'static) -> Writer {
@@ -136,14 +144,19 @@ impl Writer {
     /// Write what is queued to `sink`, for ever, as it comes.
     fn run(&self, sink: &mut dyn Write) {
         loop {
-            let bytes = {
+            let (bytes, drops) = {
                 let mut queue = self.lock();
                 while queue.bytes.is_empty() {
                     queue = self.ready.wait(queue).unwrap_or_else(|poisoned| poisoned.into_inner());
                 }
-                std::mem::take(&mut queue.bytes)
+                (std::mem::take(&mut queue.bytes), queue.drops)
             };
-            let _ = sink.write_all(&bytes);
+            for piece in bytes.chunks(PIECE) {
+                if self.lock().drops != drops {
+                    break;
+                }
+                let _ = sink.write_all(piece);
+            }
             let _ = sink.flush();
             sent(bytes.len());
             let woken = {
@@ -173,8 +186,9 @@ impl Writer {
     }
 
     /// Wait until everything queued is written, or `limit` has passed;
-    /// then drop what is still queued, so that it can't land on an editor's
-    /// screen or the shell's afterwards. Returns whether all was written.
+    /// then drop what is still queued, and what the writer holds past the
+    /// piece under way, so that it can't land on an editor's screen or the
+    /// shell's afterwards. Returns whether all was written.
     fn drain(&self, limit: std::time::Duration) -> bool {
         let start = std::time::Instant::now();
         let mut queue = self.lock();
@@ -184,6 +198,7 @@ impl Writer {
                 // being written now counts itself when it is.
                 queue.written += queue.bytes.len() as u64;
                 queue.bytes.clear();
+                queue.drops += 1;
                 return false;
             };
             queue = match self.ready.wait_timeout(queue, left) {
@@ -495,5 +510,25 @@ mod tests {
         assert!(!writer.reached(writer.mark()));
         read.send(()).unwrap();
         assert!(eventually(|| writer.reached(writer.mark())));
+    }
+
+    #[test]
+    fn a_drain_that_times_out_stops_the_write_under_way() {
+        let Test { writer, read, screen, .. } = slow_writer();
+        // A frame of three pieces, taken by the writer, the first piece
+        // stuck: once the terminal reads again, only that piece lands.
+        writer.push(&vec![b'x'; super::PIECE * 3]);
+        assert!(eventually(|| writer.lock().bytes.is_empty()));
+        assert!(!writer.drain(std::time::Duration::from_millis(20)));
+        read.send(()).unwrap();
+        assert!(eventually(|| {
+            let queue = writer.lock();
+            queue.written == queue.queued
+        }));
+        assert_eq!(screen.lock().unwrap().len(), super::PIECE);
+        // And what comes after goes whole.
+        writer.push(b"next");
+        read.send(()).unwrap();
+        assert!(eventually(|| screen.lock().unwrap().ends_with(b"next")));
     }
 }
