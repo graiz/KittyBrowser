@@ -161,9 +161,19 @@ pub const READ_TEXT: &str = concat!(
     ? Array.from({ length: selection.rangeCount }, (_, k) => selection.getRangeAt(k)) : [];
   const range = document.createRange(), fixedness = new Map();
   const parent = el => el.parentElement || (el.parentNode && el.parentNode.host) || null;
+  // Whether text stays put in the window as the page scrolls: in a fixed
+  // box, or a sticky one that is stuck, which is where its own top (or
+  // bottom) says; a sticky box not stuck yet scrolls with the page.
+  const stuck = (el, style) => {
+    const r = el.getBoundingClientRect(), top = parseFloat(style.top), bottom = parseFloat(style.bottom);
+    return (!isNaN(top) && Math.abs(r.top - top) < 1) || (!isNaN(bottom) && Math.abs(H - r.bottom - bottom) < 1);
+  };
   const fixed = el => {
     if (!el) return false;
-    if (!fixedness.has(el)) fixedness.set(el, getComputedStyle(el).position === 'fixed' || fixed(parent(el)));
+    if (!fixedness.has(el)) {
+      const style = getComputedStyle(el);
+      fixedness.set(el, style.position === 'fixed' || (style.position === 'sticky' && stuck(el, style)) || fixed(parent(el)));
+    }
     return fixedness.get(el);
   };
   const onScreen = r => r.width > 0 && r.bottom > 0 && r.top < H && r.right > 0 && r.left < W;
