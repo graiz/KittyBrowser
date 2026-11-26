@@ -298,10 +298,32 @@ enum Msg {
     /// A command from `kb ctl` or the MCP server.
     Control(Request),
     ChromeClosed,
+    /// The terminal has taken the last frame drawn (see `term::reached`).
+    Written,
+}
+
+/// Where the wheel was turned, in page pixels, and the keys held.
+#[derive(Default, Clone, Copy)]
+struct WheelAt {
+    x: f64,
+    y: f64,
+    modifiers: u32,
+}
+
+/// What waits to be drawn: a new frame, or only the bar and what is over
+/// the page.
+#[derive(Default)]
+struct Undrawn {
+    frame: bool,
+    other: bool,
 }
 
 /// How often to check whether the pane changed size.
 const TICK: Duration = Duration::from_millis(100);
+/// How often the glide steps the page on, at most, while it has some way to
+/// go: about two steps to each of Chrome's frames. Every 16 ms added 4 to 8
+/// ms of lag.
+const GLIDE_STEP: Duration = Duration::from_millis(8);
 /// Presses this close in time and place count as a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How long after the last key, click or command the page counts as in use.
@@ -392,6 +414,19 @@ struct App {
     focused: bool,
     /// When the user or an agent last did something.
     last_input: Instant,
+    /// Keeps each scroll on one axis.
+    rails: crate::scroll::Rails,
+    /// Spreads scrolls down over time.
+    glide: crate::scroll::Glide,
+    /// Where the wheel was, in page pixels, and the keys held: where the
+    /// glide's scrolls go.
+    glide_at: WheelAt,
+    /// When the glide last sent the page a step.
+    glided: Instant,
+    /// What to draw once the terminal has taken the last frame.
+    undrawn: Undrawn,
+    /// Where the last frame drawn ends in what was written to the terminal.
+    drawn_mark: u64,
     /// When Chrome was last told it may send another frame.
     last_ack: Instant,
     /// Mouse buttons held, as a DevTools mask.
@@ -495,6 +530,10 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     let commands = tx.clone();
     let socket = claim.socket.clone();
     claim.listen(move |request| commands.send(Msg::Control(request)).is_ok());
+    let written = tx.clone();
+    term::write_in_background(move || {
+        let _ = written.send(Msg::Written);
+    });
     let input = tx.clone();
     std::thread::spawn(move || {
         let mut parser = Parser::default();
@@ -515,6 +554,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             match usize::try_from(read) {
                 Ok(n) if n > 0 => {
                     for event in parser.feed(&buf[..n]) {
+                        if let Event::Mouse(Mouse { kind: MouseKind::Wheel(dx, dy), x, y, .. }) = &event {
+                            crate::trace::event("tick", format_args!("{dx}\t{dy}\t{x},{y}\t{n} bytes"));
+                        }
                         if input.send(Msg::Term(event)).is_err() {
                             return;
                         }
@@ -571,6 +613,12 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         started: Instant::now(),
         focused: true,
         last_input: Instant::now(),
+        rails: Default::default(),
+        glide: Default::default(),
+        glide_at: WheelAt::default(),
+        glided: Instant::now(),
+        undrawn: Undrawn::default(),
+        drawn_mark: 0,
         last_ack: Instant::now(),
         buttons: 0,
         last_press: None,
@@ -635,6 +683,9 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             true => app.frame_gap().saturating_sub(app.last_ack.elapsed()).min(TICK),
             false => TICK,
         };
+        if app.glide.gliding(Instant::now()) {
+            wait = wait.min(GLIDE_STEP.saturating_sub(app.glided.elapsed()));
+        }
         if let Some(splash_wait) =
             app.splash.as_ref().filter(|_| app.by_file).and_then(|splash| splash.wait(app.loading))
         {
@@ -902,6 +953,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                     quit = Some(Err("Chrome exited".to_owned()));
                     break;
                 }
+                // Only to wake the loop, to draw what waited.
+                Msg::Written => {}
             }
         }
         if let Some(result) = quit {
@@ -946,8 +999,23 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                 new_frame = true;
             }
         }
-        if new_frame || redraw {
-            app.draw(new_frame);
+        // Paced: stepped at every wake, which each of Chrome's answers to
+        // a step is, it sent three times as many scrolls for 4 to 8 ms less
+        // lag.
+        if app.glided.elapsed() >= GLIDE_STEP {
+            app.glide();
+        }
+        // While the terminal is still taking the last frame, hold this
+        // drawing back; when it is ready (`Msg::Written`), it gets the
+        // latest frame, not every frame that came meanwhile.
+        app.undrawn.frame |= new_frame;
+        app.undrawn.other |= redraw;
+        if (app.undrawn.frame || app.undrawn.other) && term::reached(app.drawn_mark) {
+            let Undrawn { frame, .. } = std::mem::take(&mut app.undrawn);
+            app.draw(frame);
+            if frame {
+                app.drawn_mark = term::mark();
+            }
         }
         if app.by_file && app.splash.as_ref().is_some_and(|splash| splash.due(app.loading)) {
             app.draw_splash();
@@ -1049,8 +1117,8 @@ impl App {
             }
             None => {
                 self.shown = (cols, rows);
-                // Rounded up, so a frame always covers the cells and can be
-                // cut into tiles.
+                // Rounded up, so a frame always covers the cells and lines
+                // up with them.
                 ((space_w / self.page_scale()).ceil(), (space_h / self.page_scale()).ceil())
             }
         };
@@ -1158,9 +1226,9 @@ impl App {
             (
                 "frames",
                 match (self.by_file, self.png_only) {
-                    (true, _) => "by file, changed blocks only".to_owned(),
+                    (_, true) => "through the pty, whole PNG frames (KB_TRANSFER=png)".to_owned(),
+                    (true, false) => "by file, what moved or changed".to_owned(),
                     (false, false) => "through the pty, what moved or changed".to_owned(),
-                    (false, true) => "through the pty, whole PNG frames (KB_TRANSFER=png)".to_owned(),
                 },
             ),
             ("agents", format!("kb ctl -i {} ...   (kb ctl --help)", self.instance)),
@@ -1359,11 +1427,13 @@ impl App {
             let (cols, rows) = self.shown;
             let scaled = self.fixed.is_some();
             let route = match (self.by_file, self.png_only) {
-                (true, _) => Route::Files,
+                (_, true) => Route::Png,
+                (true, false) => Route::Files,
                 (false, false) => Route::Layers,
-                (false, true) => Route::Png,
             };
+            let start = std::time::Instant::now();
             let drawn = self.page.draw(&mut out, png, route, scaled, cols, rows, cell, 2);
+            crate::trace::event("draw", format_args!("{:.1}ms\t{drawn}", start.elapsed().as_secs_f64() * 1000.0));
             log(format_args!("drew {drawn}"));
         }
         let cols = self.window.cols as usize;
@@ -1380,6 +1450,9 @@ impl App {
         self.render_modal(&mut out);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
+        if frame {
+            crate::trace::event("written", format_args!("{} bytes\t{}", out.len(), term::mark()));
+        }
     }
 
     /// Draw what the page asks over it: the file chooser, then a dialog on
@@ -2095,6 +2168,16 @@ impl App {
         Ok(Output::Text(said))
     }
 
+    /// Send the page what the glide says it is owed.
+    fn glide(&mut self) {
+        if let Some(step) = self.glide.due(Instant::now()) {
+            self.glided = Instant::now();
+            let WheelAt { x, y, modifiers } = self.glide_at;
+            crate::trace::event("send", format_args!("0\t{step:.1}"));
+            self.chrome.wheel(x, y, 0.0, step, modifiers);
+        }
+    }
+
     /// Returns whether the top bar needs redrawing.
     fn on_mouse(&mut self, mouse: Mouse) -> bool {
         // A press that went to the page before the box opened is released
@@ -2263,10 +2346,18 @@ impl App {
                 }
             }
             MouseKind::Wheel(dx, dy) => {
+                let (dx, dy) = self.rails.filter(dx, dy, Instant::now());
                 let (step_x, step_y) = wheel_step(self.viewport, self.shown);
-                // A burst that cancels out (up and down) is no scroll at all.
-                if (dx, dy) != (0, 0) {
-                    self.chrome.wheel(x, y, dx as f64 * step_x, dy as f64 * step_y, modifiers);
+                crate::trace::event("row", format_args!("{step_y}"));
+                // Across at once; down spread over time by the glide.
+                if dx != 0 {
+                    crate::trace::event("send", format_args!("{:.1}\t0", dx as f64 * step_x));
+                    self.chrome.wheel(x, y, dx as f64 * step_x, 0.0, modifiers);
+                }
+                if dy != 0 {
+                    self.glide.tick(dy, step_y, Instant::now());
+                    self.glide_at = WheelAt { x, y, modifiers };
+                    self.glide();
                 }
             }
         }

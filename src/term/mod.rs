@@ -70,6 +70,9 @@ static LENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 
 /// Lend the terminal to another program, or take it back.
 pub fn lend(lent: bool) {
+    if lent {
+        drain(std::time::Duration::from_secs(1));
+    }
     LENT.store(lent, std::sync::atomic::Ordering::SeqCst);
 }
 
@@ -77,9 +80,169 @@ pub fn write(bytes: &[u8]) {
     if LENT.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
+    if let Some(writer) = WRITER.get() {
+        writer.push(bytes);
+        return;
+    }
     let mut out = io::stdout().lock();
     let _ = out.write_all(bytes);
     let _ = out.flush();
+    sent(bytes.len());
+}
+
+/// Count bytes handed to the terminal, for the trace: the total lets a
+/// trace taken at the far end of an ssh link be matched with this one.
+static SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn sent(count: usize) {
+    let total = SENT.fetch_add(count as u64, std::sync::atomic::Ordering::SeqCst) + count as u64;
+    crate::trace::event("flushed", format_args!("{count} bytes\t{total}"));
+}
+
+/// What waits to be written, and how many bytes have been queued and
+/// written in all, counting from kb's first write.
+struct Writer {
+    queue: std::sync::Mutex<Queue>,
+    ready: std::sync::Condvar,
+    /// Called once everything up to `Queue::wake_at` has been written.
+    wake: Box<dyn Fn() + Send + Sync>,
+}
+
+#[derive(Default)]
+struct Queue {
+    bytes: Vec<u8>,
+    queued: u64,
+    written: u64,
+    wake_at: Option<u64>,
+}
+
+impl Writer {
+    fn new(written: u64, wake: impl Fn() + Send + Sync + 'static) -> Writer {
+        let queue = Queue { queued: written, written, ..Default::default() };
+        Writer { queue: std::sync::Mutex::new(queue), ready: Default::default(), wake: Box::new(wake) }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn push(&self, bytes: &[u8]) {
+        let mut queue = self.lock();
+        queue.bytes.extend_from_slice(bytes);
+        queue.queued += bytes.len() as u64;
+        self.ready.notify_all();
+    }
+
+    /// Write what is queued to `sink`, for ever, as it comes.
+    fn run(&self, sink: &mut dyn Write) {
+        loop {
+            let bytes = {
+                let mut queue = self.lock();
+                while queue.bytes.is_empty() {
+                    queue = self.ready.wait(queue).unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+                std::mem::take(&mut queue.bytes)
+            };
+            let _ = sink.write_all(&bytes);
+            let _ = sink.flush();
+            sent(bytes.len());
+            let woken = {
+                let mut queue = self.lock();
+                queue.written += bytes.len() as u64;
+                let written = queue.written;
+                queue.wake_at.take_if(|mark| *mark <= written).is_some()
+            };
+            self.ready.notify_all();
+            if woken {
+                (self.wake)();
+            }
+        }
+    }
+
+    fn mark(&self) -> u64 {
+        self.lock().queued
+    }
+
+    fn reached(&self, mark: u64) -> bool {
+        let mut queue = self.lock();
+        let reached = queue.written >= mark;
+        if !reached {
+            queue.wake_at = Some(mark);
+        }
+        reached
+    }
+
+    /// Wait until everything queued is written, or `limit` has passed;
+    /// then drop what is still queued, so that it can't land on an editor's
+    /// screen or the shell's afterwards. Returns whether all was written.
+    fn drain(&self, limit: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        let mut queue = self.lock();
+        while queue.written < queue.queued {
+            let Some(left) = limit.checked_sub(start.elapsed()) else {
+                // Counted as written, so marks still come due; what is
+                // being written now counts itself when it is.
+                queue.written += queue.bytes.len() as u64;
+                queue.bytes.clear();
+                return false;
+            };
+            queue = match self.ready.wait_timeout(queue, left) {
+                Ok((queue, _)) => queue,
+                Err(poisoned) => poisoned.into_inner().0,
+            };
+        }
+        true
+    }
+}
+
+static WRITER: OnceLock<Writer> = OnceLock::new();
+
+/// Write to the terminal from a thread of its own from now on. A terminal
+/// that is slow to read (busy drawing, or another client of it is behind)
+/// fills the pty, and a write then waits; on the app thread that would hold
+/// up scrolls and keys on their way to Chrome. `wake` is called when a
+/// mark `reached` said wasn't yet has been.
+pub fn write_in_background(wake: impl Fn() + Send + Sync + 'static) {
+    // Count on from what was written before, so marks are totals.
+    let writer = Writer::new(SENT.load(std::sync::atomic::Ordering::SeqCst), wake);
+    if WRITER.set(writer).is_ok() {
+        std::thread::spawn(|| WRITER.get().unwrap().run(&mut io::stdout()));
+    }
+}
+
+/// A mark for everything written so far, to ask `reached` about.
+pub fn mark() -> u64 {
+    WRITER.get().map_or(SENT.load(std::sync::atomic::Ordering::SeqCst), Writer::mark)
+}
+
+/// Whether everything written up to `mark` has reached the terminal. If
+/// not, the writer's `wake` is called once it has.
+pub fn reached(mark: u64) -> bool {
+    WRITER.get().is_none_or(|writer| writer.reached(mark))
+}
+
+/// Wait until everything written has reached the terminal, or `limit`
+/// has passed: a terminal that has stopped reading mustn't keep kb from
+/// leaving. Returns whether it all did.
+fn drain(limit: std::time::Duration) -> bool {
+    WRITER.get().is_none_or(|writer| writer.drain(limit))
+}
+
+/// Write `bytes` to the terminal now, past the writer and its lock on
+/// stdout, giving up after a moment if the terminal isn't reading.
+fn write_past_the_writer(bytes: &[u8]) {
+    unsafe {
+        let flags = libc::fcntl(1, libc::F_GETFL);
+        libc::fcntl(1, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        let (mut left, start) = (bytes, std::time::Instant::now());
+        while !left.is_empty() && start.elapsed() < std::time::Duration::from_millis(200) {
+            match usize::try_from(libc::write(1, left.as_ptr().cast(), left.len())) {
+                Ok(n) => left = &left[n..],
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+        libc::fcntl(1, libc::F_SETFL, flags);
+    }
 }
 
 /// Ask the terminal for its cell size in pixels; the answer arrives as an
@@ -111,9 +274,16 @@ pub fn enter() -> io::Result<()> {
 /// Undo `enter`, and remove the frames left for the terminal. Safe to call
 /// more than once, or without `enter`.
 pub fn leave() {
-    graphics::remove_frames();
     if let Some(termios) = ORIGINAL.get() {
-        write(LEAVE);
+        // The way back out goes even when the terminal stopped reading what
+        // was queued, which is then dropped.
+        let second = std::time::Duration::from_secs(1);
+        if !drain(second) || {
+            write(LEAVE);
+            !drain(second)
+        } {
+            write_past_the_writer(LEAVE);
+        }
         // Replies to our queries may still be on their way, when kb exits
         // soon after starting. Discard them, or the shell reads them as
         // typed text.
@@ -123,6 +293,8 @@ pub fn leave() {
             libc::tcsetattr(0, libc::TCSANOW, termios);
         }
     }
+    // After the writer has sent what names them.
+    graphics::remove_frames();
 }
 
 /// Whether the terminal draws kitty graphics: `Some(false)` when it answered
@@ -193,7 +365,7 @@ fn graphics_answer(replies: &[u8]) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{graphics_answer, printable};
+    use super::{graphics_answer, io, printable, Write, Writer};
 
     #[test]
     fn page_text_cant_drive_the_terminal() {
@@ -228,5 +400,93 @@ mod tests {
         assert_eq!(graphics_answer(b"\x1b[?2026;2$y\x1b_Gi=31;OK\x1b\\"), None);
         // A key typed meanwhile, c included, doesn't end it either.
         assert_eq!(graphics_answer(b"\x1b[?62;2$yc"), None);
+    }
+
+    /// A terminal that reads only when told to.
+    struct Slow(std::sync::mpsc::Receiver<()>, std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Slow {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let _ = self.0.recv();
+            self.1.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer at work on a `Slow` terminal: `read` lets the terminal read
+    /// once, `screen` is what it has read, and `woken` how often `wake` came.
+    struct Test {
+        writer: std::sync::Arc<Writer>,
+        read: std::sync::mpsc::Sender<()>,
+        screen: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        woken: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    fn slow_writer() -> Test {
+        let (read, reads) = std::sync::mpsc::channel();
+        let screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let woken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = woken.clone();
+        let writer = std::sync::Arc::new(Writer::new(0, move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let (runs, mut sink) = (writer.clone(), Slow(reads, screen.clone()));
+        std::thread::spawn(move || runs.run(&mut sink));
+        Test { writer, read, screen, woken }
+    }
+
+    fn eventually(what: impl Fn() -> bool) -> bool {
+        let start = std::time::Instant::now();
+        while !what() {
+            if start.elapsed() > std::time::Duration::from_secs(2) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+
+    #[test]
+    fn a_mark_comes_due_once_written_and_wakes_once() {
+        let Test { writer, read, screen, woken } = slow_writer();
+        writer.push(b"frame");
+        let mark = writer.mark();
+        assert!(!writer.reached(mark));
+        read.send(()).unwrap();
+        assert!(eventually(|| writer.reached(mark)));
+        assert!(eventually(|| woken.load(std::sync::atomic::Ordering::SeqCst) == 1));
+        assert_eq!(&*screen.lock().unwrap(), b"frame");
+        // Nothing waited for, nothing to wake.
+        writer.push(b"more");
+        read.send(()).unwrap();
+        assert!(eventually(|| screen.lock().unwrap().len() == 9));
+        assert!(eventually(|| writer.lock().written == 9));
+        assert_eq!(woken.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_drain_that_times_out_drops_the_queue_and_keeps_count() {
+        let Test { writer, read, screen, .. } = slow_writer();
+        // One write taken by the writer and stuck, one waiting behind it.
+        writer.push(b"stuck");
+        assert!(eventually(|| writer.lock().bytes.is_empty()));
+        writer.push(b"queued");
+        assert!(!writer.drain(std::time::Duration::from_millis(20)));
+        // The stuck write goes through; the queued one is gone, and the
+        // count of written bytes is the count of queued ones, not more.
+        read.send(()).unwrap();
+        assert!(eventually(|| {
+            let queue = writer.lock();
+            queue.written == queue.queued
+        }));
+        assert_eq!(&*screen.lock().unwrap(), b"stuck");
+        assert_eq!(writer.lock().queued, 11);
+        writer.push(b"next");
+        assert!(!writer.reached(writer.mark()));
+        read.send(()).unwrap();
+        assert!(eventually(|| writer.reached(writer.mark())));
     }
 }

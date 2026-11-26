@@ -27,21 +27,11 @@ pub fn wipes() -> u64 {
     WIPES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Where the page and the tiles over it sit relative to text. Below this
-/// threshold an image is drawn under text and under any cell with a
-/// background colour of its own, so a box of coloured text (the help) can
-/// be drawn over the page and the page shows again once those cells are
-/// blanked.
+/// Where the page sits relative to text. Below this threshold an image is
+/// drawn under text and under any cell with a background colour of its own,
+/// so a box of coloured text (the help) can be drawn over the page and the
+/// page shows again once those cells are blanked.
 const PAGE_Z: i64 = -1_073_741_826;
-const TILE_Z: i64 = -1_073_741_825;
-
-/// Ids from here up are tiles; the whole-page image and queries are below.
-const FIRST_TILE_ID: u32 = 10;
-/// A tile is this many cells across and down, less at the right and bottom
-/// edges: about square, and small enough that a caret or a spinner costs
-/// one tile, large enough that a whole page is under a hundred.
-const TILE_COLS: u16 = 12;
-const TILE_ROWS: u16 = 6;
 
 /// The protocol's limit on the payload of one escape.
 const CHUNK: usize = 4096;
@@ -274,117 +264,12 @@ fn put_raw_file(
 }
 
 /// Whether a frame of `size` pixels lines up with `cols` x `rows` cells of
-/// `cell` pixels, as `Tiles` and `layers::Layers` need: it must cover them
+/// `cell` pixels, as `layers::Layers` needs: it must cover them
 /// exactly, give or take the pixel or two of rounding a viewport picks up,
 /// which is cropped.
 pub fn fits(size: (u32, u32), cols: u16, rows: u16, cell: (u32, u32)) -> bool {
     let covers = |have: u32, cells: u16, size: u32| (0..=2).contains(&(have as i64 - cells as i64 * size as i64));
     covers(size.0, cols, cell.0) && covers(size.1, rows, cell.1)
-}
-
-/// What `Tiles::draw` sent.
-#[derive(PartialEq, Eq, Debug)]
-pub enum Drawn {
-    /// The whole page, as one image.
-    Whole,
-    /// This many tiles, laid over the page where it changed.
-    Tiles(usize),
-}
-
-/// Draws the page so that a small change costs little. The page is one
-/// image; where a later frame differs, the differing blocks of cells are
-/// sent as small images laid over it. When too much differs for that to
-/// pay, the whole page is sent again and the tiles are removed. Needs a
-/// terminal that reads frames from files.
-#[derive(Default)]
-pub struct Tiles {
-    /// The frame on screen, if this drew it.
-    shown: Option<Pixels>,
-    /// The ids of the tiles lying over the page.
-    overlaid: Vec<u32>,
-    /// The last draw's files, in case the terminal didn't delete them.
-    last: Vec<std::path::PathBuf>,
-}
-
-impl Tiles {
-    /// The screen was cleared of images: the next draw sends the whole page.
-    pub fn forget(&mut self) {
-        self.shown = None;
-        self.overlaid.clear();
-    }
-
-    /// Append the escapes that bring the screen to `new`, which must fit
-    /// (see `fits`). `top` is the screen row of the page's first row.
-    /// Returns what was sent, or `None` if a file couldn't be written, when
-    /// the screen is in no known state.
-    pub fn draw(
-        &mut self,
-        out: &mut Vec<u8>,
-        new: Pixels,
-        cols: u16,
-        rows: u16,
-        cell: (u32, u32),
-        top: u16,
-    ) -> Option<Drawn> {
-        for path in self.last.drain(..) {
-            let _ = std::fs::remove_file(path);
-        }
-        let bytes = if new.alpha { 4 } else { 3 };
-        let (cell_w, cell_h) = (cell.0 as usize, cell.1 as usize);
-        let new = crop(new, cols as u32 * cell.0, rows as u32 * cell.1, bytes)?;
-        let old =
-            self.shown.take().filter(|old| (old.width, old.height, old.alpha) == (new.width, new.height, new.alpha));
-        let stride = new.width as usize * bytes;
-
-        // (id, column, row, columns, rows) of each tile that differs.
-        let mut changed = Vec::new();
-        let mut total = 0;
-        for row in (0..rows).step_by(TILE_ROWS as usize) {
-            for col in (0..cols).step_by(TILE_COLS as usize) {
-                let id = FIRST_TILE_ID + total;
-                total += 1;
-                let Some(old) = &old else { continue };
-                let (tile_cols, tile_rows) = (TILE_COLS.min(cols - col), TILE_ROWS.min(rows - row));
-                let (x, width) = (col as usize * cell_w * bytes, tile_cols as usize * cell_w * bytes);
-                let lines = row as usize * cell_h..(row + tile_rows) as usize * cell_h;
-                let same = lines.clone().all(|y| {
-                    let (a, b) = (y * stride + x, y * stride + x + width);
-                    old.data[a..b] == new.data[a..b]
-                });
-                if !same {
-                    changed.push((id, col, row, tile_cols, tile_rows));
-                }
-            }
-        }
-
-        let drawn = if old.is_none() || changed.len() * 3 > total as usize {
-            // Too much for tiles to pay: the page again, and no tiles.
-            for id in self.overlaid.drain(..) {
-                out.extend_from_slice(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes());
-            }
-            let path = write_frame(&new.data).ok()?;
-            out.extend_from_slice(format!("\x1b[{top};1H").as_bytes());
-            put_raw_file(out, &path, (new.width, new.height), new.alpha, IMAGE_ID, PAGE_Z, cols, rows);
-            self.last.push(path);
-            Drawn::Whole
-        } else {
-            for &(id, col, row, tile_cols, tile_rows) in &changed {
-                let (x, y) = (col as u32 * cell.0, row as u32 * cell.1);
-                let tile = cut(&new, x, y, tile_cols as u32 * cell.0, tile_rows as u32 * cell.1);
-                let path = write_frame(&tile.data).ok()?;
-                out.extend_from_slice(format!("\x1b[{};{}H", top + row, col + 1).as_bytes());
-                let size = (tile.width, tile.height);
-                put_raw_file(out, &path, size, new.alpha, id, TILE_Z, tile_cols, tile_rows);
-                self.last.push(path);
-                if !self.overlaid.contains(&id) {
-                    self.overlaid.push(id);
-                }
-            }
-            Drawn::Tiles(changed.len())
-        };
-        self.shown = Some(new);
-        Some(drawn)
-    }
 }
 
 /// The pixels of the `width` x `height` rectangle of `pixels` whose top
@@ -485,45 +370,6 @@ mod tests {
         assert!(escapes[0].starts_with("\x1b_Ga=T,") && escapes[0].contains(",m=1;"));
         assert_eq!(escapes[1], format!("\x1b_Gm=1;{}", "A".repeat(CHUNK)));
         assert_eq!(escapes[2], "\x1b_Gm=0;AAAAAAAA");
-    }
-
-    fn solid(width: u32, height: u32, value: u8) -> Pixels {
-        Pixels { width, height, alpha: false, data: vec![value; (width * height * 3) as usize] }
-    }
-
-    #[test]
-    fn tiles_send_only_what_changed() {
-        // 30x14 cells of 2x4 pixels: 3 tiles across, 3 down.
-        let (cols, rows, cell) = (30, 14, (2, 4));
-        let mut tiles = Tiles::default();
-        let mut out = Vec::new();
-        assert!(fits((60, 56), cols, rows, cell));
-        assert!(fits((61, 57), cols, rows, cell));
-        assert!(!fits((59, 56), cols, rows, cell));
-        // The first frame goes whole, a pixel too wide and cropped.
-        assert_eq!(tiles.draw(&mut out, solid(61, 56, 0), cols, rows, cell, 2), Some(Drawn::Whole));
-        let text = String::from_utf8(std::mem::take(&mut out)).unwrap();
-        assert!(text.starts_with("\x1b[2;1H\x1b_Ga=T,f=24,s=60,v=56,t=t,i=1,p=1,z=-1073741826,"), "{text:?}");
-        assert_eq!(tiles.draw(&mut out, solid(60, 56, 0), cols, rows, cell, 2), Some(Drawn::Tiles(0)));
-        assert!(out.is_empty());
-
-        // One pixel in the last cell: only the bottom right tile goes.
-        let mut changed = solid(60, 56, 0);
-        *changed.data.last_mut().unwrap() = 1;
-        assert_eq!(tiles.draw(&mut out, changed, cols, rows, cell, 2), Some(Drawn::Tiles(1)));
-        let text = String::from_utf8(std::mem::take(&mut out)).unwrap();
-        // Tile 9 of 9, at column 25 and row 2 + 12, 6 cells by 2, on top.
-        assert!(text.starts_with("\x1b[14;25H\x1b_Ga=T,f=24,s=12,v=8,t=t,i=18,p=1,z=-1073741825,"), "{text:?}");
-        assert!(text.contains(",c=6,r=2;"), "{text:?}");
-
-        // Everything changes: the page again, and the tile is removed.
-        assert_eq!(tiles.draw(&mut out, solid(60, 56, 9), cols, rows, cell, 2), Some(Drawn::Whole));
-        let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with("\x1b_Ga=d,d=I,i=18,q=2\x1b\\\x1b[2;1H\x1b_Ga=T,"), "{text:?}");
-        for path in tiles.last.drain(..) {
-            let _ = std::fs::remove_file(path);
-        }
-        tidy_frames();
     }
 
     #[test]

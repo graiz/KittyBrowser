@@ -1,16 +1,13 @@
-//! The page's image: changed tiles by file, moved layers through the pty,
-//! or one image scaled to fit, whichever suits the terminal and the frame.
+//! The page's image: moved layers, with their pixels in files or through
+//! the pty, or one image scaled to fit, whichever suits the terminal and
+//! the frame.
 
-use super::graphics::{self, Tiles};
+use super::graphics;
 use super::layers::Layers;
 
 #[derive(Default)]
 pub struct PageImage {
-    /// The page as tiles, when it is drawn that way.
-    tiles: Tiles,
-    /// The page through the pty, moved as it scrolls and only what changed
-    /// sent, when it is drawn that way (the terminal can't read files, as
-    /// over ssh).
+    /// The page moved as it scrolls, and only what changed sent.
     layers: Layers,
     /// The last frame written whole to a file.
     last_file: Option<std::path::PathBuf>,
@@ -21,7 +18,8 @@ pub struct PageImage {
 /// How frames reach the terminal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
-    /// In files, which the terminal reads itself.
+    /// Only what moved or changed, with the pixels in files, which the
+    /// terminal reads itself.
     Files,
     /// Through the pty, only what moved or changed. This needs placements
     /// with source rectangles, offsets within cells, z and `o=z`.
@@ -34,7 +32,6 @@ pub enum Route {
 /// The ways of drawing the page.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Drawer {
-    Tiles,
     Layers,
     /// One image, scaled to fit the cells.
     Whole,
@@ -43,7 +40,6 @@ enum Drawer {
 impl PageImage {
     /// The screen was cleared of images: the next draw starts again.
     pub fn forget(&mut self) {
-        self.tiles.forget();
         self.layers.forget();
         self.on_screen = None;
     }
@@ -93,35 +89,28 @@ impl PageImage {
         cell: (u32, u32),
         top: u16,
     ) -> String {
-        let mut pixels = match route {
-            Route::Files => crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes, Vec::new())),
-            Route::Layers | Route::Png => None,
-        };
-        // Only what changed, when the frame lines up with the cells: tiles
-        // by file, or layers through the pty. Otherwise (a fixed viewport,
-        // a frame from before a resize) one image scaled to fit.
+        // Only what changed, when the frame lines up with the cells.
+        // Otherwise (a fixed viewport, a frame from before a resize) one
+        // image scaled to fit.
         let lined_up = !scaled && graphics::png_size(png).is_some_and(|size| graphics::fits(size, cols, rows, cell));
-        let drawer = match &pixels {
-            Some(_) if lined_up => Drawer::Tiles,
-            None if lined_up && route == Route::Layers => Drawer::Layers,
+        let drawer = match route {
+            Route::Files | Route::Layers if lined_up => Drawer::Layers,
             _ => Drawer::Whole,
         };
         self.hand_to(out, drawer);
-        let drawn = match drawer {
-            Drawer::Tiles => pixels
-                .take()
-                .and_then(|pixels| self.tiles.draw(out, pixels, cols, rows, cell, top))
-                .map(|sent| format!("{sent:?}")),
-            Drawer::Layers => self.layers.draw(out, png, cols, rows, cell, top).map(|sent| format!("{sent:?}")),
-            Drawer::Whole => None,
-        };
-        if let Some(drawn) = drawn {
-            return drawn;
+        if drawer == Drawer::Layers {
+            self.layers.by_file(route == Route::Files);
+            if let Some(sent) = self.layers.draw(out, png, cols, rows, cell, top) {
+                return format!("{sent:?}");
+            }
         }
-        // Tiles couldn't write a file, or layers decode the frame: the
-        // screen is in no known state, so it is cleared for the frame whole.
+        // Layers couldn't decode the frame: the screen is in no known
+        // state, so it is cleared for the frame whole.
         self.hand_to(out, Drawer::Whole);
         out.extend_from_slice(format!("\x1b[{top};1H").as_bytes());
+        let pixels = (route == Route::Files)
+            .then(|| crate::base64::decode(png).and_then(|bytes| graphics::decode_png(&bytes, Vec::new())))
+            .flatten();
         match pixels.and_then(|pixels| graphics::write_frame(&pixels.data).ok().map(|path| (pixels, path))) {
             Some((pixels, path)) => {
                 graphics::put_file(out, &path, &pixels, cols, rows);
@@ -178,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn tiles_take_over_from_layers() {
+    fn files_take_over_from_the_pty() {
         // The terminal's answer that it reads files comes after layers
         // drew the first frame.
         let (mut image, mut screen) = (PageImage::default(), Screen::default());

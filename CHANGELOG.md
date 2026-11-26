@@ -6,6 +6,31 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- Scrolling with a trackpad follows the finger. Terminals report a trackpad
+  as a tick per row, and each tick used to move the page a whole row at
+  once, a few times a second; now the page glides on from each tick at the
+  finger's speed, a few pixels a frame. Replaying a recorded scroll, the page
+  trails the finger by 40 to 60 ms instead of about 85, and stands still in
+  under half the frames while the finger moves, instead of 86%. When the
+  fingers stop, the page goes on to the end of that row. A mouse wheel's
+  notch scrolls as far as it did; spun notch after notch, it may end a row
+  further.
+- A scroll down no longer shakes the page sideways: the drift across that
+  terminals report among a trackpad's ticks down is dropped until the scroll
+  is mostly across.
+- A terminal that is slow to take what kb draws no longer holds up keys and
+  scrolls on their way to the page; when it catches up it gets the latest
+  frame.
+- Where the terminal reads files (Rex on the same machine), frames are sent
+  as moved layers there too, the page's pixels moved where it scrolled and
+  only the rest sent, now by file, in place of the changed tiles kb sent
+  before.
+- Over ssh, a slow scroll no longer makes kb send the whole page again every
+  few dozen steps; frames reached the far end in half the time.
+- `KB_TRACE=FILE` writes a timeline of scrolling (ticks, scrolls sent,
+  frames, bytes), and `tools/scroll/` replays a recorded scroll and scores
+  it.
+
 ## 0.3.0 — 2026-11-24
 
 - The address field turns orange while an agent drives kb: any command over

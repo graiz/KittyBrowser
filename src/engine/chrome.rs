@@ -756,7 +756,16 @@ impl Chrome {
             }
             "Page.screencastFrame" => {
                 // Chrome stops sending frames until each one is acknowledged.
-                self.check_frame_size(&params["metadata"]);
+                let metadata = &params["metadata"];
+                self.check_frame_size(metadata);
+                crate::trace::event(
+                    "frame",
+                    format_args!(
+                        "scroll {}\tcaptured {:.1}",
+                        metadata["scrollOffsetY"],
+                        metadata["timestamp"].as_f64().unwrap_or(0.0) * 1000.0
+                    ),
+                );
                 let ack = json!({"sessionId": params["sessionId"]});
                 let data = match params["data"].take() {
                     Value::String(data) => self.crop_frame(data, &params["metadata"]),
@@ -1121,6 +1130,7 @@ impl Chrome {
     /// another.
     pub fn ack(&mut self) {
         if let Some(ack) = self.unacked.pop_front() {
+            crate::trace::event("ack", format_args!(""));
             self.send("Page.screencastFrameAck", ack);
         }
     }

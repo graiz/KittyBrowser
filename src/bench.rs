@@ -39,12 +39,12 @@ enum Transfer {
     Pty,
     /// Decoded here, and left in a file for the terminal to read.
     File,
-    /// Decoded here, and only what changed left in files: what kb
-    /// itself does when the terminal reads files.
-    Tiles,
     /// Decoded here; what the terminal already has is moved where the
     /// page scrolled it, and only the rest sent through the pty.
     Layers,
+    /// As `Layers`, with the pixels left in files: what kb itself does
+    /// when the terminal reads files.
+    LayersByFile,
 }
 
 struct Mode {
@@ -56,8 +56,8 @@ struct Mode {
 const MODES: &[Mode] = &[
     Mode { name: "png through the pty", source: Source::Png, transfer: Transfer::Pty },
     Mode { name: "png, moved layers through the pty", source: Source::Png, transfer: Transfer::Layers },
+    Mode { name: "png, moved layers by file", source: Source::Png, transfer: Transfer::LayersByFile },
     Mode { name: "png, pixels by file", source: Source::Png, transfer: Transfer::File },
-    Mode { name: "png, changed tiles by file", source: Source::Png, transfer: Transfer::Tiles },
     Mode { name: "jpeg 100, pixels by file", source: Source::Jpeg(100), transfer: Transfer::File },
     Mode { name: "jpeg 90, pixels by file", source: Source::Jpeg(90), transfer: Transfer::File },
 ];
@@ -282,7 +282,6 @@ fn run_modes(
         let mut wipe = Vec::new();
         graphics::delete_all(&mut wipe);
         term::write(&wipe);
-        let mut tiles = graphics::Tiles::default();
         let mut layers = crate::term::layers::Layers::default();
         let mut samples = Vec::new();
         bench.errors = 0;
@@ -307,7 +306,8 @@ fn run_modes(
             let mut out = b"\x1b[2;1H".to_vec();
             match mode.transfer {
                 Transfer::Pty => graphics::put_png(&mut out, &data, cols, rows),
-                Transfer::Layers => {
+                Transfer::Layers | Transfer::LayersByFile => {
+                    layers.by_file(mode.transfer == Transfer::LayersByFile);
                     if layers.draw(&mut out, &data, cols, rows, (cell_w, cell_h), 2).is_none() {
                         // What the app would do: the frame as it came.
                         layers.forget();
@@ -315,14 +315,6 @@ fn run_modes(
                         graphics::put_png(&mut out, &data, cols, rows);
                         odd.push(graphics::png_size(&data));
                     }
-                }
-                Transfer::Tiles => {
-                    let bytes = crate::base64::decode(&data).ok_or("Chrome sent a damaged frame")?;
-                    let pixels = graphics::decode_png(&bytes, Vec::new()).ok_or("couldn't decode a frame")?;
-                    if !graphics::fits((pixels.width, pixels.height), cols, rows, (cell_w, cell_h)) {
-                        return Err("frames don't line up with the cells, so they can't be tiled".into());
-                    }
-                    tiles.draw(&mut out, pixels, cols, rows, (cell_w, cell_h), 2).ok_or("couldn't write a tile")?;
                 }
                 Transfer::File => {
                     let bytes = crate::base64::decode(&data).ok_or("Chrome sent a damaged frame")?;

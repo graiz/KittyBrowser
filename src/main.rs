@@ -22,10 +22,12 @@ mod mcp;
 mod menu;
 mod modal;
 mod picker;
+mod scroll;
 mod secrets;
 mod skill;
 mod splash;
 mod term;
+mod trace;
 mod ui;
 
 const USAGE: &str = "\
