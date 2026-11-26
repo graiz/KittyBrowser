@@ -1059,6 +1059,11 @@ impl Chrome {
         );
     }
 
+    /// Whether kb was started with `--devtools`, so `open_devtools` can work.
+    pub fn has_devtools(&self) -> bool {
+        self.devtools
+    }
+
     /// Open Chrome DevTools for this page in the desktop browser. Needs kb
     /// started with `--devtools`.
     pub fn open_devtools(&self) -> Result<(), String> {

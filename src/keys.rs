@@ -53,7 +53,7 @@ const ACTIONS: &[(Action, &str, &str)] = &[
     (Action::ZoomReset, "zoom-reset", "zoom to 100%, or out until the page fits"),
     (Action::Copy, "copy", "copy the selection, or the address while editing it"),
     (Action::Inspect, "inspect", "inspect: hover to highlight elements, click one for its details"),
-    (Action::Menu, "menu", "open the ⋮ menu: select element, view source, network performance"),
+    (Action::Menu, "menu", "open the ⋮ menu: find, select element, view source, network performance, and more"),
     (Action::Devtools, "devtools", "open Chrome DevTools for the page (needs kb --devtools)"),
     (Action::Help, "help", "show the help"),
     (Action::NextWindow, "next-window", "show the next window a page opened (a popup, a new tab)"),

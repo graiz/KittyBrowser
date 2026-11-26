@@ -370,7 +370,8 @@ scripts that replay a recorded scroll into kb and score it.
 ## UI (`src/ui.rs`)
 
 Row 1 is ordinary terminal text: three buttons, the address field, then
-the window switcher (‹ 2/3 ›), the badge (a note, the spinner, a
+the window switcher (‹ 2/3 › ✕, only while a page has opened windows, so
+✕ never quits kb), the badge (a note, the spinner, a
 download's progress, the zoom) and ⋮ at the end, the field giving up room to the
 rest down to a few columns. The field is a line editor (cursor, word
 moves, select-all on focus, horizontal scroll) with no terminal
@@ -381,8 +382,12 @@ after the last one: the user sees whenever an agent is reading or working
 the page. With it, an orange pointer (`term/cursor.rs`) drifts to where
 the agent clicks, hovers or types: an image kb places above the page and
 below text, moved by placing it again with pixel offsets about 30 times a
-second while it shows, never part of the page. ⋮ opens the menu (`menu.rs`), as Chrome's does: Select element,
-View source, Network performance, Quit browser. Network performance reads the page's
+second while it shows, never part of the page. ⋮ opens the menu (`menu.rs`), grouped as Chrome's is: the page (Find in page,
+Close window, Reset zoom), tools for developers (Select element, View
+source, Network performance, Developer tools), then Keyboard shortcuts and
+Quit browser. Items that can't do anything at the moment it opens (closing
+kb's only window, resetting 100%, DevTools without `--devtools`) aren't
+shown, rather than shown greyed. Network performance reads the page's
 own Performance API (navigation and resource timings), not the DevTools
 network events, which carry no timings in kb's record.
 Zoom (Ctrl+= and Ctrl+-) divides the CSS viewport by the zoom, so Chrome

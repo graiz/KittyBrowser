@@ -30,6 +30,15 @@ Notable changes to kb. The format follows
 - `KB_TRACE=FILE` writes a timeline of scrolling (ticks, scrolls sent,
   frames, bytes), and `tools/scroll/` replays a recorded scroll and scores
   it.
+- A popup or a new tab a page opened can be closed with the mouse again:
+  the window switcher in the bar has a ✕ (‹ 2/3 › ✕), as a tab does. It
+  shows only while there is more than one window, so it never quits kb.
+  Since 0.3.0 only Ctrl+W, or Back on the window's first page, closed one.
+- The ⋮ menu is grouped as Chrome's is, and offers more: Find in page,
+  Close window and Reset zoom (when there's a window to close or a zoom to
+  reset), then Select element, View source, Network performance and
+  Developer tools (with `--devtools`), then Keyboard shortcuts and Quit
+  browser. Each item shows its keys.
 
 ## 0.3.0 — 2026-11-24
 

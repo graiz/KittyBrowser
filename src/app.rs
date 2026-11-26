@@ -1203,7 +1203,7 @@ impl App {
             (Action::Devtools, "Chrome DevTools (start kb with --devtools)"),
             (Action::NextWindow, "next window: a popup, a new tab (‹ › in the bar)"),
             (Action::PreviousWindow, "previous window"),
-            (Action::CloseWindow, "close the window shown; on the last one, ask to quit"),
+            (Action::CloseWindow, "close the window shown (✕ in the bar); on the last one, ask to quit"),
             (Action::Help, "this help"),
             (Action::Quit, "quit (Quit browser in the ⋮ menu asks first)"),
         ]
@@ -1305,8 +1305,6 @@ impl App {
         self.went_to(url);
     }
 
-    /// Close the window shown, as a browser's tab closes; the last one is
-    /// kb itself, so that asks first.
     /// Ask before quitting, in a dialog as a page's confirm is asked.
     fn ask_quit(&mut self) {
         self.close_menu();
@@ -1314,6 +1312,8 @@ impl App {
         self.dialog = Some(Dialog::quit());
     }
 
+    /// Close the window shown, as a browser's tab closes; the last one is
+    /// kb itself, so that asks first.
     fn close_window(&mut self) {
         if self.chrome.windows().1 > 1 {
             self.chrome.close_window();
@@ -1827,19 +1827,19 @@ impl App {
             ui::blank(out, old);
         }
         let Some(menu) = &self.menu else { return };
-        let first = |action| self.bindings.keys_for(action).into_iter().next().unwrap_or_default();
-        let (inspect, quit) = (first(Action::Inspect), first(Action::Quit));
-        let keys = |item| match item {
-            menu::Item::SelectElement => inspect.clone(),
-            menu::Item::Quit => quit.clone(),
-            _ => String::new(),
+        // The first key bound to each item's action, as Chrome shows them.
+        let bindings = &self.bindings;
+        let keys = |item: menu::Item| {
+            item.action().and_then(|action| bindings.keys_for(action).into_iter().next()).unwrap_or_default()
         };
         self.menu_rect = Some(menu.render(out, self.window.cols, keys));
     }
 
     fn open_menu(&mut self) {
         self.close_help();
-        self.menu = Some(Menu::default());
+        let offer =
+            menu::Offer { windows: self.chrome.windows().1, zoom: self.zoom, devtools: self.chrome.has_devtools() };
+        self.menu = Some(Menu::new(offer));
         if let Some(splash) = &mut self.splash {
             splash.again();
         }
@@ -1856,14 +1856,24 @@ impl App {
     fn choose(&mut self, item: menu::Item) {
         self.close_menu();
         match item {
-            menu::Item::SelectElement => self.start_inspecting(),
             menu::Item::ViewSource => {
                 self.source_request = Some(self.chrome.evaluate_value(SOURCE));
             }
             menu::Item::Network => {
                 self.network_request = Some(self.chrome.evaluate_value(TIMINGS));
             }
+            // The key quits at once; from the menu, it asks first.
             menu::Item::Quit => self.ask_quit(),
+            // A popup may have closed while the menu was open: then there
+            // is only kb's own window, which this item never offered.
+            menu::Item::CloseWindow if self.chrome.windows().1 == 1 => {}
+            // The rest do what their keys do.
+            _ => {
+                if let Some(action) = item.action() {
+                    let key = Key { code: KeyCode::Enter, ctrl: false, alt: false, shift: false, cmd: false };
+                    self.perform(action, &key);
+                }
+            }
         }
     }
 
@@ -2242,9 +2252,13 @@ impl App {
             if mouse.kind == MouseKind::Move {
                 let shape = match self.bar_hit(col) {
                     Hit::Address(_) => "text",
-                    Hit::Back | Hit::Forward | Hit::Reload | Hit::Menu | Hit::PreviousWindow | Hit::NextWindow => {
-                        "pointer"
-                    }
+                    Hit::Back
+                    | Hit::Forward
+                    | Hit::Reload
+                    | Hit::Menu
+                    | Hit::PreviousWindow
+                    | Hit::NextWindow
+                    | Hit::CloseWindow => "pointer",
                     Hit::Nothing => "default",
                 };
                 self.set_pointer(shape);
@@ -2268,6 +2282,7 @@ impl App {
                 Hit::Address(_) => self.bar.focus(),
                 Hit::PreviousWindow => self.switch_window(-1),
                 Hit::NextWindow => self.switch_window(1),
+                Hit::CloseWindow => self.close_window(),
                 Hit::Menu => self.open_menu(),
                 Hit::Nothing => {}
             }
