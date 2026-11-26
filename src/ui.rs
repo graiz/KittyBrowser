@@ -12,6 +12,9 @@ const RELOAD: std::ops::RangeInclusive<usize> = 7..=9;
 const FIELD: usize = 11;
 /// The menu button, at the right end: a space, ⋮, a space.
 const MENU: usize = 3;
+/// The switcher's close button, at its end: a space and ✕. The space, and
+/// the gap after it, count as ✕ too, so it is easier to hit.
+const CLOSE: usize = 2;
 /// The fewest columns of address kept when the switcher and the badge
 /// share the bar with it.
 const MIN_FIELD: usize = 8;
@@ -24,22 +27,25 @@ pub enum Hit {
     Forward,
     Reload,
     Menu,
-    /// The window switcher's halves.
+    /// The window switcher's halves, and its ✕.
     PreviousWindow,
     NextWindow,
+    CloseWindow,
     /// A click in the address field, as an offset into the visible text.
     Address(usize),
     Nothing,
 }
 
 /// The right of the bar, after the address field: the window switcher when
-/// a page has opened windows ("‹ 2/3 ›" for the second of three shown), then
+/// a page has opened windows ("‹ 2/3 › ✕" for the second of three shown,
+/// ✕ closing it, as a tab's does; there is none on kb's own window, so it
+/// can't quit kb by mistake), then
 /// the badge (a note, the spinner, a download's progress, the zoom), then ⋮
 /// at the end, as far as there's room, the address keeping MIN_FIELD columns.
 /// Returns the switcher and the badge to show, and the field's width.
 fn right_side(cols: usize, windows: (usize, usize), badge: Option<&str>) -> (Option<String>, Option<&str>, usize) {
     let mut width = cols.saturating_sub(FIELD + 2 + MENU);
-    let text = format!("‹ {}/{} ›", windows.0, windows.1);
+    let text = format!("‹ {}/{} › ✕", windows.0, windows.1);
     let switcher = (windows.1 > 1 && width > MIN_FIELD + text.chars().count()).then_some(text);
     width -= switcher.as_ref().map_or(0, |text| text.chars().count() + 1);
     let badge = badge.filter(|badge| width > MIN_FIELD + badge.chars().count());
@@ -67,9 +73,12 @@ pub fn hit(col: usize, cols: usize, windows: (usize, usize), badge: Option<&str>
         Hit::Menu
     } else if col > cols - MENU - badge {
         Hit::Nothing
+    } else if switcher > 0 && col >= switcher_start + switcher - CLOSE {
+        Hit::CloseWindow
     } else if switcher > 0 && col >= switcher_start {
-        // Either half: wide enough to hit, the arrows being one column each.
-        if col < switcher_start + switcher / 2 {
+        // Either half of "‹ 2/3 ›": wide enough to hit, the arrows being
+        // one column each.
+        if col < switcher_start + (switcher - CLOSE) / 2 {
             Hit::PreviousWindow
         } else {
             Hit::NextWindow
@@ -780,13 +789,20 @@ mod tests {
         assert_eq!(hit(78, (1, 1)), Hit::Menu);
         assert_eq!(hit(80, (1, 1)), Hit::Menu);
         assert_eq!(hit(81, (1, 1)), Hit::Nothing);
-        // "‹ 2/3 ›" takes columns 70 to 76, before ⋮.
-        assert_eq!(hit(68, (2, 3)), Hit::Address(56));
+        // "‹ 2/3 › ✕" takes columns 68 to 76, before ⋮: ‹ and its half
+        // of the count, then › and its half, then " ✕".
+        assert_eq!(hit(67, (2, 3)), Hit::Address(55));
+        assert_eq!(hit(68, (2, 3)), Hit::PreviousWindow);
         assert_eq!(hit(70, (2, 3)), Hit::PreviousWindow);
-        assert_eq!(hit(72, (2, 3)), Hit::PreviousWindow);
-        assert_eq!(hit(73, (2, 3)), Hit::NextWindow);
-        assert_eq!(hit(76, (2, 3)), Hit::NextWindow);
+        assert_eq!(hit(71, (2, 3)), Hit::NextWindow);
+        assert_eq!(hit(74, (2, 3)), Hit::NextWindow);
+        assert_eq!(hit(75, (2, 3)), Hit::CloseWindow);
+        assert_eq!(hit(76, (2, 3)), Hit::CloseWindow);
+        // And the gap after it, so ✕ is three columns to hit.
+        assert_eq!(hit(77, (2, 3)), Hit::CloseWindow);
         assert_eq!(hit(78, (2, 3)), Hit::Menu);
+        // With one window, no switcher and no ✕: the address runs on.
+        assert_eq!(hit(75, (1, 1)), Hit::Address(63));
     }
 
     #[test]
@@ -832,6 +848,7 @@ mod tests {
         let hit = |col| hit(col, 80, (2, 3), Some(badge));
         assert_eq!(hit(column("‹")), Hit::PreviousWindow);
         assert_eq!(hit(column("›")), Hit::NextWindow);
+        assert_eq!(hit(column("✕")), Hit::CloseWindow);
         assert_eq!(hit(column("Downloading")), Hit::Nothing);
         assert_eq!(hit(column("⋮")), Hit::Menu);
         assert_eq!(hit(column("‹") - 2), Hit::Address(column("‹") - 2 - 12));
