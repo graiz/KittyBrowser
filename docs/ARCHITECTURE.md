@@ -268,8 +268,9 @@ default. Things to try next:
 ### Characters (`ascii.rs`)
 
 In a terminal that can't draw images, with `KB_ASCII` set, or after ASCII
-mode is chosen in the ⋮ menu (shown when it is opened with Ctrl held) or
-`about:ascii` is typed in the address field, each frame is drawn in
+mode is chosen in the ⋮ menu (shown when it is opened with Ctrl held; once
+on, the plain menu offers Exit ASCII mode) or `about:ascii` is typed in the
+address field, each frame is drawn in
 characters instead. This is a branch in `App::draw` beside `PageImage`,
 which it shares nothing with but the decoder.
 

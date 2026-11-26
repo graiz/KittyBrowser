@@ -1943,13 +1943,10 @@ impl App {
             self.uncover(out, old);
         }
         let Some(menu) = &self.menu else { return };
-        // The first key bound to each item's action, as Chrome shows them,
-        // and whether ASCII mode is on.
+        // The first key bound to each item's action, as Chrome shows them.
         let bindings = &self.bindings;
-        let ascii = self.ascii.is_some();
-        let keys = |item: menu::Item| match item {
-            menu::Item::Ascii if ascii => "on".to_owned(),
-            _ => item.action().and_then(|action| bindings.keys_for(action).into_iter().next()).unwrap_or_default(),
+        let keys = |item: menu::Item| {
+            item.action().and_then(|action| bindings.keys_for(action).into_iter().next()).unwrap_or_default()
         };
         self.menu_rect = Some(menu.render(out, self.window.cols, self.zoom, keys));
     }
@@ -1958,10 +1955,16 @@ impl App {
         self.open_menu_with(false);
     }
 
-    /// Open the ⋮ menu, with its hidden items (ASCII mode) if `all`.
+    /// Open the ⋮ menu, with its hidden items (ASCII mode) if `all`. A
+    /// terminal that can't draw images has no other mode to offer.
     fn open_menu_with(&mut self, all: bool) {
         self.close_help();
-        let offer = menu::Offer { windows: self.chrome.windows().1, devtools: self.chrome.has_devtools(), hidden: all };
+        let offer = menu::Offer {
+            windows: self.chrome.windows().1,
+            devtools: self.chrome.has_devtools(),
+            hidden: all && self.graphics,
+            leave_ascii: self.ascii.is_some() && self.graphics,
+        };
         self.menu = Some(Menu::new(offer));
         if let Some(splash) = &mut self.splash {
             splash.again();

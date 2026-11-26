@@ -73,8 +73,9 @@ and if it can't draw kitty graphics, says why and offers to draw pages in
 characters instead (ASCII mode): the page's text as text, wrapped where the
 page wraps it, and pictures in coloured blocks matched to Chrome's pixels a
 cell at a time; `KB_FORCE=1` skips the question. To see ASCII mode
-anywhere, Ctrl+click the ⋮ menu and choose ASCII mode (again to go back),
-type `about:ascii` in the address field, or start kb with `KB_ASCII=1`.
+anywhere, Ctrl+click the ⋮ menu and choose ASCII mode, type `about:ascii`
+in the address field, or start kb with `KB_ASCII=1`. To go back, choose
+Exit ASCII mode in the ⋮ menu (no Ctrl needed), or type `about:ascii` again.
 
 ## Install
 

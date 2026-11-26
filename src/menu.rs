@@ -8,7 +8,8 @@
 //! them resets it, as Ctrl+0 does. Terminals often keep Ctrl+= and Ctrl+-
 //! for their own font size, so the menu may be the only way to zoom.
 //! ASCII mode, the page drawn in characters, is offered only when the menu
-//! is opened with Ctrl held (or the right button), as few will want it.
+//! is opened with Ctrl held (or the right button), as few will want it;
+//! once on, the plain menu offers to leave it, so no one is stuck there.
 
 use crate::keys::Action;
 use crate::term::input::{Key, KeyCode};
@@ -23,7 +24,7 @@ pub enum Item {
     CloseWindow,
     /// The zoom row: − and + step the zoom, and its percentage resets it.
     Zoom,
-    /// The page in characters, or in pixels again.
+    /// The page in characters, or (as "Exit ASCII mode") in pixels again.
     Ascii,
     /// Inspect mode: point at an element for its details.
     SelectElement,
@@ -64,6 +65,10 @@ pub struct Offer {
     pub devtools: bool,
     /// Whether the menu was opened with Ctrl, to show ASCII mode too.
     pub hidden: bool,
+    /// Whether the page is in characters and can go back to pixels: then
+    /// the menu offers that, Ctrl or not. (In a terminal that can't draw
+    /// images, pages stay in characters, and the item isn't shown.)
+    pub leave_ascii: bool,
 }
 
 /// A line of the menu: an item and what it says, or a rule between groups.
@@ -115,7 +120,10 @@ impl Menu {
                 item(Item::Find, "Find in page"),
                 item(Item::CloseWindow, "Close window").filter(|_| offer.windows > 1),
                 item(Item::Zoom, "Zoom"),
-                item(Item::Ascii, "ASCII mode").filter(|_| offer.hidden),
+                match offer.leave_ascii {
+                    true => item(Item::Ascii, "Exit ASCII mode"),
+                    false => item(Item::Ascii, "ASCII mode").filter(|_| offer.hidden),
+                },
             ],
             vec![
                 item(Item::SelectElement, "Select element"),
@@ -295,7 +303,7 @@ mod tests {
         menu.key(&Key { code, ctrl: false, alt: false, shift: false, cmd: false })
     }
 
-    const PLAIN: Offer = Offer { windows: 1, devtools: false, hidden: false };
+    const PLAIN: Offer = Offer { windows: 1, devtools: false, hidden: false, leave_ascii: false };
 
     #[test]
     fn it_offers_only_what_can_be_done_now() {
@@ -303,7 +311,7 @@ mod tests {
             Menu::new(PLAIN).items(),
             [Item::Find, Item::Zoom, Item::SelectElement, Item::ViewSource, Item::Network, Item::Shortcuts, Item::Quit]
         );
-        let all = Menu::new(Offer { windows: 2, devtools: true, hidden: false });
+        let all = Menu::new(Offer { windows: 2, devtools: true, hidden: false, leave_ascii: false });
         assert_eq!(
             all.items(),
             [
@@ -441,5 +449,15 @@ mod tests {
         press(&mut menu, KeyCode::Down);
         press(&mut menu, KeyCode::Down);
         assert_eq!(press(&mut menu, KeyCode::Enter), Outcome::Choose(Item::Ascii));
+    }
+
+    #[test]
+    fn in_ascii_mode_the_plain_menu_offers_to_leave_it() {
+        let rows = |offer: Offer| Menu::new(offer).rows;
+        let exit = Row::Item(Item::Ascii, "Exit ASCII mode".to_owned());
+        assert!(rows(Offer { leave_ascii: true, ..PLAIN }).contains(&exit));
+        assert!(rows(Offer { leave_ascii: true, hidden: true, ..PLAIN }).contains(&exit));
+        let offered = rows(Offer { hidden: true, ..PLAIN });
+        assert!(!offered.contains(&exit) && offered.contains(&Row::Item(Item::Ascii, "ASCII mode".to_owned())));
     }
 }
