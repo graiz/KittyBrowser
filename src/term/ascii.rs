@@ -106,6 +106,16 @@ const WORTH: f64 = 12.0;
 /// icon fonts: their letters are names (`font_download`) or private code
 /// points that only that font draws. They are left to the pixels: not read
 /// as text, not hidden, and kept in their own face.
+/// Whether a computed `font-family` is an icon font's, by the first face
+/// in it: a text font may name a symbols font after it, and the system's
+/// symbol fonts are text.
+macro_rules! icon_face {
+    () => {
+        r#"(family => { const first = family.split(',')[0].replace(/["']/g, '').trim();
+  return /icon|symbol|awesome|glyph|fontello|icomoon/i.test(first) && !/^(noto sans symbols|apple symbols|segoe ui symbol)/i.test(first); })"#
+    };
+}
+
 macro_rules! icons {
     () => {
         r#"[class*="material-icons"], [class*="material-symbols"], [class*="google-symbols"], mat-icon, .fa, .fas, .far, .fal, .fad, .fab, .fa-solid, .fa-regular, .fa-brands, .glyphicon, .bi, .codicon, .octicon, [class^="icon-"], [class*=" icon-"]"#
@@ -142,6 +152,9 @@ pub const READ_TEXT: &str = concat!(
   const ICONS = `"#,
     icons!(),
     r#"`;
+  const ICON_FACE = "#,
+    icon_face!(),
+    r#";
   const BUDGET = 40, began = performance.now(), W = innerWidth, H = innerHeight;
   if (window.__kbTooMuch && began - window.__kbTooMuch < 5000) return JSON.stringify({ w: W, h: H, complex: true });
   if (!window.__kbHideText) {
@@ -151,7 +164,7 @@ pub const READ_TEXT: &str = concat!(
       text-decoration-color: transparent !important;
       text-shadow: none !important; }
     :is(${ICONS}) { -webkit-text-fill-color: currentcolor !important; }
-    ::selection { background-color: transparent !important; }`);
+    *:not(input, textarea)::selection { background-color: transparent !important; }`);
     window.__kbHidden = new Set();
   }
   const roots = [document], colours = [], index = new Map(), lines = [];
@@ -162,9 +175,14 @@ pub const READ_TEXT: &str = concat!(
   const range = document.createRange(), fixedness = new Map();
   const parent = el => el.parentElement || (el.parentNode && el.parentNode.host) || null;
   // Whether text stays put in the window as the page scrolls: in a fixed
-  // box, or a sticky one that is stuck, which is where its own top (or
-  // bottom) says; a sticky box not stuck yet scrolls with the page.
+  // box, or a sticky one that is stuck to the window, which is where its
+  // own top (or bottom) says; a sticky box not stuck yet scrolls with the
+  // page. One in a box that scrolls by itself sticks to that box, which
+  // the page's scroll doesn't move, so it is the page's.
   const stuck = (el, style) => {
+    for (let up = parent(el); up && up !== document.body && up !== document.documentElement; up = parent(up)) {
+      if (up.nodeType === 1 && getComputedStyle(up).overflowY !== 'visible') return false;
+    }
     const r = el.getBoundingClientRect(), top = parseFloat(style.top), bottom = parseFloat(style.bottom);
     return (!isNaN(top) && Math.abs(r.top - top) < 1) || (!isNaN(bottom) && Math.abs(H - r.bottom - bottom) < 1);
   };
@@ -227,7 +245,7 @@ pub const READ_TEXT: &str = concat!(
     const style = getComputedStyle(el);
     // An icon font's letters, which only it draws: shown by the pixels.
     if (el.closest(ICONS)) return;
-    if (/icon|symbols|awesome|glyph/i.test(style.fontFamily)) {
+    if (ICON_FACE(style.fontFamily)) {
       el.style.setProperty('-webkit-text-fill-color', 'currentcolor', 'important');
       return;
     }
@@ -252,11 +270,21 @@ pub const READ_TEXT: &str = concat!(
     const box1 = (from, to) => { range.setStart(node, from); range.setEnd(node, to); return range.getBoundingClientRect(); };
     const width = at => (data.codePointAt(at) > 0xffff ? 2 : 1);
     // The letter at `at`, or the first after it with a box: collapsed
-    // white space has none.
+    // white space has none, however long the run (an indented source
+    // line), so such a run is passed over at once rather than a letter at
+    // a time. A space that shows (between a link and the words after it)
+    // is a letter like any other.
+    const shown = /\S/g;
     const letter = at => {
-      for (let k = 0; at < n && k < 8; k++, at += width(at)) {
+      for (let k = 0; at < n && k < 64; k++) {
         const r = box1(at, at + width(at));
-        if (r.width > 0 || r.height > 0) return [at, r];
+        if (r.width > 0) return [at, r];
+        if (collapse && /\s/.test(data[at])) {
+          shown.lastIndex = at;
+          const next = shown.exec(data);
+          if (!next) return null;
+          at = next.index;
+        } else at += width(at);
       }
       return null;
     };
@@ -456,6 +484,9 @@ const TERMINAL_TYPE: &str = concat!(
   const ICONS = `"#,
     icons!(),
     r#"`;
+  const ICON_FACE = "#,
+    icon_face!(),
+    r#";
   const W = (__W__), H = (__H__), BUDGET = 15, began = performance.now();
   const FACE = 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace';
   const WIDE_FACES = ['Hiragino Sans W3', 'HiraginoSans-W3', 'Hiragino Kaku Gothic ProN W3', 'HiraKakuProN-W3',
@@ -495,28 +526,80 @@ const TERMINAL_TYPE: &str = concat!(
   if (!window.__kbType) window.__kbType = new CSSStyleSheet();
   if (window.__kbTypeCss !== css) { window.__kbType.replaceSync(css); window.__kbTypeCss = css; }
   const roots = [document, ...(window.__kbHidden || [])];
-  for (const root of roots) {
-    if (!root.adoptedStyleSheets.includes(window.__kbType)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, window.__kbType];
-  }
 
-  const SAVED = ['margin-top', 'margin-bottom', 'padding-top', 'padding-bottom', 'height', 'border-spacing'];
+  // What kb writes into elements' own styles, and what was there before:
+  // put back only where it is still as kb left it, so that what the page
+  // has set since (a panel's height, opened) stays.
   window.__kbUnsnap = () => {
-    for (const [el, saved] of window.__kbSnap ? window.__kbSnap.done : []) {
-      if (!saved) continue;
-      SAVED.forEach((side, i) => {
-        if (saved[i][0]) el.style.setProperty(side, saved[i][0], saved[i][1]);
-        else el.style.removeProperty(side);
-      });
+    const snap = window.__kbSnap;
+    if (!snap) return;
+    for (const [el, props] of snap.written) {
+      for (const [prop, [was, priority, wrote]] of props) {
+        if (el.style.getPropertyValue(prop) !== wrote) continue;
+        if (was) el.style.setProperty(prop, was, priority);
+        else el.style.removeProperty(prop);
+      }
     }
-    if (window.__kbSnap) { window.__kbSnap.done.clear(); window.__kbSnap.boxes.clear(); }
+    snap.written.clear();
+    snap.done.clear();
+    snap.boxes.clear();
   };
   const sheets = roots.reduce((n, root) => n + root.styleSheets.length, 0);
-  const snap = window.__kbSnap || (window.__kbSnap = { h: 0, sheets: 0, done: new Map(), boxes: new Map() });
+  const snap = window.__kbSnap
+    || (window.__kbSnap = { h: 0, sheets: 0, done: new Set(), boxes: new Map(), written: new Map(), iconQueue: new Set() });
   if (snap.h !== H || snap.sheets !== sheets) {
     window.__kbUnsnap();
     snap.h = H;
     snap.sheets = sheets;
+    // What was put back is looked at again, icons too, without waiting.
+    snap.iconAt = undefined;
   }
+  const write = (el, prop, value) => {
+    if (!snap.written.has(el)) snap.written.set(el, new Map());
+    const props = snap.written.get(el);
+    const was = props.get(prop) || [el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)];
+    el.style.setProperty(prop, value, 'important');
+    props.set(prop, [was[0], was[1], el.style.getPropertyValue(prop)]);
+  };
+  const fresh = [];
+  for (const root of roots) {
+    for (const el of root.querySelectorAll('*')) if (!snap.done.has(el)) fresh.push(el);
+  }
+  for (const root of roots) {
+    if (!root.adoptedStyleSheets.includes(window.__kbType)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, window.__kbType];
+  }
+
+  // Icon fonts a class doesn't name, found by their face: the page's own,
+  // read with kb's sheet off for a moment, and kept, with their size and
+  // ligatures, so that their icons are drawn. Only the first face in the
+  // list counts: a text font may name a symbols font after it. Turning the
+  // sheet off restyles the whole page, so only elements whose text could
+  // be an icon's are looked at (a name in lower case and underscores, as a
+  // ligature's, or letters from the private use area), queued, and at most
+  // every ICON_GAP.
+  const ICON_GAP = 2000;
+  const iconish = el => [...el.childNodes].some(n => n.nodeType === 3 && /^\s*([a-z0-9_]{2,40}|[\ue000-\uf8ff]+)\s*$/.test(n.data));
+  for (const el of fresh) {
+    if (!(el instanceof SVGElement) && iconish(el) && !el.closest(ICONS)) snap.iconQueue.add(el);
+  }
+  if (snap.iconQueue.size && !(performance.now() - (snap.iconAt || -Infinity) < ICON_GAP)) {
+    snap.iconAt = performance.now();
+    window.__kbType.disabled = true;
+    const icons = [];
+    for (const el of snap.iconQueue) {
+      snap.iconQueue.delete(el);
+      if (!el.isConnected) continue;
+      const style = getComputedStyle(el);
+      if (ICON_FACE(style.fontFamily)) icons.push([el, style.fontFamily, style.fontSize]);
+    }
+    window.__kbType.disabled = false;
+    for (const [el, family, size] of icons) {
+      write(el, 'font-family', family);
+      write(el, 'font-size', size);
+      write(el, 'font-variant-ligatures', 'normal');
+    }
+  }
+
   // What isn't text, whose height isn't lines: a picture, a table.
   const BOX = /^(img|video|canvas|iframe|svg|object|embed|table)$/;
   const rows = v => Math.round(v / H) * H;
@@ -525,42 +608,53 @@ const TERMINAL_TYPE: &str = concat!(
     return v.endsWith('px') ? parseFloat(v) : null;
   };
   const writes = [];
-  out: for (const root of roots) {
-    for (const el of root.querySelectorAll('*')) {
-      if (snap.done.has(el)) continue;
-      if (performance.now() - began > BUDGET) break out;
-      const style = getComputedStyle(el);
-      const box = BOX.test(el.localName) && !(el.parentElement instanceof SVGElement)
-        && style.display !== 'none' && style.float === 'none' && !/^(absolute|fixed)$/.test(style.position);
-      if ((el instanceof SVGElement && !box) || /^(inline|contents|none)$/.test(style.display) && !box) { snap.done.set(el, null); continue; }
-      snap.done.set(el, SAVED.map(side => [el.style.getPropertyValue(side), el.style.getPropertyPriority(side)]));
-      // A table's rows, by their own height or the space between them, as
-      // a spacer row of a few pixels in a table laid out with them.
-      if (el.localName === 'tr') {
-        const height = el.getBoundingClientRect().height;
-        if (height > 0 && Math.abs(rows(height) - height) > 0.01) writes.push([el, 'height', `${rows(height)}px`]);
+  for (const el of fresh) {
+    if (performance.now() - began > BUDGET) break;
+    snap.done.add(el);
+    const style = getComputedStyle(el);
+    const box = BOX.test(el.localName) && !(el.parentElement instanceof SVGElement)
+      && style.display !== 'none' && style.float === 'none' && !/^(absolute|fixed)$/.test(style.position);
+    if ((el instanceof SVGElement && !box) || /^(inline|contents|none)$/.test(style.display) && !box) continue;
+    // A table's rows, by their own height or the space between them, as
+    // a spacer row of a few pixels in a table laid out with them.
+    if (el.localName === 'tr') {
+      const height = el.getBoundingClientRect().height;
+      if (height > 0 && Math.abs(rows(height) - height) > 0.01) writes.push([el, 'height', `${rows(height)}px`]);
+    }
+    if (/table/.test(style.display) && style.borderCollapse === 'separate') {
+      const [x, y = x] = style.borderSpacing.split(' ').map(parseFloat);
+      if (y && Math.abs(rows(y) - y) > 0.01) writes.push([el, 'border-spacing', `${x}px ${rows(y)}px`]);
+    }
+    if (box) snap.boxes.set(el, px(style, 'margin-bottom') ?? 0);
+    // Only what the page gave as a length: `auto` (a footer pushed to the
+    // bottom of its card) and percentages come out of getComputedStyle in
+    // pixels too, but are left alone, or they would be frozen.
+    const given = el.computedStyleMap ? el.computedStyleMap() : null;
+    const length = side => {
+      const v = px(style, side);
+      if (v === null || !given) return v;
+      const value = given.get(side);
+      return value instanceof CSSUnitValue && value.unit === 'px' ? v : null;
+    };
+    for (const edge of ['top', 'bottom']) {
+      const margin = length(`margin-${edge}`), padding = length(`padding-${edge}`);
+      const border = px(style, `border-${edge}-width`) || 0;
+      let inside = padding ?? px(style, `padding-${edge}`) ?? 0;
+      if (padding !== null) {
+        inside = Math.max(0, rows(padding + border) - border);
+        if (Math.abs(inside - padding) > 0.01) writes.push([el, `padding-${edge}`, `${inside}px`]);
       }
-      if (/table/.test(style.display) && style.borderCollapse === 'separate') {
-        const [x, y = x] = style.borderSpacing.split(' ').map(parseFloat);
-        if (y && Math.abs(rows(y) - y) > 0.01) writes.push([el, 'border-spacing', `${x}px ${rows(y)}px`]);
-      }
-      if (box) snap.boxes.set(el, px(style, 'margin-bottom') ?? 0);
-      for (const edge of ['top', 'bottom']) {
-        const margin = px(style, `margin-${edge}`), padding = px(style, `padding-${edge}`);
-        const border = px(style, `border-${edge}-width`) || 0;
-        let inside = padding;
-        if (padding !== null) {
-          inside = Math.max(0, rows(padding + border) - border);
-          if (Math.abs(inside - padding) > 0.01) writes.push([el, `padding-${edge}`, `${inside}px`]);
-        }
-        if (margin !== null && !(edge === 'bottom' && snap.boxes.has(el))) {
-          const want = rows(margin + (inside ?? 0) + border) - (inside ?? 0) - border;
-          if (Math.abs(want - margin) > 0.01) writes.push([el, `margin-${edge}`, `${want}px`]);
-        }
+      if (margin !== null && !(edge === 'bottom' && snap.boxes.has(el))) {
+        let want = rows(margin + inside + border) - inside - border;
+        // A border's pixel or two come out of the margin (a heading's
+        // underline); more would pull the box over its neighbours, so the
+        // margin goes on to the next row instead.
+        while (margin >= 0 && want < -2) want += H;
+        if (Math.abs(want - margin) > 0.01) writes.push([el, `margin-${edge}`, `${want}px`]);
       }
     }
   }
-  for (const [el, side, want] of writes) el.style.setProperty(side, want, 'important');
+  for (const [el, prop, value] of writes) write(el, prop, value);
   // Then, laid out so, each box's bottom margin to what makes it whole
   // rows, every time, as a picture's height changes when it loads.
   const margins = [];
@@ -570,7 +664,7 @@ const TERMINAL_TYPE: &str = concat!(
     const want = Math.ceil((height + margin - 0.5) / H) * H - height;
     if (Math.abs(want - (parseFloat(el.style.marginBottom) || margin)) > 0.01) margins.push([el, want]);
   }
-  for (const [el, want] of margins) el.style.setProperty('margin-bottom', `${want}px`, 'important');
+  for (const [el, want] of margins) write(el, 'margin-bottom', `${want}px`);
 })()"#
 );
 

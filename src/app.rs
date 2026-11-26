@@ -422,6 +422,8 @@ struct App {
     /// How far the page was scrolled in the newest frame, in CSS pixels,
     /// to keep the page's letters on it.
     frame_scroll: (f64, f64),
+    /// When the scroll in `frame_scroll` came with a frame.
+    frame_at: Instant,
     /// In characters: whether frames have come since the page's text was
     /// last read, when it was asked for, and the request in flight.
     text_wanted: bool,
@@ -453,6 +455,9 @@ struct App {
     focused: bool,
     /// When the user or an agent last did something.
     last_input: Instant,
+    /// When the page was last acted on: a key, a click, a scroll, a drag
+    /// or a command, not the mouse passing over it.
+    last_action: Instant,
     /// Keeps each scroll on one axis.
     rails: crate::scroll::Rails,
     /// Spreads scrolls down over time.
@@ -669,6 +674,7 @@ fn browse(
         graphics,
         ascii,
         frame_scroll: (0.0, 0.0),
+        frame_at: Instant::now(),
         text_wanted: false,
         text_asked: Instant::now(),
         text_request: None,
@@ -684,6 +690,7 @@ fn browse(
         started: Instant::now(),
         focused: true,
         last_input: Instant::now(),
+        last_action: Instant::now(),
         rails: Default::default(),
         glide: Default::default(),
         glide_at: WheelAt::default(),
@@ -785,6 +792,14 @@ fn browse(
             matches!(message, Msg::Control(_) | Msg::Term(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))
         }) {
             app.last_input = Instant::now();
+        }
+        // What can move the page: not the mouse passing over it.
+        if messages.iter().any(|message| match message {
+            Msg::Control(_) | Msg::Term(Event::Key(_) | Event::Paste(_)) => true,
+            Msg::Term(Event::Mouse(mouse)) => mouse.kind != MouseKind::Move || mouse.button.is_some(),
+            _ => false,
+        }) {
+            app.last_action = Instant::now();
         }
         let mut messages = messages.into_iter().enumerate().peekable();
         while let Some((index, message)) = messages.next() {
@@ -968,10 +983,14 @@ fn browse(
                         if app.text_request == Some(id) {
                             app.text_request = None;
                             let text = message["result"]["result"]["value"].as_str().and_then(Text::parse);
-                            // The text is drawn where the page is now, which
-                            // a scroll over plain text sends no frame to say.
+                            // The text is drawn where the page was when it was
+                            // read, which a scroll over plain text may send no
+                            // frame to say; but never over a frame that came
+                            // since it was asked for, which is newer.
                             if let Some(scroll) = text.as_ref().and_then(Text::scroll) {
-                                app.frame_scroll = scroll;
+                                if app.frame_at < app.text_asked {
+                                    app.frame_scroll = scroll;
+                                }
                             }
                             if let Some(ascii) = &mut app.ascii {
                                 ascii.set_text(text);
@@ -1013,10 +1032,18 @@ fn browse(
                             if fits && app.frame.as_deref() != Some(png.as_str()) {
                                 app.frame = Some(png);
                                 app.frame_scroll = app.chrome.frame_scroll();
+                                app.frame_at = Instant::now();
                                 app.text_wanted = true;
                                 app.frames += 1;
                                 // The blank page that comes first stays under the logo.
                                 new_frame = app.splash.is_none() || app.committed;
+                            } else if fits && app.ascii.is_some() && app.chrome.frame_scroll() != app.frame_scroll {
+                                // The same pixels at another scroll (plain text
+                                // on white, its letters hidden): the letters move.
+                                app.frame_scroll = app.chrome.frame_scroll();
+                                app.frame_at = Instant::now();
+                                app.text_wanted = true;
+                                new_frame = true;
                             }
                         }
                         Some(PageEvent::Url(url)) => {
@@ -1426,7 +1453,8 @@ impl App {
     }
 
     /// In characters, read the page's text again once frames have come
-    /// since it was last read, or while someone is using the page, at most
+    /// since it was last read, or for a moment after the page was acted on
+    /// (not the mouse passing over it), at most
     /// every TEXT_GAP: the script is work for the page, and meanwhile the
     /// letters follow the scroll each frame comes with. Input counts as
     /// well as frames because a scroll over plain text changes no pixels
@@ -1434,7 +1462,7 @@ impl App {
     /// request with no answer (a page gone) is given up after TEXT_WAIT.
     fn read_text(&mut self) {
         let waiting = self.text_request.is_some() && self.text_asked.elapsed() < TEXT_WAIT;
-        let wanted = self.text_wanted || self.last_input.elapsed() < TEXT_AFTER_INPUT;
+        let wanted = self.text_wanted || self.last_action.elapsed() < TEXT_AFTER_INPUT;
         if self.ascii.is_none() || !wanted || waiting || self.text_asked.elapsed() < TEXT_GAP {
             return;
         }
