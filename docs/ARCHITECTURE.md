@@ -38,9 +38,10 @@ is what keeps a slow terminal from falling behind.
 Before Chrome starts, kb asks the terminal whether it draws kitty graphics
 (`term::draws_graphics`): a query about a one-pixel image, then a request
 for its attributes (DA1). Every terminal answers DA1, and answers in order,
-so a DA1 reply with no graphics reply before it means no. kb then prints
-why (naming tmux, screen or Zellij when it is inside one) and exits instead
-of showing a blank pane. It waits 1.5 s at most (`kb doctor` waits 5). With
+so a DA1 reply with no graphics reply before it means no. kb then says
+why (naming tmux, screen or Zellij when it is inside one) and asks whether
+to draw pages in characters instead (see "Characters" below); Enter means
+yes, and no exits as before. It waits 1.5 s at most (`kb doctor` waits 5). With
 no answer by then, as over a slow link, kb goes ahead as if the answer were
 yes. It asks last, just before entering raw mode, so replies that come
 later are read and ignored by the input thread instead of being left for
@@ -263,6 +264,64 @@ default. Things to try next:
 1. Find a way to cut Chrome's latency without the unlimited frame rate.
 2. Stop Chrome drawing at all when the pane is hidden.
 3. Photographs: a 3 MB PNG takes 60 ms to decode, where JPEG takes 25.
+
+### Characters (`ascii.rs`)
+
+In a terminal that can't draw images, with `KB_ASCII` set, or after ASCII
+mode is chosen in the ⋮ menu (shown when it is opened with Ctrl held) or
+`about:ascii` is typed in the address field, each frame is drawn in
+characters instead. This is a branch in `App::draw` beside `PageImage`,
+which it shares nothing with but the decoder.
+
+The page's text is printed as text. `READ_TEXT`, run in the page at most
+every 100 ms while frames come, returns each line of each text node in view,
+open shadow roots included, as the page wrapped it: its letters, its
+colour and its box, in document coordinates (viewport ones in fixed
+boxes). Text under something painted (a background, a picture) is left
+out, but not text under a transparent element: pages stretch links over
+whole cards to make them clickable. Text kept for screen readers (clipped
+to a pixel) is left out too. A page the script can't read in 40 ms is
+drawn from its pixels alone, its text shown again, until a try 5 seconds
+later.
+Each frame carries the scroll it was drawn at (`Chrome::frame_scroll`), so
+the lines stay on the page as it scrolls between readings. A line starts in
+the cell where the page starts it, on the row through its middle, with one
+letter per cell: a terminal's letters are wider or narrower than the
+page's, but lines break where the page breaks them. A line that runs long
+stops where the next text on its row starts, and one that follows another
+straight on (a link in a sentence) goes on after it. Text scrolls by whole
+rows, the scroll rounded to the nearest cell, so that lines at different
+heights in their cells move together instead of one after another. Only characters one cell wide are printed
+(no controls, no CJK or emoji), so page text can't move the cursor or
+drive the terminal. The script also hides the page's own text
+(`-webkit-text-fill-color: transparent`, from a constructed sheet a
+content security policy can't refuse) so frames show what is behind it;
+`SHOW_TEXT` puts it back when the page goes back to pixels.
+
+Everything else is drawn from the pixels. Each cell gets the character
+and the two colours closest to the frame's pixels under it: a block covers
+part of its cell (a half, a quarter, an eighth, or with sextants a sixth),
+with the foreground colour on that part and the background on the rest.
+The best colours for a shape are the averages of the pixels inside and
+outside it, and the shape chosen is the one whose split takes the most off
+the pixels' spread about their average. Running sums over the cell's
+pixels give each part's total from four lookups, so trying every shape
+costs about as much as reading the pixels once: about a millisecond for
+1,800 cells. A shape that takes off less than a few steps of colour per
+pixel leaves the cell a space, so noise doesn't flicker.
+
+Only cells whose pixels changed are worked out again, and only cells that
+look different are sent, with the cursor moved between runs and colours
+set only when they change. Colours are truecolor when `COLORTERM` says so,
+otherwise the nearest of the 256. Sextants (Unicode 13) are used where the
+terminal draws images, as the terminals that do draw them themselves; a
+terminal that can't may lack them in its font, so there they need
+`KB_ASCII=sextants`.
+
+The page is in the cells themselves, not an image under them, so a box or
+menu that closes can't leave blanks for the page to show through:
+`App::uncover` draws the page's cells there again from what was last sent.
+The agent's pointer and the logo are images, and aren't drawn.
 
 ### Size (`size.rs`)
 

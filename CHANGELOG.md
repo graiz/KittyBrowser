@@ -6,6 +6,13 @@ Notable changes to kb. The format follows
 
 ## Unreleased
 
+- kb runs in terminals without kitty graphics (Terminal.app, xterm, inside
+  tmux), drawing each page in characters: the page's text as text, in its
+  colours and wrapped where the page wraps it, and pictures in coloured
+  blocks, each cell the block and two colours closest to Chrome's pixels.
+  kb asks first; before, it said why it couldn't run and stopped. To see a
+  page this way in any terminal, Ctrl+click the ⋮ menu and choose ASCII
+  mode, or type `about:ascii` in the address field; again to go back.
 - Scrolling with a trackpad follows the finger. Terminals report a trackpad
   as a tick per row, and each tick used to move the page a whole row at
   once, a few times a second; now the page glides on from each tick at the

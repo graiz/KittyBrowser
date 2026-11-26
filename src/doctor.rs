@@ -113,9 +113,30 @@ pub fn no_graphics() -> String {
     }
     text.push_str(
         "\nkb doctor checks your setup. If you're sure the terminal can draw\n\
-         kitty graphics, KB_FORCE=1 kb starts it anyway.\n\n",
+         kitty graphics, KB_FORCE=1 kb starts it anyway.\n\n\
+         Here kb can still draw pages in characters (ASCII mode): text as text,\n\
+         pictures in coloured blocks.\n\n",
     );
     text
+}
+
+/// Say why the terminal can't draw kitty graphics, and ask whether to
+/// draw pages in characters instead. Enter means yes; anything but a yes,
+/// or no answer, means no.
+pub fn ask_for_ascii() -> bool {
+    use std::io::Write;
+    eprint!("{}Kitty graphics isn't available here. Fall back to ASCII mode? [Y/n] ", no_graphics());
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    match std::io::stdin().read_line(&mut answer) {
+        Ok(n) if n > 0 => yes(&answer),
+        _ => false,
+    }
+}
+
+/// Whether an answer to a [Y/n] question is yes; an empty one is.
+fn yes(answer: &str) -> bool {
+    matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes")
 }
 
 struct Report {
@@ -151,12 +172,17 @@ pub fn run() -> i32 {
     let draws = crate::term::draws_graphics(ASK_DOCTOR);
     match (draws, multiplexer_here()) {
         (Some(true), _) => report.ok("graphics", "the terminal draws kitty graphics"),
-        (Some(false), Some(name)) => {
-            report.fail("graphics", &format!("{name} doesn't pass kitty graphics on; run kb outside it"))
-        }
-        (Some(false), None) => {
-            report.fail("graphics", &format!("the terminal doesn't draw kitty graphics; use {}", terminal_list()))
-        }
+        (Some(false), Some(name)) => report.note(
+            "graphics",
+            &format!("{name} doesn't pass kitty graphics on, so kb draws pages in characters; run kb outside it"),
+        ),
+        (Some(false), None) => report.note(
+            "graphics",
+            &format!(
+                "the terminal doesn't draw kitty graphics, so kb draws pages in characters; {} draw pixels",
+                terminal_list()
+            ),
+        ),
         (None, _) if !terminal => {
             report.note("graphics", "not asked: this isn't a terminal; run kb doctor in the pane kb will use")
         }
@@ -257,5 +283,11 @@ mod tests {
         assert!(why_no_graphics(None, Some("Ghostty")).contains("and this terminal doesn't"));
         assert!(why_no_graphics(Some("Zellij"), Some("Ghostty")).contains("inside Zellij,"));
         assert_eq!(terminal_list(), "Ghostty, kitty, WezTerm or Rex");
+    }
+
+    #[test]
+    fn enter_or_yes_falls_back_to_ascii() {
+        assert!(yes("\n") && yes("y\n") && yes("Yes\n") && yes(" Y "));
+        assert!(!yes("n\n") && !yes("no\n") && !yes("q\n"));
     }
 }

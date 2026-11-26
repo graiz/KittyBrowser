@@ -69,8 +69,12 @@ Without Homebrew, see [Install](#install) for the install script and
   source; Homebrew and the install script use a prebuilt kb.
 
 `kb doctor` checks the first two. kb itself asks the terminal when it starts,
-and if it can't draw kitty graphics, says so and why instead of showing a
-blank pane; `KB_FORCE=1` skips the question.
+and if it can't draw kitty graphics, says why and offers to draw pages in
+characters instead (ASCII mode): the page's text as text, wrapped where the
+page wraps it, and pictures in coloured blocks matched to Chrome's pixels a
+cell at a time; `KB_FORCE=1` skips the question. To see ASCII mode
+anywhere, Ctrl+click the ⋮ menu and choose ASCII mode (again to go back),
+type `about:ascii` in the address field, or start kb with `KB_ASCII=1`.
 
 ## Install
 
@@ -319,6 +323,7 @@ can't see or drive. See
 | `KB_TRANSFER=pty` | Always send frames through the terminal, never by file |
 | `KB_TRANSFER=png` | Through the terminal, and each frame whole as a PNG: for a terminal that shows kb's page broken over ssh |
 | `KB_FORCE` | Start without asking the terminal whether it draws kitty graphics |
+| `KB_ASCII` | Draw pages in characters, as in a terminal without kitty graphics: the page's text as text, the rest in blocks; `KB_ASCII=letters` draws the rest in ASCII art, and `KB_ASCII=sextants` adds the finer 2 by 3 blocks where kb would leave them out |
 | `KB_HEADLESS_IDLE` | Seconds a headless kb (`kb --headless`) waits for a command before quitting by itself; default 600, and 0 for never |
 | `KB_LOG` | A file to append diagnostics to (sizes, frames, clicks) |
 

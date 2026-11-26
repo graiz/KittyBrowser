@@ -7,6 +7,8 @@
 //! with the menu left open, to step again, and the percentage between
 //! them resets it, as Ctrl+0 does. Terminals often keep Ctrl+= and Ctrl+-
 //! for their own font size, so the menu may be the only way to zoom.
+//! ASCII mode, the page drawn in characters, is offered only when the menu
+//! is opened with Ctrl held (or the right button), as few will want it.
 
 use crate::keys::Action;
 use crate::term::input::{Key, KeyCode};
@@ -21,6 +23,8 @@ pub enum Item {
     CloseWindow,
     /// The zoom row: − and + step the zoom, and its percentage resets it.
     Zoom,
+    /// The page in characters, or in pixels again.
+    Ascii,
     /// Inspect mode: point at an element for its details.
     SelectElement,
     /// The page's HTML, as it is now, in the user's editor.
@@ -46,7 +50,7 @@ impl Item {
             Item::Shortcuts => Some(Action::Help),
             Item::Quit => Some(Action::Quit),
             // The zoom row shows its buttons where the keys would go.
-            Item::Zoom | Item::ViewSource | Item::Network => None,
+            Item::Zoom | Item::Ascii | Item::ViewSource | Item::Network => None,
         }
     }
 }
@@ -58,6 +62,8 @@ pub struct Offer {
     pub windows: usize,
     /// Whether Chrome's DevTools can be opened.
     pub devtools: bool,
+    /// Whether the menu was opened with Ctrl, to show ASCII mode too.
+    pub hidden: bool,
 }
 
 /// A line of the menu: an item and what it says, or a rule between groups.
@@ -109,6 +115,7 @@ impl Menu {
                 item(Item::Find, "Find in page"),
                 item(Item::CloseWindow, "Close window").filter(|_| offer.windows > 1),
                 item(Item::Zoom, "Zoom"),
+                item(Item::Ascii, "ASCII mode").filter(|_| offer.hidden),
             ],
             vec![
                 item(Item::SelectElement, "Select element"),
@@ -288,7 +295,7 @@ mod tests {
         menu.key(&Key { code, ctrl: false, alt: false, shift: false, cmd: false })
     }
 
-    const PLAIN: Offer = Offer { windows: 1, devtools: false };
+    const PLAIN: Offer = Offer { windows: 1, devtools: false, hidden: false };
 
     #[test]
     fn it_offers_only_what_can_be_done_now() {
@@ -296,7 +303,7 @@ mod tests {
             Menu::new(PLAIN).items(),
             [Item::Find, Item::Zoom, Item::SelectElement, Item::ViewSource, Item::Network, Item::Shortcuts, Item::Quit]
         );
-        let all = Menu::new(Offer { windows: 2, devtools: true });
+        let all = Menu::new(Offer { windows: 2, devtools: true, hidden: false });
         assert_eq!(
             all.items(),
             [
@@ -424,5 +431,15 @@ mod tests {
         for zoom in [0.25, 1.0, 1.1, 3.0] {
             assert_eq!(zoom_buttons(zoom).chars().count(), ZOOM_BUTTONS, "{zoom}");
         }
+    }
+
+    #[test]
+    fn ascii_mode_shows_only_when_asked_for() {
+        assert!(!Menu::new(PLAIN).items().contains(&Item::Ascii));
+        let mut menu = Menu::new(Offer { hidden: true, ..PLAIN });
+        // Beside zoom, in the page's group: Find, Zoom, ASCII mode.
+        press(&mut menu, KeyCode::Down);
+        press(&mut menu, KeyCode::Down);
+        assert_eq!(press(&mut menu, KeyCode::Enter), Outcome::Choose(Item::Ascii));
     }
 }

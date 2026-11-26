@@ -120,6 +120,8 @@ pub struct Chrome {
     /// again: on a Mac, frames stop when the window changes, until then.
     screencast: Option<Value>,
     window_reply: Option<u64>,
+    /// How far the page was scrolled in the last frame, in CSS pixels.
+    frame_scroll: (f64, f64),
 }
 
 /// Chrome's headless window. Frames are usually the size of the viewport
@@ -580,6 +582,7 @@ impl Chrome {
             devtools,
             viewport: None,
             screencast: None,
+            frame_scroll: (0.0, 0.0),
             window_reply: None,
         };
         Ok((chrome, rx))
@@ -765,6 +768,10 @@ impl Chrome {
                         metadata["scrollOffsetY"],
                         metadata["timestamp"].as_f64().unwrap_or(0.0) * 1000.0
                     ),
+                );
+                self.frame_scroll = (
+                    metadata["scrollOffsetX"].as_f64().unwrap_or(0.0),
+                    metadata["scrollOffsetY"].as_f64().unwrap_or(0.0),
                 );
                 let ack = json!({"sessionId": params["sessionId"]});
                 let data = match params["data"].take() {
@@ -1103,6 +1110,11 @@ impl Chrome {
 
     pub fn evaluate_value(&mut self, expression: &str) -> u64 {
         self.request("Runtime.evaluate", json!({"expression": expression, "returnByValue": true}))
+    }
+
+    /// How far the page was scrolled in the last frame, in CSS pixels.
+    pub fn frame_scroll(&self) -> (f64, f64) {
+        self.frame_scroll
     }
 
     pub fn start_screencast(&mut self) {
