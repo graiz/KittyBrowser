@@ -6,12 +6,38 @@ pub mod graphics;
 pub mod input;
 pub mod layers;
 pub mod page;
+pub mod sixel;
 pub mod size;
+#[cfg(windows)]
+mod windows;
 
 use std::io::{self, Write};
 use std::sync::OnceLock;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Graphics {
+    Kitty,
+    Sixel,
+}
+
+static GRAPHICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn graphics() -> Graphics {
+    if GRAPHICS.load(std::sync::atomic::Ordering::Relaxed) {
+        Graphics::Sixel
+    } else {
+        Graphics::Kitty
+    }
+}
+
+fn set_graphics(kind: Graphics) {
+    GRAPHICS.store(kind == Graphics::Sixel, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(unix)]
 static ORIGINAL: OnceLock<libc::termios> = OnceLock::new();
+#[cfg(windows)]
+pub use windows::{enter_raw, read_events, read_input, restore};
 
 /// Alternate screen, hidden cursor, mouse reporting (any motion, SGR
 /// encoding, pixel coordinates if offered), focus reports and bracketed
@@ -36,8 +62,16 @@ pub fn pointer(shape: &str) {
 }
 
 /// Put `text` on the system clipboard, through the terminal (OSC 52).
-pub fn copy(text: &str) {
-    write(format!("\x1b]52;c;{}\x1b\\", crate::base64::encode(text.as_bytes())).as_bytes());
+pub fn copy(text: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        windows::copy(text)
+    }
+    #[cfg(unix)]
+    {
+        write(format!("\x1b]52;c;{}\x1b\\", crate::base64::encode(text.as_bytes())).as_bytes());
+        Ok(())
+    }
 }
 
 /// `text` made safe to print to a terminal: newlines and tabs kept, every
@@ -246,6 +280,7 @@ fn drain(limit: std::time::Duration) -> bool {
 
 /// Write `bytes` to the terminal now, past the writer and its lock on
 /// stdout, giving up after a moment if the terminal isn't reading.
+#[cfg(unix)]
 fn write_past_the_writer(bytes: &[u8]) {
     use std::os::unix::fs::OpenOptionsExt;
     // The terminal opened afresh, not stdout made non-blocking: stdout
@@ -268,6 +303,22 @@ fn write_past_the_writer(bytes: &[u8]) {
     }
 }
 
+#[cfg(windows)]
+fn write_past_the_writer(bytes: &[u8]) {
+    use std::os::windows::io::AsRawHandle;
+    let bytes = [b"\x1b\\".as_slice(), bytes].concat();
+    let (done, finished) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        if let Ok(mut console) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+            let _ = console.write_all(&bytes);
+        }
+        let _ = done.send(());
+    });
+    if finished.recv_timeout(std::time::Duration::from_millis(200)).is_err() {
+        unsafe { windows_sys::Win32::System::IO::CancelSynchronousIo(writer.as_raw_handle()) };
+    }
+}
+
 /// Ask the terminal for its cell size in pixels; the answer arrives as an
 /// `input::Event::CellSize`.
 pub fn query_cell_size() {
@@ -276,6 +327,13 @@ pub fn query_cell_size() {
 
 /// Put the terminal in raw mode and take over the screen.
 pub fn enter() -> io::Result<()> {
+    enter_raw()?;
+    write(ENTER);
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn enter_raw() -> io::Result<()> {
     unsafe {
         if libc::isatty(0) == 0 || libc::isatty(1) == 0 {
             return Err(io::Error::other("needs to run in a terminal"));
@@ -290,13 +348,24 @@ pub fn enter() -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    write(ENTER);
     Ok(())
 }
 
 /// Undo `enter`, and remove the frames left for the terminal. Safe to call
 /// more than once, or without `enter`.
 pub fn leave() {
+    #[cfg(windows)]
+    {
+        let second = std::time::Duration::from_secs(1);
+        if !drain(second) || {
+            write(LEAVE);
+            !drain(second)
+        } {
+            write_past_the_writer(LEAVE);
+        }
+        restore();
+    }
+    #[cfg(unix)]
     if let Some(termios) = ORIGINAL.get() {
         // The way back out goes even when the terminal stopped reading what
         // was queued, which is then dropped.
@@ -333,6 +402,16 @@ pub fn leave() {
 /// as nothing fails between this and `enter`; otherwise it is the shell,
 /// which reads them as typed text.
 pub fn draws_graphics(limit: std::time::Duration) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        windows::draws_graphics(limit)
+    }
+    #[cfg(unix)]
+    draws_graphics_unix(limit)
+}
+
+#[cfg(unix)]
+fn draws_graphics_unix(limit: std::time::Duration) -> Option<bool> {
     const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
     let mut answer = Vec::new();
     unsafe {
@@ -363,7 +442,12 @@ pub fn draws_graphics(limit: std::time::Duration) -> Option<bool> {
         }
         libc::tcsetattr(0, libc::TCSANOW, &original);
     }
-    let draws = graphics_answer(&answer);
+    let draws = graphics_kind(&answer).map(|kind| {
+        if let Some(kind) = kind {
+            set_graphics(kind);
+        }
+        kind.is_some()
+    });
     if draws == Some(false) {
         // Such a terminal shows the question as text: wipe its line.
         write(b"\r\x1b[2K");
@@ -371,19 +455,63 @@ pub fn draws_graphics(limit: std::time::Duration) -> Option<bool> {
     draws
 }
 
+pub fn is_terminal() -> bool {
+    use std::io::IsTerminal;
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+#[cfg(unix)]
+pub fn read_input(buf: &mut [u8], timeout: std::time::Duration) -> io::Result<Option<usize>> {
+    let mut ready = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
+    let result = unsafe { libc::poll(&mut ready, 1, timeout.as_millis().min(i32::MAX as u128) as i32) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if result == 0 {
+        return Ok(None);
+    }
+    let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(Some(n as usize))
+    }
+}
+
+#[cfg(unix)]
+pub fn read_events(parser: &mut input::Parser, timeout: std::time::Duration) -> io::Result<Option<Vec<input::Event>>> {
+    let mut buf = [0; 4096];
+    match read_input(&mut buf, timeout)? {
+        Some(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")),
+        Some(n) => Ok(Some(parser.feed(&buf[..n]))),
+        None => Ok(None),
+    }
+}
+
 /// What the replies to `draws_graphics`'s questions say, once the answer to
 /// the second is in: an `ESC [ ?` whose digits and semicolons end in `c`.
 /// Other reports, such as a mode's state still queued from before, also
 /// start `ESC [ ?` but end otherwise.
+#[cfg(any(unix, test))]
 fn graphics_answer(replies: &[u8]) -> Option<bool> {
-    let attributes = (0..replies.len()).any(|start| {
-        let Some(rest) = replies[start..].strip_prefix(b"\x1b[?") else {
-            return false;
-        };
+    graphics_kind(replies).map(|kind| kind.is_some())
+}
+
+fn graphics_kind(replies: &[u8]) -> Option<Option<Graphics>> {
+    let attributes = (0..replies.len()).find_map(|start| {
+        let rest = replies[start..].strip_prefix(b"\x1b[?")?;
         let parameters = rest.iter().take_while(|b| b.is_ascii_digit() || **b == b';').count();
-        rest.get(parameters) == Some(&b'c')
+        (rest.get(parameters) == Some(&b'c')).then_some(&rest[..parameters])
     });
-    attributes.then(|| replies.windows(8).any(|w| w == b"\x1b_Gi=31;"))
+    attributes.map(|attributes| {
+        if replies.windows(8).any(|w| w == b"\x1b_Gi=31;") {
+            Some(Graphics::Kitty)
+        } else if attributes.split(|byte| *byte == b';').any(|parameter| parameter == b"4") {
+            Some(Graphics::Sixel)
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -531,5 +659,13 @@ mod tests {
         writer.push(b"next");
         read.send(()).unwrap();
         assert!(eventually(|| screen.lock().unwrap().ends_with(b"next")));
+    }
+
+    #[test]
+    fn chooses_graphics_from_complete_capability_replies() {
+        assert_eq!(super::graphics_kind(b"\x1b[?62;4;22c"), Some(Some(super::Graphics::Sixel)));
+        assert_eq!(super::graphics_kind(b"\x1b[?64;24c"), Some(None));
+        assert_eq!(super::graphics_kind(b"\x1b[?62;4"), None);
+        assert_eq!(super::graphics_kind(b"\x1b_Gi=31;OK\x1b\\\x1b[?62;4c"), Some(Some(super::Graphics::Kitty)));
     }
 }

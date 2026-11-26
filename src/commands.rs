@@ -152,7 +152,7 @@ pub const COMMANDS: &[Command] = &[
             option("selector", "CSS", "capture only this element"),
             flag("full", "capture the whole page, not just the visible part"),
             option("size", "SIZE", "small (half size, for a quick look), normal (the default), sharp (device pixels, to check fine detail), or a width in pixels such as 800"),
-            option(OUT, "FILE", "where to save the PNG, as cp would (default: a new file, which only you can read, in kb-screenshots-UID in the temp directory); its path is printed, unless FILE is /dev/stdout, a pipe or a device, which gets the PNG itself"),
+            option(OUT, "FILE", "where to save the PNG (default: a new private file in the temp directory on Unix or KittyBrowser's screenshots folder on Windows); its path is printed. Use - for PNG bytes on stdout; Unix also accepts /dev/stdout, pipes and devices"),
         ],
     },
     Command {

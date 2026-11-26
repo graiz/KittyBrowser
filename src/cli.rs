@@ -40,7 +40,10 @@ fn looks_like_a_file(address: &str) -> bool {
     if address.contains("://") {
         return false;
     }
-    if address.starts_with(['.', '/', '~']) {
+    if address.starts_with(['.', '/', '~'])
+        || Path::new(address).is_absolute()
+        || cfg!(windows) && address.contains('\\')
+    {
         return true;
     }
     // "site.com/page.html" and "localhost:8000/page.html" are a host and a
@@ -95,7 +98,13 @@ pub fn run(mut words: &[String]) -> i32 {
     // made absolute here.
     if let Some(url) = args["url"].as_str() {
         match std::fs::canonicalize(url) {
-            Ok(path) => args["url"] = json!(format!("file://{}", path.display())),
+            Ok(path) => match crate::platform::file_url(&path) {
+                Ok(url) => args["url"] = json!(url),
+                Err(error) => {
+                    eprintln!("kb ctl: {}", printable(&error));
+                    return 1;
+                }
+            },
             Err(_) if looks_like_a_file(url) => {
                 let path = std::env::current_dir().unwrap_or_default().join(url);
                 eprintln!("kb ctl: no such file: {}", path.display());
@@ -139,10 +148,22 @@ pub fn run(mut words: &[String]) -> i32 {
 /// return where, if it is a file. Only the user can read one saved there:
 /// it can show whatever a signed-in page does.
 fn save_image(out: Option<&Path>, bytes: &[u8]) -> Result<Option<PathBuf>, String> {
+    if out == Some(Path::new("-")) {
+        use std::io::Write;
+        std::io::stdout().lock().write_all(bytes).map_err(|e| format!("writing the screenshot to stdout: {e}"))?;
+        return Ok(None);
+    }
     match out {
         Some(out) => save_out(out, bytes),
         None => {
+            #[cfg(unix)]
             let folder = screenshot_folder(&std::env::temp_dir(), unsafe { libc::geteuid() })?;
+            #[cfg(windows)]
+            let folder = {
+                let folder = crate::data_dir()?.join("screenshots");
+                crate::files::private_dir(&folder)?;
+                folder
+            };
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_millis());
@@ -154,6 +175,7 @@ fn save_image(out: Option<&Path>, bytes: &[u8]) -> Result<Option<PathBuf>, Strin
 /// The folder in `temp` that screenshots go in: kb-screenshots-UID, named
 /// for the user as /tmp is shared on Linux. Should another user have made
 /// it first, a new one with a name no one can guess.
+#[cfg(unix)]
 fn screenshot_folder(temp: &Path, uid: u32) -> Result<PathBuf, String> {
     let folder = temp.join(format!("kb-screenshots-{uid}"));
     match crate::files::private_shared_dir(&folder) {
@@ -189,7 +211,9 @@ fn save_new(folder: &Path, stamp: u128, bytes: &[u8]) -> Result<PathBuf, String>
 /// path would land in the image.
 fn save_out(path: &Path, bytes: &[u8]) -> Result<Option<PathBuf>, String> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::fd::AsFd;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     if path.is_dir() {
         return Err(format!("{} is a folder; give a file name", path.display()));
@@ -201,9 +225,21 @@ fn save_out(path: &Path, bytes: &[u8]) -> Result<Option<PathBuf>, String> {
     let mut file = std::fs::File::create(path).map_err(fail)?;
     file.write_all(bytes).map_err(fail)?;
     let written = file.metadata().map_err(fail)?;
+    #[cfg(unix)]
     let output =
         std::io::stdout().as_fd().try_clone_to_owned().ok().and_then(|out| std::fs::File::from(out).metadata().ok());
+    #[cfg(unix)]
     let ours = output.is_some_and(|out| (out.dev(), out.ino()) == (written.dev(), written.ino()));
+    #[cfg(windows)]
+    let ours = {
+        use std::os::windows::io::AsHandle;
+        let output = std::io::stdout()
+            .as_handle()
+            .try_clone_to_owned()
+            .map(std::fs::File::from)
+            .and_then(|file| crate::platform::windows::file_id(&file));
+        output.is_ok_and(|id| crate::platform::windows::file_id(&file).is_ok_and(|other| id == other))
+    };
     Ok((written.is_file() && !ours).then(|| path.to_owned()))
 }
 
@@ -242,6 +278,7 @@ pub fn list() -> i32 {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn scratch(name: &str) -> PathBuf {
         let folder = std::env::temp_dir().join(format!("kb-cli-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
@@ -249,11 +286,13 @@ mod tests {
         folder
     }
 
+    #[cfg(unix)]
     fn mode(path: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    #[cfg(unix)]
     #[test]
     fn screenshots_are_private_and_new() {
         let folder = scratch("new");
@@ -273,6 +312,7 @@ mod tests {
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn out_writes_as_cp_would() {
         let folder = scratch("out");
@@ -302,6 +342,7 @@ mod tests {
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn out_keeps_the_mode_of_the_file_it_replaces() {
         use std::os::unix::fs::PermissionsExt;
@@ -315,6 +356,7 @@ mod tests {
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn out_writes_into_a_pipe_or_a_link_to_one() {
         let folder = scratch("pipe");
@@ -346,6 +388,7 @@ mod tests {
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn screenshots_go_elsewhere_if_their_folder_is_taken() {
         let temp = scratch("taken");

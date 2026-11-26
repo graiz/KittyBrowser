@@ -10,14 +10,26 @@ use crate::term::input::{Key, KeyCode};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs::File;
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::process::Child;
+use std::process::{Command, Stdio};
+#[cfg(windows)]
+#[path = "windows.rs"]
+pub(crate) mod windows;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
+use windows::{pipe, Process as Child};
 
 /// How long Chrome gets to start and answer kb before kb gives up on it.
 const STARTUP: Duration = Duration::from_secs(20);
@@ -281,18 +293,48 @@ pub fn find_binary() -> Result<PathBuf, String> {
             format!("KB_CHROME is {}, which isn't a program kb can find", Path::new(&chrome).display())
         });
     }
-    const APPS: &[&str] = &[
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    ];
-    const NAMES: &[&str] =
-        &["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"];
-    APPS.iter().map(PathBuf::from).find(|path| path.is_file()).or_else(|| search(&path, NAMES)).ok_or_else(|| {
-        "no Chrome, Chromium, Edge or Brave found; install one, or set KB_CHROME=/path/to/browser".to_owned()
-    })
+    #[cfg(windows)]
+    {
+        for root in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
+            if let Some(root) = std::env::var_os(root) {
+                for app in [
+                    r"Microsoft\Edge\Application\msedge.exe",
+                    r"Google\Chrome\Application\chrome.exe",
+                    r"BraveSoftware\Brave-Browser\Application\brave.exe",
+                    r"Chromium\Application\chrome.exe",
+                ] {
+                    let binary = PathBuf::from(&root).join(app);
+                    if binary.is_file() {
+                        return Ok(binary);
+                    }
+                }
+            }
+        }
+        search(&path, &["msedge.exe", "chrome.exe", "chromium.exe", "brave.exe"]).ok_or_else(|| {
+            "no Edge, Chrome, Chromium or Brave found; install one or set KB_CHROME to its executable".to_owned()
+        })
+    }
+    #[cfg(unix)]
+    {
+        const APPS: &[&str] = &[
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ];
+        const NAMES: &[&str] = &[
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+            "microsoft-edge",
+            "brave-browser",
+        ];
+        APPS.iter().map(PathBuf::from).find(|path| path.is_file()).or_else(|| search(&path, NAMES)).ok_or_else(|| {
+            "no Chrome, Chromium, Edge or Brave found; install one, or set KB_CHROME=/path/to/browser".to_owned()
+        })
+    }
 }
 
 /// The browser KB_CHROME names: a path, or a bare name looked up on PATH as
@@ -335,6 +377,8 @@ fn agent_metadata(product: &str, binary: &Path) -> Value {
         // The machine's, not kb's: Chrome runs natively even when kb doesn't.
         ("macos", _) if translated() => ("macOS", "arm"),
         ("macos", _) => ("macOS", "x86"),
+        ("windows", "aarch64") => ("Windows", "arm"),
+        ("windows", _) => ("Windows", "x86"),
         (_, "aarch64") => ("Linux", "arm"),
         _ => ("Linux", "x86"),
     };
@@ -384,7 +428,7 @@ fn platform_version() -> String {
 
 /// The system's version, as Chrome reports it: the kernel's release,
 /// without what follows the numbers ("6.8.0" of "6.8.0-45-generic").
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn platform_version() -> String {
     let mut system: libc::utsname = unsafe { std::mem::zeroed() };
     if unsafe { libc::uname(&mut system) } != 0 {
@@ -392,6 +436,12 @@ fn platform_version() -> String {
     }
     let release: String = system.release.iter().take_while(|&&c| c != 0).map(|&c| c as u8 as char).collect();
     release.split(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap_or("").to_owned()
+}
+
+#[cfg(windows)]
+fn platform_version() -> String {
+    // Windows 11's UA client-hint platform version starts at 13.
+    "13.0.0".to_owned()
 }
 
 /// starts. After a login form is submitted, Chrome offers to save the
@@ -424,6 +474,7 @@ fn quiet_profile(profile: &Path) {
 
 /// Move `fd` clear of 3 and 4, which Chrome's pipe will occupy in the child,
 /// and mark it close-on-exec.
+#[cfg(unix)]
 fn lift(fd: RawFd) -> io::Result<OwnedFd> {
     let high = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
     let result = if high < 0 { Err(io::Error::last_os_error()) } else { Ok(high) };
@@ -432,6 +483,7 @@ fn lift(fd: RawFd) -> io::Result<OwnedFd> {
 }
 
 /// A pipe as (read end, write end).
+#[cfg(unix)]
 fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
@@ -485,6 +537,7 @@ impl Chrome {
         let pipe_error = |e| format!("creating a pipe: {e}");
         let (child_in, to_chrome) = pipe().map_err(pipe_error)?;
         let (from_chrome, child_out) = pipe().map_err(pipe_error)?;
+        #[cfg(unix)]
         let (in_fd, out_fd) = (child_in.as_raw_fd(), child_out.as_raw_fd());
 
         quiet_profile(profile);
@@ -520,6 +573,7 @@ impl Chrome {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         // Chrome reads commands on fd 3 and writes replies on fd 4.
+        #[cfg(unix)]
         unsafe {
             command.pre_exec(move || {
                 if libc::dup2(in_fd, 3) < 0 || libc::dup2(out_fd, 4) < 0 {
@@ -528,7 +582,18 @@ impl Chrome {
                 Ok(())
             });
         }
+        #[cfg(unix)]
         let child = command.spawn().map_err(|e| format!("starting {}: {e}", binary.display()))?;
+        #[cfg(windows)]
+        let child = {
+            command.arg(format!(
+                "--remote-debugging-io-pipes={},{}",
+                child_in.as_raw_handle() as usize as u32,
+                child_out.as_raw_handle() as usize as u32
+            ));
+            windows::spawn(&command, [&child_in, &child_out])
+                .map_err(|e| format!("starting {}: {e}", binary.display()))?
+        };
         drop((child_in, child_out));
         let mut tx = Sender::new(File::from(to_chrome));
         let mut rx = Receiver::new(File::from(from_chrome));
@@ -539,7 +604,11 @@ impl Chrome {
         let started = Arc::new(AtomicBool::new(false));
         let stalled = Arc::new(AtomicBool::new(false));
         {
-            let (started, stalled, pid) = (started.clone(), stalled.clone(), child.id() as libc::pid_t);
+            let (started, stalled) = (started.clone(), stalled.clone());
+            #[cfg(unix)]
+            let pid = child.id() as libc::pid_t;
+            #[cfg(windows)]
+            let process = child.handle().map_err(|e| format!("watching Chrome startup: {e}"))?;
             std::thread::spawn(move || {
                 let deadline = Instant::now() + STARTUP;
                 while Instant::now() < deadline {
@@ -550,7 +619,14 @@ impl Chrome {
                 }
                 if !started.load(Ordering::SeqCst) {
                     stalled.store(true, Ordering::SeqCst);
-                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL)
+                    };
+                    #[cfg(windows)]
+                    unsafe {
+                        windows_sys::Win32::System::Threading::TerminateProcess(process.as_raw_handle(), 1)
+                    };
                 }
             });
         }
@@ -1306,6 +1382,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn browsers_named_by_the_user() {
         let path = std::ffi::OsString::from("/no/such/dir:/bin");

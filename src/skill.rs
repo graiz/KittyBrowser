@@ -18,8 +18,8 @@ usage: kb skill <install|remove|status|show>
   show     print the skill";
 
 fn path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".claude/skills/kb/SKILL.md"))
+    let home = crate::platform::home().ok_or("couldn't find the home folder")?;
+    Ok(home.join(".claude").join("skills").join("kb").join("SKILL.md"))
 }
 
 /// Whether the skill is installed, and whether it is this kb's version.

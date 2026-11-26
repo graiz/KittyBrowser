@@ -101,6 +101,46 @@ page, which avoids tracking command replies after startup.
 
 ## Terminal (`src/term/`)
 
+### Windows
+
+The Win32 backend saves/restores console modes, enables VT input/output,
+and reads console input records without line buffering. The shared parser
+still decodes VT keys, mouse reports, paste and terminal replies. An input
+gate makes editor handoff wait for the current read before lending the pane.
+Visible cell dimensions come from the console screen buffer; pixel cell
+dimensions come from `CSI 16 t`.
+
+Graphics are selected by replies, not the operating system: Kitty when its
+query succeeds, otherwise Sixel when DA1 advertises parameter 4. Sixel
+uses whole, scaled RGB frames with a 256-color palette, grayscale entries
+for text, and run-length encoding. Display mode 80 clamps rather than
+scrolls, but starts at the screen origin, so frames include padding above
+the page and the bar is painted last. Text overlays are redrawn over each
+frame, and closing them restores the underlying page. The agent cursor is
+composited into the terminal frame only, never Chrome's page or screenshots.
+Kitty's tiles, image IDs and moved layers are not sent to Sixel terminals.
+Sixel creates no temporary image files. Kitty file transfers on Windows
+clean their private folders on exit; unlike Unix, they do not sweep other
+processes' old folders after a crash.
+
+On Windows Chrome inherits only its two pipe handles through a process
+attribute handle list and adopts them with `--remote-debugging-io-pipes`.
+JSON framing remains NUL-terminated. A kill-on-close Job Object owns the
+browser's child processes, including cleanup after failed startup.
+Headless kb runs without a console and owns its own browser Job Object,
+so it survives the launcher. Its launch also uses an explicit stdio handle
+list: inheriting the calling PowerShell pipeline would otherwise make
+capturing the startup message wait until the background kb quits.
+
+Private folders use protected, current-user DACLs, not Unix modes, and
+reject reparse points. State is under the Local AppData Known Folder.
+Control discovery files contain random, per-run named-pipe endpoints;
+pipes reject remote clients and have current-user ACLs. Clients verify the
+server's user SID, and cleanup checks the discovery file's identity so an
+old run cannot remove its replacement. A file lock serializes claims.
+`WT_SESSION` is not treated as a pane ID; explicit instance targeting works
+without assuming Windows Terminal identifies neighboring panes.
+
 ### Graphics (`graphics.rs`)
 
 Each draw is wrapped in a synchronized update. A frame whose size doesn't

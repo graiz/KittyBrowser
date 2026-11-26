@@ -145,9 +145,13 @@ impl AgentCursor {
 
     /// Whether a frame is due.
     pub fn due(&self) -> bool {
-        self.last_frame.is_none_or(|at| at.elapsed() >= FRAME_GAP)
+        let gap = if super::graphics() == super::Graphics::Sixel { Duration::from_millis(150) } else { FRAME_GAP };
+        self.last_frame.is_none_or(|at| at.elapsed() >= gap)
     }
 
+    pub fn painted(&mut self) {
+        self.last_frame = Some(Instant::now());
+    }
     /// Append the escapes that place the cursor for this moment, in a pane
     /// of `cell`-pixel cells, at `opacity` (1 for solid), sending its image
     /// first if the terminal hasn't got it so.

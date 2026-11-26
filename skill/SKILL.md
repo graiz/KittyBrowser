@@ -187,6 +187,10 @@ Also:
   Local pages (files, localhost, private addresses, `.local`, `.test`,
   `.vibe`) are never cached, so an edit always shows. Relative paths for
   `open` and `screenshot --out` start from your working directory.
+  On Windows 11, kb runs natively with Edge/Chrome in an updated Windows
+  Terminal (Sixel graphics). Use Windows paths and `kb ctl -i ID` to target
+  an instance; no WSL is required. A screenshot can be saved with
+  `--out FILE`, or emitted as PNG bytes with `--out -`.
 
 ## QA and test scripts
 

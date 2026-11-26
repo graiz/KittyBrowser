@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/graiz/kittybrowser/actions/workflows/ci.yml"><img src="https://github.com/graiz/kittybrowser/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="macOS and Linux">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey" alt="macOS, Linux and Windows">
   <img src="https://img.shields.io/badge/written%20in-Rust-orange" alt="Written in Rust">
 </p>
 
@@ -13,7 +13,8 @@
 
 A real web browser in a terminal pane. kb drives headless Chrome and draws
 each page as pixels with the
-[kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/),
+[kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/)
+or [Sixel](https://en.wikipedia.org/wiki/Sixel) in Windows Terminal,
 so you see the actual layout, fonts and images, not a text approximation, and
 you can click, scroll, type, find, zoom and copy in it.
 
@@ -33,7 +34,8 @@ kb skill install                # teach Claude Code (or any agent with skills) t
 ```
 
 **Status:** early but usable, version 0.2. Used daily on macOS in Rex and
-Ghostty; it should work in kitty and WezTerm, and it builds on Linux, but
+Ghostty; the native Windows backend is tested with Edge and Windows Terminal.
+It should work in kitty and WezTerm, and it builds on Linux, but
 those haven't been tested yet. Reports are welcome, and if kb is useful to
 you, a star helps other people find it.
 
@@ -58,18 +60,19 @@ Without Homebrew, see [Install](#install) for the install script and
 
 ## Requirements
 
-- **A terminal with the kitty graphics protocol:**
+- **A terminal with the kitty graphics protocol or Sixel:**
   [Ghostty](https://ghostty.org), [kitty](https://sw.kovidgoyal.net/kitty),
   [WezTerm](https://wezterm.org) or [Rex](https://www.superlogical.com).
-  Terminal.app and iTerm2 don't support it, and kb doesn't work inside tmux,
-  screen or Zellij.
+  Updated [Windows Terminal](https://aka.ms/terminal) supports Sixel.
+  Terminal.app doesn't support these graphics, and tmux, screen and Zellij
+  don't pass them through; kb can draw pages in characters there instead.
 - **Chrome, Chromium, Edge or Brave**, installed where kb can find it, or
   named with `KB_CHROME`.
 - **Rust** (stable, from [rustup](https://rustup.rs)) only to build it from
   source; Homebrew and the install script use a prebuilt kb.
 
 `kb doctor` checks the first two. kb itself asks the terminal when it starts,
-and if it can't draw kitty graphics, says why and offers to draw pages in
+and if it can't draw Kitty graphics or Sixel, says why and offers to draw pages in
 characters instead (ASCII mode): the page's text as text, wrapped where the
 page wraps it, and pictures in coloured blocks matched to Chrome's pixels a
 cell at a time; `KB_FORCE=1` skips the question. To see ASCII mode
@@ -79,7 +82,7 @@ Exit ASCII mode in the ⋮ menu (no Ctrl needed), or type `about:ascii` again.
 
 ## Install
 
-Each release has a prebuilt kb for macOS and Linux, on Apple Silicon, ARM
+Release builds include macOS and Linux archives and Windows ZIPs, on ARM
 and Intel. Install it whichever way suits you:
 
 ```sh
@@ -136,10 +139,50 @@ cargo install --path .
 
 ### Windows
 
-kb doesn't run natively on Windows: it needs a Unix terminal and Unix
-sockets. Use it inside WSL 2 with Chrome or Chromium installed on the Linux
-side, from a terminal with the kitty graphics protocol (WezTerm runs on
-Windows). This is untested.
+Windows 11 is supported natively, without WSL. Use an updated Windows
+Terminal with Sixel support (introduced in Terminal Preview 1.22), and
+native Edge, Chrome, Chromium or Brave. Terminal 1.25 also supports the
+Kitty **keyboard** protocol; that is separate from the graphics protocol.
+
+From this checkout, with Rust's MSVC toolchain and the Visual Studio C++
+build tools installed (the changes in this checkout are not necessarily
+in an existing published release):
+
+```powershell
+cargo install --path .
+kb doctor
+kb https://example.com
+```
+
+Windows release ZIPs contain `kb.exe`; choose `x86_64-pc-windows-msvc` for
+Intel/AMD or `aarch64-pc-windows-msvc` for ARM64, extract it and put it on
+your PATH. The shell install script and Homebrew are not Windows installers.
+Set `$env:KB_CHROME` to an executable path if automatic browser discovery
+doesn't find yours.
+
+State and profiles live in `%LOCALAPPDATA%\KittyBrowser`, protected by a
+current-user ACL. `kb ctl`, `kb list`, headless mode and MCP use local-only
+named pipes; no control TCP port is opened. Screenshots without `--out` go
+in the private `screenshots` folder there. `kb ctl screenshot --out -`
+writes PNG bytes to stdout; use byte-preserving redirection or `--out FILE`.
+
+Sixel redraws the whole page and quantizes colors, so scrolling and animated
+pages can be slower than Kitty's incremental graphics. Pixel mouse reporting
+is used when available, with cell coordinates otherwise. Windows Terminal
+may reserve shortcuts such as Ctrl+Tab and Ctrl+Shift+C; change its bindings
+or kb's keys in `%LOCALAPPDATA%\KittyBrowser\keys`. View Source defaults to
+Notepad; `VISUAL` or `EDITOR` can name another program with arguments.
+
+For a native browser smoke test after `cargo build`:
+
+```powershell
+.\tests\windows-smoke.ps1
+```
+
+App Control policies can still block unsigned Cargo build scripts or
+`kb.exe`, even on a trusted Dev Drive. Resolve this through your approved
+development policy; Dev Drive's Defender performance mode is not an
+App Control exemption.
 
 ### Updating
 

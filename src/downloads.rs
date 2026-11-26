@@ -2,7 +2,7 @@
 //! says it. Chrome saves them where it would for the user, so a repeated
 //! name gets a number, as in any browser; kb only listens.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -114,7 +114,7 @@ impl Downloads {
             Some("canceled") => Saving::Failed,
             _ => return None,
         };
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = crate::platform::home();
         let note = download.note(home.as_deref())?;
         Some(Ended { line: download.line(), note })
     }
@@ -267,16 +267,27 @@ mod tests {
             state,
             seq: 0,
         };
-        let home = Some(Path::new("/Users/me"));
+        let prefix = if cfg!(windows) { "C:" } else { "" };
+        let home_path = format!("{prefix}/Users/me");
+        let home = Some(Path::new(&home_path));
         let saved = |path: &str| download(Saving::Saved(path.to_owned())).note(home);
-        assert_eq!(saved("/Users/me/Downloads/report.txt").as_deref(), Some("Saved report.txt to ~/Downloads"));
-        // The name saved, numbered when it repeats.
-        assert_eq!(saved("/Users/me/Downloads/report (1).txt").as_deref(), Some("Saved report (1).txt to ~/Downloads"));
-        assert_eq!(saved("/Users/me/report.txt").as_deref(), Some("Saved report.txt to ~"));
-        assert_eq!(saved("/tmp/out/report.txt").as_deref(), Some("Saved report.txt to /tmp/out"));
         assert_eq!(
-            download(Saving::Saved("/Users/me/Downloads/report.txt".to_owned())).note(None).as_deref(),
-            Some("Saved report.txt to /Users/me/Downloads")
+            saved(&format!("{prefix}/Users/me/Downloads/report.txt")).as_deref(),
+            Some("Saved report.txt to ~/Downloads")
+        );
+        // The name saved, numbered when it repeats.
+        assert_eq!(
+            saved(&format!("{prefix}/Users/me/Downloads/report (1).txt")).as_deref(),
+            Some("Saved report (1).txt to ~/Downloads")
+        );
+        assert_eq!(saved(&format!("{prefix}/Users/me/report.txt")).as_deref(), Some("Saved report.txt to ~"));
+        assert_eq!(
+            saved(&format!("{prefix}/tmp/out/report.txt")),
+            Some(format!("Saved report.txt to {prefix}/tmp/out"))
+        );
+        assert_eq!(
+            download(Saving::Saved(format!("{prefix}/Users/me/Downloads/report.txt"))).note(None),
+            Some(format!("Saved report.txt to {prefix}/Users/me/Downloads"))
         );
         assert_eq!(saved("the downloads folder").as_deref(), Some("Saved report.txt"));
         assert_eq!(download(Saving::Failed).note(home).as_deref(), Some("Download of report.txt failed"));

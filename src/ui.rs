@@ -546,13 +546,16 @@ pub fn normalize_url(input: &str) -> Option<String> {
     if has_scheme || ["about", "data", "file", "view-source", "chrome"].contains(&scheme) {
         return Some(input.to_owned());
     }
-    if input.starts_with(['/', '.', '~']) {
-        let path = match (input.strip_prefix("~/"), std::env::var_os("HOME")) {
-            (Some(rest), Some(home)) => std::path::Path::new(&home).join(rest),
+    if input.starts_with(['/', '.', '~'])
+        || std::path::Path::new(input).is_absolute()
+        || cfg!(windows) && input.contains('\\')
+    {
+        let path = match (input.strip_prefix("~/").or_else(|| input.strip_prefix("~\\")), crate::platform::home()) {
+            (Some(rest), Some(home)) => home.join(rest),
             _ => input.into(),
         };
-        if let Ok(path) = path.canonicalize() {
-            return Some(format!("file://{}", path.display()));
+        if let Ok(url) = crate::platform::file_url(&path) {
+            return Some(url);
         }
     }
     let host = input.split(['/', '?', '#']).next().unwrap_or("");
@@ -867,6 +870,6 @@ mod tests {
         assert_eq!(url("rust traits"), "https://www.google.com/search?q=rust+traits");
         assert_eq!(url("what is 1+1?"), "https://www.google.com/search?q=what+is+1%2B1%3F");
         assert_eq!(url("kittens"), "https://www.google.com/search?q=kittens");
-        assert_eq!(url("/"), "file:///");
+        assert_eq!(url("/"), crate::platform::file_url(std::path::Path::new("/")).unwrap());
     }
 }

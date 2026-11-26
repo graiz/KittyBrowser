@@ -13,6 +13,7 @@
 use crate::modal::{inside, text_width, Canvas, Style};
 use crate::term::input::{Key, KeyCode};
 use crate::ui::{AddressBar, Edit, Rect};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -137,7 +138,7 @@ impl Picker {
             drawn: Drawn::default(),
             last_click: None,
         };
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into());
+        let home = crate::platform::home().unwrap_or_default();
         if !picker.go(start) {
             picker.go(&home);
         }
@@ -798,8 +799,8 @@ fn read_folder(folder: &Path, hidden: bool) -> std::io::Result<Vec<Entry>> {
             name,
             dir: meta.is_dir(),
             size: meta.len(),
-            modified: meta.mtime(),
-            mode: own.permissions().mode(),
+            modified: modified(&meta),
+            mode: file_mode(&own),
             link,
             parent: false,
         });
@@ -816,10 +817,28 @@ fn read_folder(folder: &Path, hidden: bool) -> std::io::Result<Vec<Entry>> {
 /// folder kb was started in, and the top of the disk.
 fn places() -> Vec<(String, PathBuf)> {
     let mut places = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = crate::platform::home() {
         places.push(("Home".to_owned(), home.clone()));
         for name in ["Desktop", "Documents", "Downloads", "Pictures"] {
+            #[cfg(unix)]
             let path = home.join(name);
+            #[cfg(windows)]
+            let path = {
+                use windows_sys::Win32::UI::Shell::*;
+                let id = match name {
+                    "Desktop" => FOLDERID_Desktop,
+                    "Documents" => FOLDERID_Documents,
+                    "Downloads" => FOLDERID_Downloads,
+                    _ => FOLDERID_Pictures,
+                };
+                match crate::platform::windows::known_folder(&id) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        eprintln!("kb: finding {name}: {error}");
+                        continue;
+                    }
+                }
+            };
             if path.is_dir() {
                 places.push((name.to_owned(), path));
             }
@@ -831,15 +850,25 @@ fn places() -> Vec<(String, PathBuf)> {
             places.push((name, here));
         }
     }
+    #[cfg(unix)]
     places.push(("Computer".to_owned(), PathBuf::from("/")));
+    #[cfg(windows)]
+    for drive in b'A'..=b'Z' {
+        let path = PathBuf::from(format!("{}:\\", drive as char));
+        if path.is_dir() {
+            places.push((format!("{}:", drive as char), path));
+        }
+    }
     places.into_iter().map(|(name, path)| (name, path.canonicalize().unwrap_or(path))).collect()
 }
 
 /// A typed path, from `folder` unless it starts at / or ~.
 fn resolve(folder: &Path, typed: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = crate::platform::home();
     match (typed.strip_prefix('~'), home) {
-        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+            home.join(rest.trim_start_matches(['/', '\\']))
+        }
         _ => folder.join(typed),
     }
 }
@@ -847,7 +876,7 @@ fn resolve(folder: &Path, typed: &str) -> PathBuf {
 /// Complete a typed name or path as far as it is the same for every
 /// match, adding / to a single folder. None if nothing matches.
 fn complete(folder: &Path, typed: &str, hidden: bool) -> Option<String> {
-    let (dir_part, prefix) = match typed.rfind('/') {
+    let (dir_part, prefix) = match typed.rfind(if cfg!(windows) { &['/', '\\'][..] } else { &['/'][..] }) {
         Some(at) => (&typed[..=at], &typed[at + 1..]),
         None => ("", typed),
     };
@@ -863,7 +892,7 @@ fn complete(folder: &Path, typed: &str, hidden: bool) -> Option<String> {
     matches.sort();
     let (first, first_dir) = matches.first()?.clone();
     if matches.len() == 1 {
-        return Some(format!("{dir_part}{first}{}", if first_dir { "/" } else { "" }));
+        return Some(format!("{dir_part}{first}{}", if first_dir { std::path::MAIN_SEPARATOR_STR } else { "" }));
     }
     // The longest start every match shares, ignoring case, in the first's case.
     let mut common: Vec<char> = first.chars().collect();
@@ -923,21 +952,51 @@ fn human_size(bytes: u64) -> String {
 
 /// The mode column of `ls -l`: drwxr-xr-x.
 fn mode_string(entry: &Entry) -> String {
-    let kind = if entry.link {
-        'l'
-    } else if entry.dir {
-        'd'
-    } else {
-        '-'
-    };
-    let mut text = String::from(kind);
-    for shift in [6, 3, 0] {
-        let bits = entry.mode >> shift;
-        text.push(if bits & 4 != 0 { 'r' } else { '-' });
-        text.push(if bits & 2 != 0 { 'w' } else { '-' });
-        text.push(if bits & 1 != 0 { 'x' } else { '-' });
+    #[cfg(windows)]
+    return if entry.mode == 0 { "read-only ".to_owned() } else { "          ".to_owned() };
+    #[cfg(unix)]
+    {
+        let kind = if entry.link {
+            'l'
+        } else if entry.dir {
+            'd'
+        } else {
+            '-'
+        };
+        let mut text = String::from(kind);
+        for shift in [6, 3, 0] {
+            let bits = entry.mode >> shift;
+            text.push(if bits & 4 != 0 { 'r' } else { '-' });
+            text.push(if bits & 2 != 0 { 'w' } else { '-' });
+            text.push(if bits & 1 != 0 { 'x' } else { '-' });
+        }
+        text
     }
-    text
+}
+
+fn modified(meta: &std::fs::Metadata) -> i64 {
+    #[cfg(unix)]
+    {
+        meta.mtime()
+    }
+    #[cfg(windows)]
+    {
+        meta.modified()
+            .ok()
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |time| time.as_secs() as i64)
+    }
+}
+
+fn file_mode(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        meta.permissions().mode()
+    }
+    #[cfg(windows)]
+    {
+        u32::from(!meta.permissions().readonly())
+    }
 }
 
 fn now() -> i64 {
@@ -951,7 +1010,11 @@ fn when(seconds: i64, now: i64) -> String {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     let time = seconds as libc::time_t;
     // SAFETY: localtime_r only writes the tm it is given.
-    if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
+    #[cfg(unix)]
+    let failed = unsafe { libc::localtime_r(&time, &mut tm) }.is_null();
+    #[cfg(windows)]
+    let failed = unsafe { libc::localtime_s(&mut tm, &time) } != 0;
+    if failed {
         return String::new();
     }
     let month = MONTHS[tm.tm_mon.clamp(0, 11) as usize];
@@ -965,7 +1028,7 @@ fn when(seconds: i64, now: i64) -> String {
 
 /// A path with the home folder as ~.
 fn tilde(path: &Path) -> String {
-    tilde_in(path, std::env::var_os("HOME").map(PathBuf::from).as_deref())
+    tilde_in(path, crate::platform::home().as_deref())
 }
 
 /// A path with `home`, when there is one, as ~.
@@ -988,16 +1051,23 @@ fn reason(error: &std::io::Error) -> String {
 /// This computer's name, so it's plain whose files these are: over ssh,
 /// not the one the user is typing on.
 fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: gethostname writes at most buf.len() bytes into buf.
-    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
-    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    let name = if ok { String::from_utf8_lossy(&buf[..end]).into_owned() } else { String::new() };
-    let name = name.strip_suffix(".local").unwrap_or(&name).to_owned();
-    match (name.is_empty(), std::env::var_os("SSH_CONNECTION").is_some()) {
-        (true, _) => "this computer".to_owned(),
-        (false, true) => format!("{name} (over ssh)"),
-        (false, false) => name,
+    #[cfg(windows)]
+    {
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this computer".to_owned())
+    }
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: gethostname writes at most buf.len() bytes into buf.
+        let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+        let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+        let name = if ok { String::from_utf8_lossy(&buf[..end]).into_owned() } else { String::new() };
+        let name = name.strip_suffix(".local").unwrap_or(&name).to_owned();
+        match (name.is_empty(), std::env::var_os("SSH_CONNECTION").is_some()) {
+            (true, _) => "this computer".to_owned(),
+            (false, true) => format!("{name} (over ssh)"),
+            (false, false) => name,
+        }
     }
 }
 
@@ -1095,7 +1165,7 @@ mod tests {
         let mut picker = Picker::new(1, false, "", "https://a.com/", &scratch.0);
         type_text(&mut picker, "arch");
         press(&mut picker, KeyCode::Tab);
-        assert_eq!(picker.field.text(), "archive/");
+        assert_eq!(picker.field.text(), format!("archive{}", std::path::MAIN_SEPARATOR));
         press(&mut picker, KeyCode::Enter);
         assert_eq!(picker.folder(), scratch.0.join("archive"));
         assert_eq!(picker.field.text(), "");
@@ -1282,10 +1352,14 @@ mod tests {
         assert_eq!(human_size(1229), "1.2K");
         assert_eq!(human_size(34 * 1024), "34K");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0M");
-        let entry = |dir, link, mode| Entry { name: "x".into(), dir, size: 0, modified: 0, mode, link, parent: false };
-        assert_eq!(mode_string(&entry(true, false, 0o755)), "drwxr-xr-x");
-        assert_eq!(mode_string(&entry(false, false, 0o644)), "-rw-r--r--");
-        assert_eq!(mode_string(&entry(false, true, 0o777)), "lrwxrwxrwx");
+        #[cfg(unix)]
+        {
+            let entry =
+                |dir, link, mode| Entry { name: "x".into(), dir, size: 0, modified: 0, mode, link, parent: false };
+            assert_eq!(mode_string(&entry(true, false, 0o755)), "drwxr-xr-x");
+            assert_eq!(mode_string(&entry(false, false, 0o644)), "-rw-r--r--");
+            assert_eq!(mode_string(&entry(false, true, 0o777)), "lrwxrwxrwx");
+        }
         let now = now();
         assert!(when(now, now).contains(':'));
         assert!(!when(now - 400 * 24 * 3600, now).contains(':'));
@@ -1308,7 +1382,7 @@ mod tests {
         std::fs::write(scratch.0.join("notebook.md"), "").unwrap();
         assert_eq!(complete(&scratch.0, "no", false).as_deref(), Some("note"));
         assert_eq!(complete(&scratch.0, "Pho", false).as_deref(), Some("Photo"));
-        assert_eq!(complete(&scratch.0, "arc", false).as_deref(), Some("archive/"));
+        assert_eq!(complete(&scratch.0, "arc", false), Some(format!("archive{}", std::path::MAIN_SEPARATOR)));
         assert_eq!(complete(&scratch.0, "zzz", false), None);
         assert_eq!(complete(&scratch.0, "Photos/", false), None);
     }

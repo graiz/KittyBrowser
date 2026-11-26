@@ -3400,12 +3400,13 @@ mod tests {
         let mut tools = Devtools::default();
         let since = tools.baseline("");
         tools.download_event("Browser.downloadWillBegin", &json!({"guid": "g", "suggestedFilename": "report.txt"}));
+        let path = if cfg!(windows) { "C:/Users/me/Downloads/report.txt" } else { "/Users/me/Downloads/report.txt" };
         tools.download_event(
             "Browser.downloadProgress",
             &json!({"guid": "g", "receivedBytes": 11, "totalBytes": 11, "state": "completed",
-                    "filePath": "/Users/me/Downloads/report.txt"}),
+                    "filePath": path}),
         );
-        let saved = "downloaded report.txt (11 bytes) to /Users/me/Downloads/report.txt";
+        let saved = format!("downloaded report.txt (11 bytes) to {path}");
         assert_eq!(tools.fallout(&since), format!("\n{saved}"));
         assert_eq!(tools.console_lines(false, false), format!("[download] {saved}\n"));
         // The pane is told once.
