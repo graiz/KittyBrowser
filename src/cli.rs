@@ -325,13 +325,21 @@ mod tests {
         let link = folder.join("stdout");
         std::os::unix::fs::symlink(&pipe, &link).unwrap();
         for out in [&pipe, &link] {
-            let reader = {
-                let pipe = pipe.clone();
-                std::thread::spawn(move || std::fs::read(pipe).unwrap())
+            // The read end opened first, without waiting for a writer, so
+            // that writing finds a reader at once and nothing waits on
+            // another thread. Read in a thread that opened it alongside,
+            // the test could hang for ever: once in a while the reader
+            // was left waiting for a writer that had already come and gone.
+            let mut reader = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&pipe).unwrap()
             };
             // No path to print: the pipe has the image.
             assert_eq!(save_image(Some(out), b"png bytes").unwrap(), None);
-            assert_eq!(reader.join().unwrap(), b"png bytes");
+            // The writer has closed, so what it wrote is there, then the end.
+            let mut read = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut read).unwrap();
+            assert_eq!(read, b"png bytes");
         }
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 2);
