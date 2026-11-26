@@ -7,9 +7,9 @@
 //! with the menu left open, to step again, and the percentage between
 //! them resets it, as Ctrl+0 does. Terminals often keep Ctrl+= and Ctrl+-
 //! for their own font size, so the menu may be the only way to zoom.
-//! ASCII mode, the page drawn in characters, is offered only when the menu
-//! is opened with Ctrl held (or the right button), as few will want it;
-//! once on, the plain menu offers to leave it, so no one is stuck there.
+//! ASCII mode, the page drawn in characters, is among the tools, after
+//! Select element; once on, the same item leaves it. A terminal that can't
+//! draw images has no other mode, so there the item isn't shown.
 
 use crate::keys::Action;
 use crate::term::input::{Key, KeyCode};
@@ -63,12 +63,12 @@ pub struct Offer {
     pub windows: usize,
     /// Whether Chrome's DevTools can be opened.
     pub devtools: bool,
-    /// Whether the menu was opened with Ctrl, to show ASCII mode too.
-    pub hidden: bool,
-    /// Whether the page is in characters and can go back to pixels: then
-    /// the menu offers that, Ctrl or not. (In a terminal that can't draw
-    /// images, pages stay in characters, and the item isn't shown.)
-    pub leave_ascii: bool,
+    /// Whether the terminal draws images, so that pages can be drawn in
+    /// characters or in pixels: otherwise they stay in characters, and
+    /// ASCII mode isn't offered.
+    pub images: bool,
+    /// Whether the page is in characters now, so that the item leaves it.
+    pub in_ascii: bool,
 }
 
 /// A line of the menu: an item and what it says, or a rule between groups.
@@ -120,13 +120,11 @@ impl Menu {
                 item(Item::Find, "Find in page"),
                 item(Item::CloseWindow, "Close window").filter(|_| offer.windows > 1),
                 item(Item::Zoom, "Zoom"),
-                match offer.leave_ascii {
-                    true => item(Item::Ascii, "Exit ASCII mode"),
-                    false => item(Item::Ascii, "ASCII mode").filter(|_| offer.hidden),
-                },
             ],
             vec![
                 item(Item::SelectElement, "Select element"),
+                item(Item::Ascii, if offer.in_ascii { "Exit ASCII mode" } else { "ASCII mode" })
+                    .filter(|_| offer.images),
                 item(Item::ViewSource, "View source"),
                 item(Item::Network, "Network performance"),
                 item(Item::Devtools, "Developer tools").filter(|_| offer.devtools),
@@ -303,15 +301,24 @@ mod tests {
         menu.key(&Key { code, ctrl: false, alt: false, shift: false, cmd: false })
     }
 
-    const PLAIN: Offer = Offer { windows: 1, devtools: false, hidden: false, leave_ascii: false };
+    const PLAIN: Offer = Offer { windows: 1, devtools: false, images: true, in_ascii: false };
 
     #[test]
     fn it_offers_only_what_can_be_done_now() {
         assert_eq!(
             Menu::new(PLAIN).items(),
-            [Item::Find, Item::Zoom, Item::SelectElement, Item::ViewSource, Item::Network, Item::Shortcuts, Item::Quit]
+            [
+                Item::Find,
+                Item::Zoom,
+                Item::SelectElement,
+                Item::Ascii,
+                Item::ViewSource,
+                Item::Network,
+                Item::Shortcuts,
+                Item::Quit
+            ]
         );
-        let all = Menu::new(Offer { windows: 2, devtools: true, hidden: false, leave_ascii: false });
+        let all = Menu::new(Offer { windows: 2, devtools: true, images: true, in_ascii: false });
         assert_eq!(
             all.items(),
             [
@@ -319,6 +326,7 @@ mod tests {
                 Item::CloseWindow,
                 Item::Zoom,
                 Item::SelectElement,
+                Item::Ascii,
                 Item::ViewSource,
                 Item::Network,
                 Item::Devtools,
@@ -392,9 +400,9 @@ mod tests {
         let menu = Menu::new(PLAIN);
         let keys = |item| if item == Item::SelectElement { "Ctrl+Shift+C".to_owned() } else { String::new() };
         let rect = menu.render(&mut out, 80, 1.1, keys);
-        // Seven items and two rules between edges, right-aligned to the
+        // Eight items and two rules between edges, right-aligned to the
         // pane's edge, below the bar.
-        assert_eq!((rect.col + rect.width - 1, rect.row, rect.height), (80, 2, 11));
+        assert_eq!((rect.col + rect.width - 1, rect.row, rect.height), (80, 2, 12));
         let drawn = String::from_utf8(out).unwrap();
         assert!(drawn.contains("Select element") && drawn.contains("Ctrl+Shift+C"), "{drawn:?}");
         assert_eq!(drawn.matches('├').count(), 2, "{drawn:?}");
@@ -404,15 +412,16 @@ mod tests {
         assert_eq!(menu.click(rect, col, 3), Outcome::Choose(Item::Find));
         assert_eq!(menu.click(rect, col, 5), Outcome::Stay);
         assert_eq!(menu.click(rect, col, 6), Outcome::Choose(Item::SelectElement));
-        assert_eq!(menu.click(rect, col, 8), Outcome::Choose(Item::Network));
-        assert_eq!(menu.click(rect, col, 10), Outcome::Choose(Item::Shortcuts));
-        assert_eq!(menu.click(rect, col, 11), Outcome::Choose(Item::Quit));
-        assert_eq!(menu.click(rect, col, 12), Outcome::Stay);
-        assert_eq!(menu.click(rect, col, 13), Outcome::Close);
+        assert_eq!(menu.click(rect, col, 7), Outcome::Choose(Item::Ascii));
+        assert_eq!(menu.click(rect, col, 9), Outcome::Choose(Item::Network));
+        assert_eq!(menu.click(rect, col, 11), Outcome::Choose(Item::Shortcuts));
+        assert_eq!(menu.click(rect, col, 12), Outcome::Choose(Item::Quit));
+        assert_eq!(menu.click(rect, col, 13), Outcome::Stay);
+        assert_eq!(menu.click(rect, col, 14), Outcome::Close);
         assert_eq!(menu.click(rect, 1, 3), Outcome::Close);
         let mut menu = menu;
-        assert!(menu.hover(rect, col, 7));
-        assert!(!menu.hover(rect, col, 7));
+        assert!(menu.hover(rect, col, 8));
+        assert!(!menu.hover(rect, col, 8));
         // A rule can't be selected.
         assert!(!menu.hover(rect, col, 5));
         assert_eq!(press(&mut menu, KeyCode::Enter), Outcome::Choose(Item::ViewSource));
@@ -442,22 +451,23 @@ mod tests {
     }
 
     #[test]
-    fn ascii_mode_shows_only_when_asked_for() {
-        assert!(!Menu::new(PLAIN).items().contains(&Item::Ascii));
-        let mut menu = Menu::new(Offer { hidden: true, ..PLAIN });
-        // Beside zoom, in the page's group: Find, Zoom, ASCII mode.
-        press(&mut menu, KeyCode::Down);
-        press(&mut menu, KeyCode::Down);
+    fn ascii_mode_is_after_select_element() {
+        let mut menu = Menu::new(PLAIN);
+        // Find, Zoom, then the tools: Select element, ASCII mode.
+        for _ in 0..3 {
+            press(&mut menu, KeyCode::Down);
+        }
         assert_eq!(press(&mut menu, KeyCode::Enter), Outcome::Choose(Item::Ascii));
     }
 
     #[test]
-    fn in_ascii_mode_the_plain_menu_offers_to_leave_it() {
+    fn the_same_item_leaves_ascii_mode_and_without_images_there_is_none() {
         let rows = |offer: Offer| Menu::new(offer).rows;
+        let enter = Row::Item(Item::Ascii, "ASCII mode".to_owned());
         let exit = Row::Item(Item::Ascii, "Exit ASCII mode".to_owned());
-        assert!(rows(Offer { leave_ascii: true, ..PLAIN }).contains(&exit));
-        assert!(rows(Offer { leave_ascii: true, hidden: true, ..PLAIN }).contains(&exit));
-        let offered = rows(Offer { hidden: true, ..PLAIN });
-        assert!(!offered.contains(&exit) && offered.contains(&Row::Item(Item::Ascii, "ASCII mode".to_owned())));
+        assert!(rows(PLAIN).contains(&enter) && !rows(PLAIN).contains(&exit));
+        let leaving = rows(Offer { in_ascii: true, ..PLAIN });
+        assert!(leaving.contains(&exit) && !leaving.contains(&enter));
+        assert!(!Menu::new(Offer { images: false, in_ascii: true, ..PLAIN }).items().contains(&Item::Ascii));
     }
 }

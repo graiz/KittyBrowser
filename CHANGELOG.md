@@ -11,9 +11,27 @@ Notable changes to kb. The format follows
   colours and wrapped where the page wraps it, and pictures in coloured
   blocks, each cell the block and two colours closest to Chrome's pixels.
   kb asks first; before, it said why it couldn't run and stopped. To see a
-  page this way in any terminal, Ctrl+click the ⋮ menu and choose ASCII
-  mode, or type `about:ascii` in the address field. To go back, the ⋮ menu
-  offers Exit ASCII mode (no Ctrl needed), or type `about:ascii` again.
+  page this way in any terminal, choose ASCII mode in the ⋮ menu (under
+  Select element), or type `about:ascii` in the address field. To go back,
+  the same item offers Exit ASCII mode, or type `about:ascii` again.
+- In ASCII mode the page's text is set in the terminal's type: a letter a
+  cell and a line a row, with margins, padding, table rows and pictures
+  rounded to whole rows. Lines break where the terminal would, text stays
+  on the page under it as it scrolls, and a drag selects the letters shown,
+  which are drawn the other way round as a terminal shows its selection.
+  On Wikipedia 90% of lines sit on the row grid, and on Hacker News all of
+  them, against about a third in the page's own type. `about:ascii-type`
+  or `KB_ASCII_TYPE=off` keeps the page's own type.
+- ASCII mode shows Chinese, Japanese and Korean text, two cells a letter,
+  keeps icon fonts' icons (Material Symbols, Font Awesome) as pictures
+  rather than their names, and no longer runs words together where the
+  page's source breaks a line (`decidedto`). Text under a cookie banner or
+  a sticky header is no longer drawn over it, and reading a page's text
+  takes up to half as long, so big pages (Stack Overflow) no longer fall
+  back to blurry blocks.
+- Hovering a picture in ASCII mode shows its alt text beside the mouse, or
+  an SVG's title, a `title`, or the label of a button that shows only an
+  icon.
 - Scrolling with a trackpad follows the finger. Terminals report a trackpad
   as a tick per row, and each tick used to move the page a whole row at
   once, a few times a second; now the page glides on from each tick at the

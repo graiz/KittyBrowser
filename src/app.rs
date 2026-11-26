@@ -47,10 +47,23 @@ const SHADE_AGE: Duration = Duration::from_millis(500);
 
 /// Find the element under a point and the pointer it calls for, as CSS
 /// names it: what the page asks for, or where it says `auto`, a text cursor
-/// over text and fields and an arrow elsewhere.
-const POINTER: &str = "((x, y) => { let e = document.elementFromPoint(x, y); \
+/// over text and fields and an arrow elsewhere. With `tips`, after a
+/// newline, what the page says of what is there that a picture drawn in
+/// characters can't: a picture's alt text, an SVG's title or label, a
+/// `title`, or the label of a button or link that shows only an icon.
+const POINTER: &str = "((x, y, tips) => { let e = document.elementFromPoint(x, y); \
   while (e && e.shadowRoot) { const i = e.shadowRoot.elementFromPoint(x, y); if (!i || i === e) break; e = i; } \
   if (!e) return 'default'; \
+  const said = v => (v || '').replace(/\\s+/g, ' ').trim().slice(0, 300); \
+  const tip = () => { for (const h of document.elementsFromPoint(x, y).slice(0, 8)) \
+    for (let el = h, k = 0; el && k < 4; el = el.parentElement, k++) { \
+      if (el.matches('img, area, input[type=image]') && said(el.alt)) return said(el.alt); \
+      if (el.localName === 'svg') { const t = el.querySelector(':scope > title'); \
+        if (said(t && t.textContent) || said(el.getAttribute('aria-label'))) return said(t && t.textContent) || said(el.getAttribute('aria-label')); } \
+      if (said(el.getAttribute('title'))) return said(el.getAttribute('title')); \
+      if (el.matches('a, button, [role=button]') && !said(el.textContent) && said(el.getAttribute('aria-label'))) return said(el.getAttribute('aria-label')); } \
+    return ''; }; \
+  const shape = (() => { \
   const c = getComputedStyle(e).cursor.split(',').pop().trim(); \
   if (c !== 'auto') return c; \
   if (e.isContentEditable || e.matches('textarea, input:not([type=button], [type=submit], [type=reset], \
@@ -58,7 +71,9 @@ const POINTER: &str = "((x, y) => { let e = document.elementFromPoint(x, y); \
   const r = document.caretRangeFromPoint && document.caretRangeFromPoint(x, y); \
   if (r && r.startContainer.nodeType === 3) { const t = document.createRange(); t.selectNodeContents(r.startContainer); \
     for (const b of t.getClientRects()) if (x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) return 'text'; } \
-  return 'default'; })";
+  return 'default'; })(); \
+  const said_there = tips ? tip() : ''; \
+  return said_there ? shape + '\\n' + said_there : shape; })";
 
 /// The pointer shapes terminals know, by their CSS names.
 const POINTERS: &[&str] = &[
@@ -409,6 +424,9 @@ struct App {
     text_wanted: bool,
     text_asked: Instant,
     text_request: Option<u64>,
+    /// In characters: whether the page's type is set to the terminal's,
+    /// a letter a cell (experimental; about:ascii-type, KB_ASCII_TYPE=off).
+    terminal_type: bool,
     /// Whether frames go through the pty only whole (`KB_TRANSFER=png`).
     png_only: bool,
     /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
@@ -456,6 +474,11 @@ struct App {
     /// The request for the pointer shape under the mouse, and where to ask
     /// next once it is answered.
     pointer_request: Option<u64>,
+    /// In characters: the cell the mouse is over, what the page says of
+    /// what is there (`POINTER`'s tip), and where that tip was drawn.
+    hover_cell: (u16, u16),
+    tip: Option<String>,
+    tip_rect: Option<ui::Rect>,
     pointer_next: Option<(f64, f64)>,
     pointer: String,
     /// The terminal's text and background colours, once it has said.
@@ -646,6 +669,7 @@ fn browse(
         text_wanted: false,
         text_asked: Instant::now(),
         text_request: None,
+        terminal_type: std::env::var("KB_ASCII_TYPE").map_or(true, |v| v != "off"),
         png_only: false,
         zoom: 1.0,
         fit_request: None,
@@ -669,6 +693,9 @@ fn browse(
         bindings: Bindings::load(crate::data_dir().ok().map(|dir| dir.join("keys"))),
         notice: None,
         pointer_request: None,
+        hover_cell: (0, 0),
+        tip: None,
+        tip_rect: None,
         pointer_next: None,
         pointer: "default".to_owned(),
         term_fg: None,
@@ -1337,6 +1364,7 @@ impl App {
         // The splash paints the pane black, help, dialogs and all.
         self.help_rect = None;
         self.modal_rects.clear();
+        self.tip_rect = None;
         self.render_help(&mut out);
         self.render_menu(&mut out);
         self.render_modal(&mut out);
@@ -1363,6 +1391,7 @@ impl App {
         }
         self.ascii = match self.ascii.take() {
             Some(_) => {
+                self.chrome.evaluate(crate::term::ascii::PLAIN_TYPE);
                 self.chrome.evaluate(crate::term::ascii::SHOW_TEXT);
                 None
             }
@@ -1377,6 +1406,17 @@ impl App {
         self.draw(true);
     }
 
+    /// about:ascii-type: in characters, set the page's type to the
+    /// terminal's, a letter a cell, or back to its own.
+    fn toggle_terminal_type(&mut self) {
+        self.terminal_type = !self.terminal_type;
+        if !self.terminal_type {
+            self.chrome.evaluate(crate::term::ascii::PLAIN_TYPE);
+        }
+        self.note(if self.terminal_type { "Page type: the terminal's" } else { "Page type: the page's own" });
+        self.text_wanted = true;
+    }
+
     /// In characters, read the page's text again once frames have come
     /// since it was last read, at most every TEXT_GAP: the script is work
     /// for the page, and meanwhile the letters follow the scroll each
@@ -1389,7 +1429,31 @@ impl App {
         }
         self.text_wanted = false;
         self.text_asked = Instant::now();
+        // Set first, so the text is read as laid out in it.
+        if self.terminal_type {
+            let (cell_w, cell_h) = self.cell();
+            let scale = self.page_scale();
+            self.chrome.evaluate(&crate::term::ascii::terminal_type((cell_w as f64 / scale, cell_h as f64 / scale)));
+        }
         self.text_request = Some(self.chrome.evaluate_value(crate::term::ascii::READ_TEXT));
+    }
+
+    /// In characters, draw the tip for what the mouse is over beside it,
+    /// and give back the cells an old one covered. Drawn with every frame,
+    /// as the page's cells under it may change.
+    fn render_tip(&mut self, out: &mut Vec<u8>) {
+        let (col, row) = self.hover_cell;
+        let tip = self.tip.as_deref().filter(|_| self.ascii.is_some() && !self.help && self.menu.is_none());
+        let layout = tip.map(|text| ui::tip_box(text, col, row, self.window.cols, self.window.rows));
+        if let Some(old) = self.tip_rect.take() {
+            if layout.as_ref().map(|(rect, _)| *rect) != Some(old) {
+                self.uncover(out, old);
+            }
+        }
+        if let Some((rect, lines)) = layout.filter(|(_, lines)| !lines.is_empty()) {
+            ui::render_tip(out, rect, &lines);
+            self.tip_rect = Some(rect);
+        }
     }
 
     /// Draw the help box, if it is open, over whatever is below the bar.
@@ -1558,6 +1622,7 @@ impl App {
             }
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge, self.chrome.windows()),
         }
+        self.render_tip(&mut out);
         self.render_help(&mut out);
         self.render_menu(&mut out);
         self.render_modal(&mut out);
@@ -1843,6 +1908,10 @@ impl App {
                     self.bar.blur(&self.url);
                     self.toggle_ascii();
                 }
+                Edit::Submit if self.bar.text().trim() == "about:ascii-type" => {
+                    self.bar.blur(&self.url);
+                    self.toggle_terminal_type();
+                }
                 Edit::Submit => match ui::normalize_url(&self.bar.text()) {
                     Some(url) => self.navigate(&url),
                     None => self.bar.blur(&self.url),
@@ -1952,18 +2021,12 @@ impl App {
     }
 
     fn open_menu(&mut self) {
-        self.open_menu_with(false);
-    }
-
-    /// Open the ⋮ menu, with its hidden items (ASCII mode) if `all`. A
-    /// terminal that can't draw images has no other mode to offer.
-    fn open_menu_with(&mut self, all: bool) {
         self.close_help();
         let offer = menu::Offer {
             windows: self.chrome.windows().1,
             devtools: self.chrome.has_devtools(),
-            hidden: all && self.graphics,
-            leave_ascii: self.ascii.is_some() && self.graphics,
+            images: self.graphics,
+            in_ascii: self.ascii.is_some(),
         };
         self.menu = Some(Menu::new(offer));
         if let Some(splash) = &mut self.splash {
@@ -2205,9 +2268,11 @@ impl App {
     fn reply(&mut self, id: u64, message: &serde_json::Value) -> bool {
         if self.pointer_request == Some(id) {
             self.pointer_request = None;
-            let shape = message["result"]["result"]["value"].as_str().unwrap_or("default");
+            let value = message["result"]["result"]["value"].as_str().unwrap_or("default");
+            let (shape, tip) = value.split_once('\n').map_or((value, None), |(shape, tip)| (shape, Some(tip)));
             let shape = if POINTERS.contains(&shape) { shape } else { "default" };
             self.set_pointer(shape);
+            self.tip = tip.filter(|_| self.ascii.is_some()).map(str::to_owned);
             if let Some((x, y)) = self.pointer_next.take() {
                 self.ask_pointer(x, y);
             }
@@ -2279,7 +2344,8 @@ impl App {
             self.pointer_next = Some((x, y));
             return;
         }
-        self.pointer_request = Some(self.chrome.evaluate_value(&format!("{POINTER}({x}, {y})")));
+        let tips = self.ascii.is_some();
+        self.pointer_request = Some(self.chrome.evaluate_value(&format!("{POINTER}({x}, {y}, {tips})")));
     }
 
     fn set_pointer(&mut self, shape: &str) {
@@ -2388,6 +2454,12 @@ impl App {
         if matches!(mouse.button, Some(Button::Back | Button::Forward)) {
             return false;
         }
+        self.hover_cell = ((px / cell_w) as u16 + 1, (py / cell_h) as u16 + 1);
+        // The tip is for where the mouse rests: a click, the wheel or the
+        // bar takes it away, and the next move asks again.
+        if mouse.kind != MouseKind::Move || py < cell_h {
+            self.tip = None;
+        }
         // A drag that began on the page stays with the page.
         if py < cell_h && self.buttons == 0 {
             let col = (px / cell_w) as usize + 1;
@@ -2405,14 +2477,14 @@ impl App {
                 };
                 self.set_pointer(shape);
             }
-            // Ctrl+click on ⋮ shows the hidden items too; a Mac's terminal
-            // may report Ctrl+click as the right button.
+            // A Mac's terminal may report Ctrl+click as the right button:
+            // on ⋮, it opens the menu as a click does.
             if mouse.kind == MouseKind::Press
                 && mouse.button == Some(Button::Right)
                 && self.find.is_none()
                 && self.bar_hit(col) == Hit::Menu
             {
-                self.open_menu_with(true);
+                self.open_menu();
                 return true;
             }
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
@@ -2435,7 +2507,7 @@ impl App {
                 Hit::PreviousWindow => self.switch_window(-1),
                 Hit::NextWindow => self.switch_window(1),
                 Hit::CloseWindow => self.close_window(),
-                Hit::Menu => self.open_menu_with(mouse.ctrl),
+                Hit::Menu => self.open_menu(),
                 Hit::Nothing => {}
             }
             return true;

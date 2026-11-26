@@ -436,6 +436,98 @@ pub fn render_box(out: &mut Vec<u8>, lines: &[String], cols: u16, rows: u16) -> 
     Rect { col, row, width, height }
 }
 
+/// The longest line of a tip, and how many lines it may take.
+const TIP_WIDTH: usize = 48;
+const TIP_LINES: usize = 4;
+
+/// Where a tip saying `text` goes for the mouse at `col`, `row` (1-based)
+/// on a `cols` x `rows` screen, and its lines: wrapped at spaces to
+/// `TIP_WIDTH` cells, the last cut with an ellipsis if there is more. Below
+/// the mouse, starting at its column, or above it where there is no room
+/// below; inside the screen and under the top bar. Only letters a cell or
+/// two wide are kept: the text is the page's.
+pub fn tip_box(text: &str, col: u16, row: u16, cols: u16, rows: u16) -> (Rect, Vec<String>) {
+    use crate::term::ascii::cell_width;
+    let width_of = |s: &str| s.chars().map(cell_width).sum::<usize>();
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|word| word.chars().filter(|&ch| cell_width(ch) > 0).collect::<String>())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let most = TIP_WIDTH.min(cols.saturating_sub(4) as usize).max(1);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut cut = false;
+    for word in words {
+        let mut word = word.as_str();
+        loop {
+            let room = if line.is_empty() { most } else { most.saturating_sub(width_of(&line) + 1) };
+            if width_of(word) <= room {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+                break;
+            }
+            if line.is_empty() {
+                // A word longer than a line, split where it fills one.
+                let mut taken = 0;
+                let split = word
+                    .char_indices()
+                    .find(|&(_, ch)| {
+                        taken += cell_width(ch);
+                        taken > most
+                    })
+                    .map_or(word.len(), |(at, _)| at);
+                line.push_str(&word[..split]);
+                word = &word[split..];
+            }
+            lines.push(std::mem::take(&mut line));
+            if lines.len() == TIP_LINES {
+                cut = true;
+                break;
+            }
+        }
+        if cut {
+            break;
+        }
+    }
+    if !cut && !line.is_empty() {
+        lines.push(line);
+    }
+    if cut {
+        if let Some(last) = lines.last_mut() {
+            while width_of(last) + 1 > most {
+                last.pop();
+            }
+            last.push('…');
+        }
+    }
+    let inner = lines.iter().map(|line| width_of(line)).max().unwrap_or(0);
+    let width = (inner as u16 + 4).min(cols);
+    let height = lines.len() as u16 + 2;
+    let left = col.min(cols.saturating_sub(width) + 1).max(1);
+    let top = if row + height <= rows { row + 1 } else { row.saturating_sub(height).max(2) };
+    (Rect { col: left, row: top, width, height }, lines)
+}
+
+/// Draw a tip from `tip_box` at `rect`, framed as the help is.
+pub fn render_tip(out: &mut Vec<u8>, rect: Rect, lines: &[String]) {
+    use crate::term::ascii::cell_width;
+    let colors = palette();
+    let style = colors.box_style.as_str();
+    let rule = "─".repeat(rect.width.saturating_sub(2) as usize);
+    let inner = rect.width.saturating_sub(4) as usize;
+    let mut s = String::new();
+    let _ = write!(s, "\x1b[{};{}H{style}╭{rule}╮", rect.row, rect.col);
+    for (n, line) in lines.iter().enumerate() {
+        let pad = inner.saturating_sub(line.chars().map(cell_width).sum());
+        let _ = write!(s, "\x1b[{};{}H{style}│ {line}{:pad$} │", rect.row + 1 + n as u16, rect.col, "");
+    }
+    let _ = write!(s, "\x1b[{};{}H{style}╰{rule}╯\x1b[0m", rect.row + rect.height - 1, rect.col);
+    out.extend_from_slice(s.as_bytes());
+}
+
 /// Marks the start of a line of `render_box` to style it.
 pub const ART_LINE: char = '\u{1}';
 pub const TITLE_LINE: char = '\u{2}';
@@ -576,6 +668,41 @@ pub fn normalize_url(input: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{tip_box, Rect};
+
+    #[test]
+    fn a_tip_goes_below_the_mouse_and_stays_on_the_screen() {
+        let (rect, lines) = tip_box("How to Do Great Work", 10, 5, 80, 24);
+        assert_eq!(lines, ["How to Do Great Work"]);
+        assert_eq!(rect, Rect { col: 10, row: 6, width: 24, height: 3 });
+        // At the right edge it moves left; at the bottom it goes above.
+        let (rect, _) = tip_box("How to Do Great Work", 75, 23, 80, 24);
+        assert_eq!((rect.col, rect.row), (57, 20));
+        // Never over the top bar.
+        let (rect, _) = tip_box("x", 1, 1, 80, 2);
+        assert!(rect.row >= 2);
+    }
+
+    #[test]
+    fn a_long_tip_wraps_at_spaces_and_is_cut_after_four_lines() {
+        let text = "word ".repeat(60);
+        let (rect, lines) = tip_box(&text, 1, 2, 80, 24);
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|line| line.chars().count() <= 48));
+        assert!(lines[3].ends_with('…'));
+        assert_eq!(rect.height, 6);
+        // A word longer than a line is split; control characters are gone.
+        let (_, lines) = tip_box(&format!("{}\x1b[2J", "a".repeat(60)), 1, 2, 80, 24);
+        assert_eq!(lines, ["a".repeat(48), format!("{}[2J", "a".repeat(12))]);
+    }
+
+    #[test]
+    fn wide_letters_count_two_cells_in_a_tip() {
+        let (rect, lines) = tip_box("端末エミュレータ", 1, 2, 80, 24);
+        assert_eq!(lines, ["端末エミュレータ"]);
+        assert_eq!(rect.width, 16 + 4);
+    }
+
     #[test]
     fn hosts_drop_the_user() {
         assert_eq!(super::host_of("https://example.com/a?b"), "example.com");
