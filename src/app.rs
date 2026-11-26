@@ -11,6 +11,7 @@ use crate::history::History;
 use crate::keys::{Action, Bindings};
 use crate::menu::{self, Menu};
 use crate::picker::{self, Picker};
+use crate::term::ascii::{AsciiPage, Style, Text};
 use crate::term::cursor::{self, AgentCursor};
 use crate::term::input::{Button, Event, Key, KeyCode, Mouse, MouseKind, Parser};
 use crate::term::page::{PageImage, Route};
@@ -334,6 +335,10 @@ const IDLE_GAP: Duration = Duration::from_millis(100);
 const UNFOCUSED_GAP: Duration = Duration::from_millis(500);
 /// Cell size to assume, in device pixels, until the terminal tells us.
 const FALLBACK_CELL: (u32, u32) = (16, 34);
+/// In characters, the least time between readings of the page's text, and
+/// how long to wait for one.
+const TEXT_GAP: Duration = Duration::from_millis(100);
+const TEXT_WAIT: Duration = Duration::from_secs(2);
 
 /// Append a line to the file named by KB_LOG, if set. For diagnosing
 /// terminals: what size was detected, what frames arrived, where clicks went.
@@ -391,6 +396,19 @@ struct App {
     file_query: Option<std::path::PathBuf>,
     /// The page's image on the screen.
     page: PageImage,
+    /// Whether the terminal draws kitty graphics, or said it doesn't.
+    graphics: bool,
+    /// The page drawn in characters in place of the image: in a terminal
+    /// that can't draw images, with KB_ASCII, or after about:ascii.
+    ascii: Option<AsciiPage>,
+    /// How far the page was scrolled in the newest frame, in CSS pixels,
+    /// to keep the page's letters on it.
+    frame_scroll: (f64, f64),
+    /// In characters: whether frames have come since the page's text was
+    /// last read, when it was asked for, and the request in flight.
+    text_wanted: bool,
+    text_asked: Instant,
+    text_request: Option<u64>,
     /// Whether frames go through the pty only whole (`KB_TRANSFER=png`).
     png_only: bool,
     /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
@@ -505,9 +523,11 @@ pub fn run(options: Options) -> Result<(), String> {
     // Asked last, just before raw mode, with nothing left that can fail:
     // when the terminal answers too late for the question, kb's input
     // reader takes the replies instead of the shell.
-    if std::env::var_os("KB_FORCE").is_none() && term::draws_graphics(crate::doctor::ASK_KB) == Some(false) {
+    // One that says it can't draw images can have the page in characters,
+    // if the user says so (or asked for it with KB_ASCII).
+    let graphics = std::env::var_os("KB_FORCE").is_some() || term::draws_graphics(crate::doctor::ASK_KB) != Some(false);
+    if !graphics && std::env::var_os("KB_ASCII").is_none() && !crate::doctor::ask_for_ascii() {
         claim.socket.remove();
-        eprint!("{}", crate::doctor::no_graphics());
         // Explained already; main has nothing to add.
         return Err(String::new());
     }
@@ -518,13 +538,19 @@ pub fn run(options: Options) -> Result<(), String> {
         hook(info);
     }));
     let socket = claim.socket.clone();
-    let result = browse(options, &profile, window, claim);
+    let result = browse(options, &profile, window, claim, graphics);
     socket.remove();
     term::leave();
     result
 }
 
-fn browse(options: Options, profile: &std::path::Path, window: Window, claim: control::Claim) -> Result<(), String> {
+fn browse(
+    options: Options,
+    profile: &std::path::Path,
+    window: Window,
+    claim: control::Claim,
+    graphics: bool,
+) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     let instance = control::id().unwrap_or_default();
     let commands = tx.clone();
@@ -582,6 +608,18 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         let _ = tx.send(Msg::ChromeClosed);
     });
 
+    // What isn't text is drawn in blocks, which come closest to the pixels,
+    // or with KB_ASCII=letters in ASCII art. The finer sextant blocks are
+    // left out where the terminal can't draw images, whose font may lack
+    // them too, unless KB_ASCII=sextants; one that can draws them itself.
+    let ascii = match std::env::var("KB_ASCII").ok() {
+        Some(v) if v == "letters" => Some(Style::Letters),
+        Some(v) => Some(Style::Blocks { sextants: graphics || v == "sextants" }),
+        None if !graphics => Some(Style::Blocks { sextants: false }),
+        None => None,
+    }
+    .map(AsciiPage::new);
+    let ascii_at_start = ascii.is_some();
     let mut app = App {
         chrome,
         scale: options.scale,
@@ -602,13 +640,19 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
         by_file: false,
         file_query: None,
         page: Default::default(),
+        graphics,
+        ascii,
+        frame_scroll: (0.0, 0.0),
+        text_wanted: false,
+        text_asked: Instant::now(),
+        text_request: None,
         png_only: false,
         zoom: 1.0,
         fit_request: None,
         help: false,
         help_rect: None,
         instance,
-        splash: crate::splash::Splash::new(),
+        splash: if ascii_at_start { None } else { crate::splash::Splash::new() },
         committed: false,
         started: Instant::now(),
         focused: true,
@@ -665,6 +709,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
     match std::env::var("KB_TRANSFER").as_deref() {
         Ok("png") => app.png_only = true,
         Ok("pty") => {}
+        _ if !app.graphics => {}
         _ => app.file_query = graphics::ask_about_files(),
     }
     app.chrome.hold_acks();
@@ -890,6 +935,15 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                         continue;
                     }
                     if let Some(id) = message["id"].as_u64() {
+                        if app.text_request == Some(id) {
+                            app.text_request = None;
+                            let text = message["result"]["result"]["value"].as_str().and_then(Text::parse);
+                            if let Some(ascii) = &mut app.ascii {
+                                ascii.set_text(text);
+                                new_frame = true;
+                            }
+                            continue;
+                        }
                         if app.reply(id, &message) {
                             redraw = true;
                             continue;
@@ -923,6 +977,8 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
                             // frame again is nothing to draw.
                             if fits && app.frame.as_deref() != Some(png.as_str()) {
                                 app.frame = Some(png);
+                                app.frame_scroll = app.chrome.frame_scroll();
+                                app.text_wanted = true;
                                 app.frames += 1;
                                 // The blank page that comes first stays under the logo.
                                 new_frame = app.splash.is_none() || app.committed;
@@ -1023,6 +1079,7 @@ fn browse(options: Options, profile: &std::path::Path, window: Window, claim: co
             app.draw_splash();
         }
         app.move_cursor();
+        app.read_text();
         app.check_editor();
         // One frame per gap, or all of them while the page is in use.
         while app.chrome.ack_pending() && app.last_ack.elapsed() >= app.frame_gap() {
@@ -1083,6 +1140,9 @@ impl App {
         graphics::delete_all(&mut out);
         term::write(&out);
         self.page.forget();
+        if let Some(ascii) = &mut self.ascii {
+            ascii.forget();
+        }
         self.help_rect = None;
         self.modal_rects.clear();
     }
@@ -1284,6 +1344,54 @@ impl App {
         term::write(&out);
     }
 
+    /// Show again what a box covered at `rect`, once it is gone: blank
+    /// cells show the page image under them, but the page in characters
+    /// is in the cells themselves, so it is drawn there again.
+    fn uncover(&self, out: &mut Vec<u8>, rect: ui::Rect) {
+        ui::blank(out, rect);
+        if let Some(ascii) = &self.ascii {
+            ascii.repaint(out, rect);
+        }
+    }
+
+    /// about:ascii: draw the page in characters, or in pixels again. In a
+    /// terminal that can't draw images it stays in characters.
+    fn toggle_ascii(&mut self) {
+        if !self.graphics {
+            self.note("This terminal can't draw images, so pages stay in characters");
+            return;
+        }
+        self.ascii = match self.ascii.take() {
+            Some(_) => {
+                self.chrome.evaluate(crate::term::ascii::SHOW_TEXT);
+                None
+            }
+            None => Some(AsciiPage::new(Style::Blocks { sextants: true })),
+        };
+        // The logo and the agent's pointer are images, drawn again as
+        // needed; the page starts again from a clean screen either way.
+        self.splash = None;
+        self.cursor = None;
+        self.text_wanted = true;
+        self.clear();
+        self.draw(true);
+    }
+
+    /// In characters, read the page's text again once frames have come
+    /// since it was last read, at most every TEXT_GAP: the script is work
+    /// for the page, and meanwhile the letters follow the scroll each
+    /// frame comes with. A request with no answer (a page gone) is given
+    /// up after TEXT_WAIT.
+    fn read_text(&mut self) {
+        let waiting = self.text_request.is_some() && self.text_asked.elapsed() < TEXT_WAIT;
+        if self.ascii.is_none() || !self.text_wanted || waiting || self.text_asked.elapsed() < TEXT_GAP {
+            return;
+        }
+        self.text_wanted = false;
+        self.text_asked = Instant::now();
+        self.text_request = Some(self.chrome.evaluate_value(crate::term::ascii::READ_TEXT));
+    }
+
     /// Draw the help box, if it is open, over whatever is below the bar.
     fn render_help(&mut self, out: &mut Vec<u8>) {
         if !self.help {
@@ -1291,7 +1399,7 @@ impl App {
         }
         let lines = self.panel.clone().unwrap_or_else(|| self.help_lines());
         if let Some(old) = self.help_rect.take() {
-            ui::blank(out, old);
+            self.uncover(out, old);
         }
         self.help_rect = Some(ui::render_box(out, &lines, self.window.cols, self.window.rows));
         // The box, not the address field, has the user's attention.
@@ -1362,7 +1470,7 @@ impl App {
         }
         if let Some(rect) = self.help_rect.take() {
             let mut out = Vec::new();
-            ui::blank(&mut out, rect);
+            self.uncover(&mut out, rect);
             term::write(&out);
         }
     }
@@ -1434,7 +1542,10 @@ impl App {
                 (false, false) => Route::Layers,
             };
             let start = std::time::Instant::now();
-            let drawn = self.page.draw(&mut out, png, route, scaled, cols, rows, cell, 2);
+            let drawn = match &mut self.ascii {
+                Some(ascii) => ascii.draw(&mut out, png, cols, rows, 2, self.frame_scroll),
+                None => self.page.draw(&mut out, png, route, scaled, cols, rows, cell, 2),
+            };
             crate::trace::event("draw", format_args!("{:.1}ms\t{drawn}", start.elapsed().as_secs_f64() * 1000.0));
             log(format_args!("drew {drawn}"));
         }
@@ -1460,8 +1571,8 @@ impl App {
     /// Draw what the page asks over it: the file chooser, then a dialog on
     /// top. The cursor goes to the field being typed in, if any.
     fn render_modal(&mut self, out: &mut Vec<u8>) {
-        for rect in self.modal_rects.drain(..) {
-            ui::blank(out, rect);
+        for rect in std::mem::take(&mut self.modal_rects) {
+            self.uncover(out, rect);
         }
         let (cols, rows) = (self.window.cols, self.window.rows);
         if self.picker.is_none() && self.dialog.is_none() {
@@ -1728,6 +1839,10 @@ impl App {
                     self.bar.set_completion(completion);
                 }
                 Edit::Cancel => self.bar.blur(&self.url),
+                Edit::Submit if self.bar.text().trim() == "about:ascii" => {
+                    self.bar.blur(&self.url);
+                    self.toggle_ascii();
+                }
                 Edit::Submit => match ui::normalize_url(&self.bar.text()) {
                     Some(url) => self.navigate(&url),
                     None => self.bar.blur(&self.url),
@@ -1825,7 +1940,7 @@ impl App {
     fn render_menu(&mut self, out: &mut Vec<u8>) {
         if let Some(old) = self.menu_rect.take() {
             // Blank cells show the page image under them again.
-            ui::blank(out, old);
+            self.uncover(out, old);
         }
         let Some(menu) = &self.menu else { return };
         // The first key bound to each item's action, as Chrome shows them.
@@ -1837,8 +1952,19 @@ impl App {
     }
 
     fn open_menu(&mut self) {
+        self.open_menu_with(false);
+    }
+
+    /// Open the ⋮ menu, with its hidden items (ASCII mode) if `all`. A
+    /// terminal that can't draw images has no other mode to offer.
+    fn open_menu_with(&mut self, all: bool) {
         self.close_help();
-        let offer = menu::Offer { windows: self.chrome.windows().1, devtools: self.chrome.has_devtools() };
+        let offer = menu::Offer {
+            windows: self.chrome.windows().1,
+            devtools: self.chrome.has_devtools(),
+            hidden: all && self.graphics,
+            leave_ascii: self.ascii.is_some() && self.graphics,
+        };
         self.menu = Some(Menu::new(offer));
         if let Some(splash) = &mut self.splash {
             splash.again();
@@ -1872,6 +1998,7 @@ impl App {
             menu::Item::Network => {
                 self.network_request = Some(self.chrome.evaluate_value(TIMINGS));
             }
+            menu::Item::Ascii => self.toggle_ascii(),
             // The key quits at once; from the menu, it asks first.
             menu::Item::Quit => self.ask_quit(),
             // A popup may have closed while the menu was open: then there
@@ -1958,6 +2085,10 @@ impl App {
     /// while the address field is orange and fades out after, and steps
     /// aside for anything drawn over the page.
     fn move_cursor(&mut self) {
+        // The pointer is an image; in characters there is none to draw.
+        if self.ascii.is_some() {
+            return;
+        }
         let now = Instant::now();
         let since = self.agent_last.map(|at| now.saturating_duration_since(at));
         let opacity = match since {
@@ -2274,6 +2405,16 @@ impl App {
                 };
                 self.set_pointer(shape);
             }
+            // Ctrl+click on ⋮ shows the hidden items too; a Mac's terminal
+            // may report Ctrl+click as the right button.
+            if mouse.kind == MouseKind::Press
+                && mouse.button == Some(Button::Right)
+                && self.find.is_none()
+                && self.bar_hit(col) == Hit::Menu
+            {
+                self.open_menu_with(true);
+                return true;
+            }
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
                 return false;
             }
@@ -2294,7 +2435,7 @@ impl App {
                 Hit::PreviousWindow => self.switch_window(-1),
                 Hit::NextWindow => self.switch_window(1),
                 Hit::CloseWindow => self.close_window(),
-                Hit::Menu => self.open_menu(),
+                Hit::Menu => self.open_menu_with(mouse.ctrl),
                 Hit::Nothing => {}
             }
             return true;
