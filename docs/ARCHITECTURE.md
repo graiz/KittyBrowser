@@ -383,11 +383,14 @@ the page. With it, an orange pointer (`term/cursor.rs`) drifts to where
 the agent clicks, hovers or types: an image kb places above the page and
 below text, moved by placing it again with pixel offsets about 30 times a
 second while it shows, never part of the page. ⋮ opens the menu (`menu.rs`), grouped as Chrome's is: the page (Find in page,
-Close window, Reset zoom), tools for developers (Select element, View
+Close window, Zoom), tools for developers (Select element, View
 source, Network performance, Developer tools), then Keyboard shortcuts and
 Quit browser. Items that can't do anything at the moment it opens (closing
-kb's only window, resetting 100%, DevTools without `--devtools`) aren't
-shown, rather than shown greyed. Network performance reads the page's
+kb's only window, DevTools without `--devtools`) aren't shown, rather than
+shown greyed. Zoom is a row of − and + around the percentage, as in
+Chrome's: they zoom and leave the menu open, so it can be stepped, and the
+menu draws the zoom as it is at each draw, so Ctrl+0's fit to a wide page,
+which comes later, shows too. Network performance reads the page's
 own Performance API (navigation and resource timings), not the DevTools
 network events, which carry no timings in kb's record.
 Zoom (Ctrl+= and Ctrl+-) divides the CSS viewport by the zoom, so Chrome

@@ -35,10 +35,15 @@ Notable changes to kb. The format follows
   shows only while there is more than one window, so it never quits kb.
   Since 0.3.0 only Ctrl+W, or Back on the window's first page, closed one.
 - The ⋮ menu is grouped as Chrome's is, and offers more: Find in page,
-  Close window and Reset zoom (when there's a window to close or a zoom to
-  reset), then Select element, View source, Network performance and
-  Developer tools (with `--devtools`), then Keyboard shortcuts and Quit
-  browser. Each item shows its keys.
+  Close window (when there's one to close) and Zoom, then Select element,
+  View source, Network performance and Developer tools (with
+  `--devtools`), then Keyboard shortcuts and Quit browser. Each item shows
+  its keys.
+- Zoom from the menu, as in Chrome's: its Zoom row has − and + around the
+  percentage, and they leave the menu open to zoom again; the percentage
+  goes back to 100%. On the row, Left and Right (or − and +) zoom too, and
+  Enter resets. Terminals often keep Ctrl+= and Ctrl+- for their own font
+  size, so this may be the only way to zoom.
 
 ## 0.3.0 — 2026-11-24
 

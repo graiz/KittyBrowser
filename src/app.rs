@@ -1702,6 +1702,7 @@ impl App {
                 menu::Outcome::Stay => {}
                 menu::Outcome::Close => self.close_menu(),
                 menu::Outcome::Choose(item) => self.choose(item),
+                menu::Outcome::Zoom(step) => self.zoom_from_menu(step),
             }
             return false;
         }
@@ -1832,13 +1833,12 @@ impl App {
         let keys = |item: menu::Item| {
             item.action().and_then(|action| bindings.keys_for(action).into_iter().next()).unwrap_or_default()
         };
-        self.menu_rect = Some(menu.render(out, self.window.cols, keys));
+        self.menu_rect = Some(menu.render(out, self.window.cols, self.zoom, keys));
     }
 
     fn open_menu(&mut self) {
         self.close_help();
-        let offer =
-            menu::Offer { windows: self.chrome.windows().1, zoom: self.zoom, devtools: self.chrome.has_devtools() };
+        let offer = menu::Offer { windows: self.chrome.windows().1, devtools: self.chrome.has_devtools() };
         self.menu = Some(Menu::new(offer));
         if let Some(splash) = &mut self.splash {
             splash.again();
@@ -1849,6 +1849,16 @@ impl App {
         self.menu = None;
         if let Some(splash) = &mut self.splash {
             splash.again();
+        }
+    }
+
+    /// Zoom from the menu's zoom row, as the keys do, leaving it open to
+    /// zoom again; it shows the new zoom when next drawn.
+    fn zoom_from_menu(&mut self, step: menu::Zoom) {
+        match step {
+            menu::Zoom::In => self.step_zoom(true),
+            menu::Zoom::Out => self.step_zoom(false),
+            menu::Zoom::Reset => self.zoom_to_fit(),
         }
     }
 
@@ -2214,6 +2224,7 @@ impl App {
                     menu::Outcome::Stay => {}
                     menu::Outcome::Close => self.close_menu(),
                     menu::Outcome::Choose(item) => self.choose(item),
+                    menu::Outcome::Zoom(step) => self.zoom_from_menu(step),
                 },
                 _ => {}
             }
