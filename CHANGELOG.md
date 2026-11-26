@@ -41,9 +41,10 @@ Notable changes to kb. The format follows
   its keys.
 - Zoom from the menu, as in Chrome's: its Zoom row has − and + around the
   percentage, and they leave the menu open to zoom again; the percentage
-  goes back to 100%. On the row, Left and Right (or − and +) zoom too, and
-  Enter resets. Terminals often keep Ctrl+= and Ctrl+- for their own font
-  size, so this may be the only way to zoom.
+  resets it, as Ctrl+0 does (100%, or out until a wide page fits). On the
+  row, Left and Right (or − and +) zoom too, and Enter resets. Terminals
+  often keep Ctrl+= and Ctrl+- for their own font size, so this may be the
+  only way to zoom.
 
 ## 0.3.0 — 2026-11-24
 

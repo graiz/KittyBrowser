@@ -5,8 +5,8 @@
 //! only window, DevTools without `--devtools`) isn't shown, so the menu
 //! stays short. Zoom is a row of its own, as in Chrome's: − and + step it
 //! with the menu left open, to step again, and the percentage between
-//! them goes back to 100%. Terminals often keep Ctrl+= and Ctrl+- for
-//! their own font size, so the menu may be the only way to zoom.
+//! them resets it, as Ctrl+0 does. Terminals often keep Ctrl+= and Ctrl+-
+//! for their own font size, so the menu may be the only way to zoom.
 
 use crate::keys::Action;
 use crate::term::input::{Key, KeyCode};
@@ -72,7 +72,7 @@ enum Row {
 pub enum Zoom {
     In,
     Out,
-    /// Back to 100%, as Ctrl+0.
+    /// As Ctrl+0: back to 100%, or out until a wide page fits.
     Reset,
 }
 
