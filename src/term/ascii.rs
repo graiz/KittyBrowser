@@ -130,8 +130,11 @@ macro_rules! icons {
 /// Once read, it hides the page's own text, in the document and each shadow
 /// root, so that frames show what is behind it: the letters are drawn over
 /// that, and a blurred copy of the page's own around them would only be
-/// noise. The text keeps its colour, to be read, and is only not painted;
-/// fields keep theirs, as their values aren't read. `SHOW_TEXT` undoes it.
+/// noise. Nor is the selection's highlight painted: the selected letters
+/// are drawn the other way round instead, and the highlight around them
+/// would come out as blocks. The text keeps its colour, to be read, and is
+/// only not painted; fields keep theirs, as their values aren't read.
+/// `SHOW_TEXT` undoes it.
 /// A constructed sheet, not a `<style>`, so a page's content security
 /// policy doesn't refuse it.
 pub const READ_TEXT: &str = concat!(
@@ -147,7 +150,8 @@ pub const READ_TEXT: &str = concat!(
       -webkit-text-fill-color: transparent !important;
       text-decoration-color: transparent !important;
       text-shadow: none !important; }
-    :is(${ICONS}) { -webkit-text-fill-color: currentcolor !important; }`);
+    :is(${ICONS}) { -webkit-text-fill-color: currentcolor !important; }
+    ::selection { background-color: transparent !important; }`);
     window.__kbHidden = new Set();
   }
   const roots = [document], colours = [], index = new Map(), lines = [];
@@ -390,7 +394,7 @@ pub const READ_TEXT: &str = concat!(
     window.__kbHidden.add(root);
     root.adoptedStyleSheets = [...root.adoptedStyleSheets, window.__kbHideText];
   }
-  return JSON.stringify({ w: W, h: H, colours, lines });
+  return JSON.stringify({ w: W, h: H, sx: scrollX, sy: scrollY, colours, lines });
 })()"#
 );
 
@@ -613,6 +617,11 @@ pub struct Text {
     /// The viewport it was read in, in CSS pixels.
     width: f64,
     height: f64,
+    /// How far the page was scrolled when it was read: newer than the last
+    /// frame's, and the only word of a scroll that changes no pixels (plain
+    /// text on white, whose letters are hidden), for which Chrome sends no
+    /// frame.
+    scroll: Option<(f64, f64)>,
     lines: Vec<Line>,
 }
 
@@ -630,6 +639,11 @@ struct Line {
 }
 
 impl Text {
+    /// How far the page was scrolled when the text was read.
+    pub fn scroll(&self) -> Option<(f64, f64)> {
+        self.scroll
+    }
+
     /// The text from `READ_TEXT`'s answer; None if it isn't one, or the
     /// page was too complex to read.
     pub fn parse(json: &str) -> Option<Text> {
@@ -662,7 +676,8 @@ impl Text {
                 })
             })
             .collect();
-        Some(Text { width: value["w"].as_f64()?, height: value["h"].as_f64()?, lines })
+        let scroll = value["sx"].as_f64().zip(value["sy"].as_f64());
+        Some(Text { width: value["w"].as_f64()?, height: value["h"].as_f64()?, scroll, lines })
     }
 }
 
@@ -1358,6 +1373,9 @@ mod tests {
     fn reads_the_pages_text() {
         let text = text();
         assert_eq!((text.width, text.height, text.lines.len()), (40.0, 20.0, 2));
+        assert_eq!(text.scroll(), None);
+        let scrolled = Text::parse(r#"{"w":40,"h":20,"sx":0,"sy":4044.5,"colours":[],"lines":[]}"#).unwrap();
+        assert_eq!(scrolled.scroll(), Some((0.0, 4044.5)));
         let red = Line {
             colour: [255, 0, 0],
             fixed: true,

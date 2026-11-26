@@ -353,6 +353,9 @@ const FALLBACK_CELL: (u32, u32) = (16, 34);
 /// In characters, the least time between readings of the page's text, and
 /// how long to wait for one.
 const TEXT_GAP: Duration = Duration::from_millis(100);
+/// How long after a key, click or scroll the text is read again with no
+/// frame: long enough for the glide that carries a scroll on.
+const TEXT_AFTER_INPUT: Duration = Duration::from_secs(1);
 const TEXT_WAIT: Duration = Duration::from_secs(2);
 
 /// Append a line to the file named by KB_LOG, if set. For diagnosing
@@ -965,6 +968,11 @@ fn browse(
                         if app.text_request == Some(id) {
                             app.text_request = None;
                             let text = message["result"]["result"]["value"].as_str().and_then(Text::parse);
+                            // The text is drawn where the page is now, which
+                            // a scroll over plain text sends no frame to say.
+                            if let Some(scroll) = text.as_ref().and_then(Text::scroll) {
+                                app.frame_scroll = scroll;
+                            }
                             if let Some(ascii) = &mut app.ascii {
                                 ascii.set_text(text);
                                 new_frame = true;
@@ -1418,13 +1426,16 @@ impl App {
     }
 
     /// In characters, read the page's text again once frames have come
-    /// since it was last read, at most every TEXT_GAP: the script is work
-    /// for the page, and meanwhile the letters follow the scroll each
-    /// frame comes with. A request with no answer (a page gone) is given
-    /// up after TEXT_WAIT.
+    /// since it was last read, or while someone is using the page, at most
+    /// every TEXT_GAP: the script is work for the page, and meanwhile the
+    /// letters follow the scroll each frame comes with. Input counts as
+    /// well as frames because a scroll over plain text changes no pixels
+    /// (its letters are hidden), so Chrome sends no frame for it. A
+    /// request with no answer (a page gone) is given up after TEXT_WAIT.
     fn read_text(&mut self) {
         let waiting = self.text_request.is_some() && self.text_asked.elapsed() < TEXT_WAIT;
-        if self.ascii.is_none() || !self.text_wanted || waiting || self.text_asked.elapsed() < TEXT_GAP {
+        let wanted = self.text_wanted || self.last_input.elapsed() < TEXT_AFTER_INPUT;
+        if self.ascii.is_none() || !wanted || waiting || self.text_asked.elapsed() < TEXT_GAP {
             return;
         }
         self.text_wanted = false;
