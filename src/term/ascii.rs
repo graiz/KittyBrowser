@@ -511,7 +511,10 @@ impl AsciiPage {
                     None => own,
                 },
                 None => own,
-            };
+            }
+            // Going on a space after a line that reached the edge, or text
+            // the page starts past it, would start beyond the last cell.
+            .min(cols);
             let stop = spots
                 .iter()
                 .zip(&chained)
@@ -1022,6 +1025,17 @@ mod tests {
         // The big line on the row through its middle, the link after it; a
         // small line runs on to the pane's edge, or to the next text.
         assert_eq!(letters(&grid, 8), ["........", "Big link", "small te", "long.end"]);
+    }
+
+    #[test]
+    fn a_line_that_reaches_the_edge_leaves_no_room_for_what_follows() {
+        let mut page = AsciiPage::new(Style::Letters);
+        // "abcd" fills the row's four cells; " link" follows it, a space on,
+        // and so would start past the edge. Text past the edge does too.
+        let json = r#"{"w":80,"h":10,"colours":[[0,0,0]],"lines":[
+            [0,0,"abcd",0,0,40,10],[0,0,"link",42,0,60,10],[0,1,"far",65,0,80,10]]}"#;
+        page.text = Text::parse(json);
+        assert_eq!(letters(&page.place(4, 1, (0.0, 0.0), (10.0, 10.0)), 4), ["abcd"]);
     }
 
     #[test]
