@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 /// The image id the cursor is drawn under.
 const ID: u32 = 5;
-/// Above the page and its tiles, below text, so a box drawn over the page
-/// still covers it.
+/// Above the page and what is laid over it, below text, so a box drawn
+/// over the page still covers it.
 const Z: i64 = -1;
 /// How long a drift to a new point takes: slow, as a hand moves.
 const DRIFT: Duration = Duration::from_millis(1500);

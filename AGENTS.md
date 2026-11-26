@@ -34,6 +34,7 @@ src/files.rs           private folders and files: the data directory, frames, sc
 src/app.rs             the event loop: terminal input, Chrome's messages, drawing
 src/ui.rs              the top bar: buttons, address field, completion, find
 src/history.rs         visited pages, for address completion
+src/scroll.rs          wheel ticks into scrolls: the glide, and one axis at a time
 src/menu.rs            the ⋮ menu: select element, view source, network performance
 src/modal.rs           boxes drawn over the page: a grid of cells, frames, buttons
 src/dialog.rs          a page's alert, confirm, prompt or leave-site dialog, asked in the pane
@@ -53,6 +54,8 @@ src/mcp.rs             kb mcp
 src/skill.rs           kb skill; the skill's text is skill/SKILL.md
 src/bench.rs           kb bench
 src/headless.rs        kb --headless: the browser without a pane, for kb ctl alone
+src/trace.rs           KB_TRACE: a timeline of scrolling, for tools/scroll/
+tools/scroll/          replay a recorded scroll into kb and score it
 ```
 
 ## Conventions

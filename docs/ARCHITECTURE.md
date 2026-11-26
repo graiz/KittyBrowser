@@ -102,18 +102,17 @@ page, which avoids tracking command replies after startup.
 
 ### Graphics (`graphics.rs`)
 
-Every frame reuses image id 1, so it replaces the last, and the draw is
-wrapped in a synchronized update. A frame whose size doesn't match the
-current layout (one rendered before a resize, or for a new pane's first guess
-at its size) is dropped rather than stretched to fit, and a frame identical
-to the one on screen is not drawn again: some pages repaint without changing,
-30 times a second.
+Each draw is wrapped in a synchronized update. A frame whose size doesn't
+match the current layout (one rendered before a resize, or for a new pane's
+first guess at its size) is dropped rather than stretched to fit, and a
+frame identical to the one on screen is not drawn again: some pages repaint
+without changing, 30 times a second.
 
 There are two ways to send a frame:
 
-- **By file.** The PNG is decoded here, the raw pixels are written to a
-  temporary file, and the terminal is given its name (`t=t,f=24`). The
-  terminal reads the file and deletes it. The files go in a folder made once
+- **By file.** The PNG is decoded here, the raw pixels are written to
+  temporary files, and the terminal is given their names (`t=t,f=24`). The
+  terminal reads each file and deletes it. The files go in a folder made once
   per run under the temporary directory (`tty-graphics-protocol-kb-PID-XXXXXX`,
   by `mkdtemp`), which only the user can open, so on a machine with a shared
   `/tmp` no one else can read a frame of a signed-in page or plant a file or
@@ -126,9 +125,11 @@ There are two ways to send a frame:
   machine can't see the file and says no.
 - **Through the pty.** The data goes inside the escapes, in 4096-byte
   chunks. This works everywhere, over ssh too, and is what kb uses until the
-  terminal has said yes to files. Only what moved or changed is sent (see
-  "Over a network" below); the base64 PNG as Chrome sent it (`f=100`) is
-  the fallback when a frame can't be drawn that way.
+  terminal has said yes to files.
+
+Either way only what moved or changed is sent (see "Only what moved or
+changed" below); the base64 PNG as Chrome sent it (`f=100`) is the fallback
+when a frame can't be drawn that way.
 
 What Rex accepts, found by querying it: raw pixels directly, raw pixels with
 zlib, and raw pixels from a file in a temporary directory or a folder
@@ -146,23 +147,10 @@ Wikipedia article, median milliseconds per step:
 
 So the file path is used, and JPEG isn't: it saves little and smears text.
 
-**Only what changed** (`Tiles`). When frames go by file and line up with the
-cells, the page is one image (id 1) and the screen is treated as a grid of
-tiles, 12 cells by 6. Each new frame is compared with the one on screen,
-tile by tile (under a millisecond). If a third of the tiles or fewer differ,
-each is sent as a small image (ids from 10, `z=1`) laid over the page at its
-cells. If more differ, the whole page is sent again and the tiles are
-deleted, since ninety small files cost more than one large one: sending a
-whole page as tiles took 89 ms a step against 72. A viewport is rounded up
-to cover the cells, and the extra pixel is cropped, so tiles and page line
-up exactly. A fixed viewport (`kb ctl viewport`) is scaled to fit and so is
-always sent whole.
-
-**Over a network** (`term::layers`). When the terminal can't read files,
-which is always the case over ssh, every byte crosses the link: a whole
-2736x1666 frame is about 1.1 MB, and resending it for each scroll step or
-keystroke cost 50 to 70 ms on a LAN. So each frame is decoded and compared
-with the one on screen:
+**Only what moved or changed** (`term::layers`). Resending the whole frame
+for each scroll step or keystroke costs the terminal a 2736x1666 image each
+time (about 1.1 MB through the pty, 50 to 70 ms on a LAN; a 13 MB file
+locally). So each frame is decoded and compared with the one on screen:
 
 - **What moved.** The frame is cut into columns a cell wide, and rows that
   occur once in a column vote on how far it moved. Neighbouring columns that
@@ -171,15 +159,31 @@ with the one on screen:
   again, shifted, with a source rectangle and a pixel offset inside the cell,
   and only the newly exposed rows are sent.
 - **What changed.** Whatever still differs (a caret, a typed word, a sticky
-  header) is sent as small rectangles of raw pixels compressed with zlib
-  (`f=24,o=z`, level 3, on a few threads), laid on top with a higher z.
+  header, the rows a scroll uncovered) is sent as small rectangles of raw
+  pixels, laid on top with a higher z: by file where the terminal reads
+  files, otherwise through the pty compressed with zlib (`f=24,o=z`,
+  level 3, on a few threads). Levels 1 and 6 measured worse: 22% more bytes,
+  or twice the time for 0.2% fewer.
 - **What came back.** Images that scroll off are kept for a while, two pages'
   worth, and kb keeps their rows' hashes; scrolling back places them again
   instead of sending them.
-- **Starting again.** When most of the page changed, or placements pile up,
-  the whole frame is sent and the layers are dropped. Re-placements ask the
-  terminal to report errors (`q=1`); if it says it no longer has an image,
-  everything is drawn again.
+- **Files.** By file, the terminal deletes each file once it has read it.
+  One it never read (an escape it refused, or one dropped while an editor
+  had the pane) kb removes 64 draws later.
+- **Crowding.** A page that scrolls a few rows at a time, as the glide
+  scrolls it (see "Scrolling"), leaves a thin strip per step, each its own
+  placement. Past 96 placements, the shortest band of the page that holds
+  enough of them is sent again as one strip, which covers them (sent as
+  it is: looked for in the held images, it would be found there, in the
+  very strips it is to replace); before
+  this, the whole frame went again, and over ssh each of those 1.3 MB
+  frames held up the ones behind it (frames reached the far end in 102 to
+  133 ms at the 90th percentile; after, 43 to 51).
+- **Starting again.** When half the page or more changed (an animation,
+  a video), or crowding can't be relieved, the whole frame is sent and the
+  layers are dropped. Re-placements ask the terminal to report errors
+  (`q=1`); if it says it no longer has an image, everything is drawn
+  again.
 
 This needs more of the protocol than a whole frame does: placements of
 part of an image (`x,y,w,h`), offsets within a cell (`X,Y`), stacking (`z`)
@@ -187,11 +191,20 @@ and zlib-compressed pixels (`o=z`). For a terminal that has only the basics,
 `KB_TRANSFER=png` sends every frame whole, as a PNG scaled to the cells
 (`a=T,f=100,c,r`), as kb did before.
 
-Which of these drew what is on screen is noted (`term::page::PageImage`):
-each knows only its own images, so when another takes over, all images are
-deleted first. A frame that doesn't fit the cells (one rendered before a
-resize) goes whole, as image 1, above the layers; left there, it would hide
-every frame they draw after it.
+Which drew what is on screen is noted (`term::page::PageImage`): layers
+know only their own images, so when a whole frame takes over, or layers
+take over from one, all images are deleted first. A frame that doesn't fit
+the cells (one rendered before a resize, or a fixed viewport scaled to fit)
+goes whole, as image 1; left there, it would hide every frame the layers
+draw after it.
+
+Locally, in Rex, layers by file against the same layers through the pty,
+replaying a trackpad scroll on a news site: the page followed the finger
+72 to 76 ms behind against 80 to 92, and kb's own time per frame went from
+10 ms at the 90th percentile (compressing strips) to under 1. `kb bench`
+had found layers through the pty already faster there than the changed
+tiles by file kb used before (14.5 ms a scroll step against 19.1, 18.6 a
+typed key against 20.1), so tiles were removed.
 
 Measured with `kb bench` over ssh on a LAN (Ghostty, 171x50 cells, frames
 2736x1666, Wikipedia), median milliseconds per step:
@@ -248,10 +261,8 @@ repaints continuously took over three cores at rest, so it is not on by
 default. Things to try next:
 
 1. Find a way to cut Chrome's latency without the unlimited frame rate.
-2. A scrolled copy of the previous frame, so a scroll sends only the strip
-   that came into view.
-3. Stop Chrome drawing at all when the pane is hidden.
-4. Photographs: a 3 MB PNG takes 60 ms to decode, where JPEG takes 25.
+2. Stop Chrome drawing at all when the pane is hidden.
+3. Photographs: a 3 MB PNG takes 60 ms to decode, where JPEG takes 25.
 
 ### Size (`size.rs`)
 
@@ -279,6 +290,7 @@ across), and a mouse wheel's notch into a few (three by default in Ghostty,
 five in kitty). So each tick scrolls the page by one row of the pane,
 in CSS pixels for the zoom and fit in effect: the page stays under the
 fingers, and a notch moves it as far as the terminal's own scrollback would.
+How those rows reach the page is in "Scrolling" below.
 
 The kitty keyboard protocol's first level is switched on, so in terminals
 that have it Esc, and keys held with Ctrl, Alt or Command, arrive as
@@ -286,6 +298,74 @@ that have it Esc, and keys held with Ctrl, Alt or Command, arrive as
 how Command+L and Command+F reach kb. Elsewhere keys come in the legacy
 encoding, where some combinations are indistinguishable (Ctrl+I is Tab) and
 Command never arrives.
+
+### Scrolling (`src/scroll.rs`, `App::glide`)
+
+A trackpad drawn slowly down gives a tick every 100 to 140 ms, and sent as
+they came, each moved the page a whole row (14 CSS pixels) in the next
+frame: the page jumped a row at a time, seven to ten times a second, while
+the finger moved smoothly. It wasn't latency (Chrome showed each scroll
+within 20 ms) but resolution. Three things make it follow the finger:
+
+- **The glide** (`Glide`). Each tick is taken as a point the finger
+  passed. The page goes to it, and on from it at the speed the ticks have
+  been coming, for at most one more row: at a steady speed it reaches each
+  row just as the next tick arrives, so it never jumps. The main loop wakes
+  when the page is next owed half a pixel (`Glide::next_due`), but no
+  sooner than 8 ms after the last step, and sends Chrome what the glide
+  says it is owed. Waking every 8 ms instead found nothing to send on a
+  slow drag, where half a pixel comes due only every 10 to 20 ms, and the
+  loop spun until it did: about 40% of a core, against 5% now. Stepping at
+  every wake (Chrome's
+  answer to each step is one) sent three times as many scrolls for 4 to 8
+  ms less lag, and every 16 ms added 4 to 8. When the finger stops, the page goes on to the end
+  of that row, up to 14 pixels; holding it back half a row (to rest where
+  the finger did, on average) doubled the lag. A scroll's first ticks have
+  no speed yet: the page goes to those and no further, so a mouse wheel's
+  notch, several ticks at once, scrolls as far as it always did (a wheel
+  spun notch after notch may end a row further). Gliding only on single
+  ticks, to keep spins exact too, cost 20 ms of lag: a fast trackpad's ticks
+  also reach kb several at once. Turning back starts from where the page is, which may be past
+  the last tick, so it doesn't leap back. With Ctrl held the wheel zooms
+  on pages that zoom (maps, viewers), and some zoom a step for each
+  event, however small; those ticks go as they came, not glided, which
+  would have made six ticks 45 events.
+- **Rails** (`Rails`). Fingers drawn down a trackpad drift sideways, and
+  terminals report the drift as ticks left and right among the ticks down
+  (about a third of them in a recorded scroll). Sent on, they shake
+  anything that scrolls across. A scroll goes across only once it is
+  mostly across.
+- **Writing in the background** (`term::write_in_background`). A terminal
+  that is slow to read (busy, or another client attached to it is behind)
+  fills the pty, and a write then waits. On the app thread that held up
+  scrolls on their way to Chrome by up to 760 ms at the 90th percentile.
+  A thread of its own writes now; the app holds back a new frame until the
+  last one has been written (`term::mark`, `term::reached`), and the writer
+  wakes it (`Msg::Written`) to draw the latest, not each that came
+  meanwhile. Leaving waits for the writer at most a second, so a terminal
+  that has stopped reading can't keep kb from quitting.
+
+Replaying the same recorded trackpad scroll on a news site, in Rex on the
+same Mac, slow drags only:
+
+| | Before | After |
+| --- | --- | --- |
+| How far behind the finger | 84 to 88 ms | 40 to 60 ms |
+| Frames in which the page stood still while the finger moved | 86% | 39 to 49% |
+| Each step | 14 px | about 3 px |
+
+Over ssh (kb and Chrome on one Mac, the terminal on another on the same
+LAN), 68 to 120 ms became 60 to 84, and 72 to 79% standing still became 54
+to 58%. Tried and left out: `--disable-smooth-scrolling` (no difference),
+the finger's speed over the last few ticks rather than two (more lag, and
+no help with ticks that cross ssh two at once), stepping once per frame
+Chrome sends rather than on a clock (more lag), and
+`--disable-frame-rate-limit` (smoother, 45 frames a second, but kb and
+Chrome at idle went from half a core to 1.8).
+
+To measure: `KB_TRACE=FILE` writes a timeline of ticks, scrolls sent,
+frames and their bytes, one line per event, and `tools/scroll/` has the
+scripts that replay a recorded scroll into kb and score it.
 
 ## UI (`src/ui.rs`)
 
@@ -314,7 +394,7 @@ shrunk to fill it: zoomed in, the page is a little soft. Such frames are
 drawn whole rather than as changed blocks. Ctrl+0 goes back to 100% and then asks the page
 for `scrollWidth`; if that is wider than the viewport it zooms out to fit.
 
-The page and its tiles are placed with a z-index below -1,073,741,824, which
+The page and what is laid over it are placed with a z-index below -1,073,741,824, which
 the protocol defines as under text and under cells with a background colour
 of their own. So the help box (Ctrl+/) is ordinary coloured text drawn over
 the page, and blanking its cells shows the page again. The startup logo

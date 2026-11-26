@@ -27,11 +27,13 @@
 //! Images are placed at their own size, not scaled to cells, so this relies
 //! on `cell` being the terminal's cell to the pixel (`KB_TRANSFER=png` if not).
 
-use super::graphics::{crop, cut, decode_png, fits, png_size, transmit, Pixels};
-use std::collections::HashMap;
+use super::graphics::{crop, cut, decode_png, fits, png_size, transmit, write_frame, Pixels};
+use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
+use std::path::PathBuf;
 
-/// Ids from here up are these images, clear of the page, tiles and queries.
+/// Ids from here up are these images, clear of the page, the cursor and
+/// queries.
 const FIRST_ID: u32 = 1000;
 /// How many image ids, and placement ids, are used before starting again.
 const IDS: u32 = 1_000_000;
@@ -52,6 +54,9 @@ const SAMPLE: usize = 4;
 /// Images that no longer show are kept, up to this many pages' worth, to
 /// be placed again when the page scrolls back to them.
 const RETAIN: u64 = 2;
+/// A file sent this many draws ago and still there, the terminal never
+/// read: it is removed.
+const FILE_DRAWS: u64 = 64;
 /// Rows of a held image are placed again only this many at a time or
 /// more; fewer cost about as much to place as to send.
 const MIN_RUN: u32 = 32;
@@ -168,6 +173,13 @@ pub struct Layers {
     held: Vec<Held>,
     /// Draws so far, to know which held image showed least recently.
     clock: u64,
+    /// Whether the terminal reads pixels from files: then whole frames and
+    /// strips go by file, and only their names cross the pty.
+    files: bool,
+    /// The files sent, oldest first, with the draw each went in.
+    files_sent: VecDeque<(u64, PathBuf)>,
+    /// Draws so far, whole or not, to age the files by.
+    draws: u64,
 }
 
 /// An image the terminal holds, placed or not, and what is in it. Once a
@@ -201,6 +213,11 @@ impl Layers {
         ours
     }
 
+    /// Send by file from now on, if `files`, or through the pty.
+    pub fn by_file(&mut self, files: bool) {
+        self.files = files;
+    }
+
     /// The screen was cleared of images: the next draw sends the whole frame.
     pub fn forget(&mut self) {
         self.shown = None;
@@ -223,6 +240,7 @@ impl Layers {
         cell: (u32, u32),
         top: u16,
     ) -> Option<Sent> {
+        self.draws += 1;
         // Decoding takes 10 ms or so: not for a frame that can't be used.
         if !png_size(png_base64).is_some_and(|size| fits(size, cols, rows, cell)) {
             return None;
@@ -245,11 +263,19 @@ impl Layers {
                     strips.extend(changed(&old.pixels, &new, region));
                 }
                 let strips = merge(strips);
-                match self.patch(out, &new, &regions, &strips, page) {
-                    Err(why) => Sent::Whole(why),
-                    Ok(()) => {
+                let mut result = self.patch(out, &new, &regions, &strips, None, page);
+                // Placements piled up, as they do when a page scrolls a few
+                // rows at a time and each step's rows go in a strip of their
+                // own: rather than send the whole frame again, send the band
+                // where they crowd most as one strip, which covers them.
+                if let Err((Why::Placements, Some(band))) = result {
+                    result = self.patch(out, &new, &regions, &strips, Some(band), page);
+                }
+                match result {
+                    Err((why, _)) => Sent::Whole(why),
+                    Ok(sent) => {
                         let shift = regions.iter().map(|r| r.shift).max_by_key(|s| s.abs()).unwrap_or(0);
-                        Sent::Strips { shift, strips: strips.len() }
+                        Sent::Strips { shift, strips: sent }
                     }
                 }
             }
@@ -275,39 +301,54 @@ impl Layers {
         (self.next_image, self.next_placement, self.next_z) = (0, 0, BOTTOM_Z);
         let placement = self.new_placement(Rect { x: 0, y: 0, width: new.width, height: new.height }, &[]);
         page.cursor(out, &placement);
-        let keys = format!(
-            "a=T,f=100,i={},p={},w={},h={},z={},C=1,q=2",
-            placement.image, placement.id, new.width, new.height, placement.z
-        );
-        transmit(out, &keys, png_base64);
+        match self.files.then(|| write_frame(&new.data).ok()).flatten() {
+            Some(path) => self.send_file(out, path, new, &placement, page),
+            None => {
+                let keys = format!(
+                    "a=T,f=100,i={},p={},w={},h={},z={},C=1,q=2",
+                    placement.image, placement.id, new.width, new.height, placement.z
+                );
+                transmit(out, &keys, png_base64);
+            }
+        }
         self.placements.push(placement);
         let pixels = Pixels { data: new.data.clone(), ..*new };
         self.held.push(Held { id: placement.image, x: 0, pixels, used: self.clock, rows: Vec::new() });
     }
 
     /// Move the placements as `regions` say and lay `strips` of `new` over
-    /// them. Fails, having appended nothing, if what held images don't have
-    /// is too much of the page to be worth sending in strips, or it would
-    /// leave too many placements.
+    /// them, and `band`, if any, sent as it is: not looked for in held
+    /// images, whose placements it is there to replace. Returns how many
+    /// strips there were. Fails, having appended nothing (though ids and z
+    /// may have moved on), if what held images don't have is too much of the
+    /// page to be worth sending in strips, or it would leave too many
+    /// placements; then with the band that would relieve them, if one would.
     fn patch(
         &mut self,
         out: &mut Vec<u8>,
         new: &Pixels,
         regions: &[Region],
         strips: &[Rect],
+        band: Option<Rect>,
         page: Page,
-    ) -> Result<(), Why> {
+    ) -> Result<usize, (Why, Option<Rect>)> {
         let mut reused = Vec::new();
-        let mut send = Vec::new();
-        for strip in strips {
+        let mut send: Vec<Rect> = band.into_iter().collect();
+        // What the band covers it sends already.
+        for strip in strips.iter().filter(|strip| band.is_none_or(|band| !band.contains(strip))) {
             self.reuse(new, *strip, &mut reused, &mut send);
         }
+        let covers: Vec<Rect> = strips.iter().copied().chain(band).collect();
         if area(&send) * 2 >= new.width as u64 * new.height as u64 {
-            return Err(Why::Changed);
+            return Err((Why::Changed, None));
         }
         // Compressing is most of the work, so big strips are cut into
-        // pieces compressed side by side.
-        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_THREADS);
+        // pieces compressed side by side; by file, nothing is compressed,
+        // and a strip is better one file than several.
+        let threads = match self.files {
+            true => 1,
+            false => std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_THREADS),
+        };
         let pieces = split(&send, threads);
 
         // Where everything goes, bottom to top: each placement's part in
@@ -320,7 +361,7 @@ impl Layers {
             let parts = regions
                 .iter()
                 .filter_map(|region| placement.moved(region, page.height))
-                .filter(|part| !strips.iter().any(|strip| strip.contains(&part.on_page())));
+                .filter(|part| !covers.iter().any(|strip| strip.contains(&part.on_page())));
             for (n, part) in parts.enumerate() {
                 next.push(if n == 0 { part } else { Placement { id: self.next_id(&old), ..part } });
             }
@@ -337,8 +378,13 @@ impl Layers {
         }
         self.placements = old;
         let shows = visible(&next, new.width, page);
-        if shows.iter().filter(|&&shows| shows).count() > MAX_PLACEMENTS {
-            return Err(Why::Placements);
+        let showing: Vec<Rect> =
+            next[..first_sent].iter().zip(&shows).filter(|(_, &shows)| shows).map(|(p, _)| p.on_page()).collect();
+        if showing.len() + pieces.len() > MAX_PLACEMENTS {
+            // Down to two thirds of the limit, so as not to come back to it
+            // at the next step.
+            let crowd = showing.len() + pieces.len() - MAX_PLACEMENTS * 2 / 3;
+            return Err((Why::Placements, crowded(&showing, crowd).filter(|_| band.is_none())));
         }
 
         // A placement that went is deleted, but not its image, which
@@ -367,15 +413,61 @@ impl Layers {
             next[first_sent..].iter().zip(&shows[first_sent..]).filter(|(_, &shows)| shows).map(|(p, _)| p).collect();
         let cuts: Vec<Pixels> =
             sent.iter().map(|piece| cut(new, piece.x, piece.y, piece.from.width, piece.from.height)).collect();
-        let compressed: Vec<Vec<u8>> = std::thread::scope(|scope| {
-            let work: Vec<_> = cuts.iter().map(|cut| scope.spawn(move || compress(&cut.data))).collect();
-            work.into_iter().map(|done| done.join().unwrap_or_default()).collect()
-        });
-        for ((placement, data), pixels) in sent.into_iter().zip(compressed).zip(cuts) {
+        // By file, a strip costs only its name on the pty and nothing to
+        // compress; through the pty, or if its file can't be written, its
+        // pixels go compressed.
+        let files: Vec<Option<std::path::PathBuf>> =
+            cuts.iter().map(|cut| self.files.then(|| write_frame(&cut.data).ok()).flatten()).collect();
+        let compressed: Vec<Vec<u8>> = match files.iter().all(Option::is_some) {
+            true => vec![Vec::new(); cuts.len()],
+            false => std::thread::scope(|scope| {
+                let work: Vec<_> = cuts
+                    .iter()
+                    .zip(&files)
+                    .map(|(cut, file)| {
+                        scope.spawn(move || if file.is_none() { compress(&cut.data) } else { Vec::new() })
+                    })
+                    .collect();
+                work.into_iter().map(|done| done.join().unwrap_or_default()).collect()
+            }),
+        };
+        let count = sent.len();
+        for (((placement, pixels), file), data) in sent.into_iter().zip(cuts).zip(files).zip(compressed) {
             page.cursor(out, placement);
-            let keys = format!(
-                "a=T,f={},s={},v={},o=z,i={},p={},X={},Y={},z={},C=1,q=2",
-                if new.alpha { 32 } else { 24 },
+            match file {
+                Some(path) => self.send_file(out, path, &pixels, placement, page),
+                None => {
+                    let keys = format!(
+                        "a=T,f={},s={},v={},o=z,i={},p={},X={},Y={},z={},C=1,q=2",
+                        if new.alpha { 32 } else { 24 },
+                        pixels.width,
+                        pixels.height,
+                        placement.image,
+                        placement.id,
+                        placement.x % page.cell.0,
+                        placement.y % page.cell.1,
+                        placement.z
+                    );
+                    transmit(out, &keys, &crate::base64::encode(&data));
+                }
+            }
+            self.held.push(Held { id: placement.image, x: placement.x, pixels, used: self.clock, rows: Vec::new() });
+        }
+        self.placements = next.into_iter().zip(shows).filter(|(_, shows)| *shows).map(|(p, _)| p).collect();
+        self.tidy(out, new.width as u64 * new.height as u64);
+        Ok(count)
+    }
+
+    /// Append the escape that shows `pixels`, saved at `path` (see
+    /// `write_frame`), as `placement`. The terminal reads the file and
+    /// deletes it; should it not (it refused the escape, or it was dropped
+    /// while the terminal was lent), kb does, `FILE_DRAWS` draws later.
+    fn send_file(&mut self, out: &mut Vec<u8>, path: PathBuf, pixels: &Pixels, placement: &Placement, page: Page) {
+        let name = crate::base64::encode(path.as_os_str().as_encoded_bytes());
+        out.extend_from_slice(
+            format!(
+                "\x1b_Ga=T,f={},s={},v={},t=t,i={},p={},X={},Y={},z={},C=1,q=2;{name}\x1b\\",
+                if pixels.alpha { 32 } else { 24 },
                 pixels.width,
                 pixels.height,
                 placement.image,
@@ -383,13 +475,15 @@ impl Layers {
                 placement.x % page.cell.0,
                 placement.y % page.cell.1,
                 placement.z
-            );
-            transmit(out, &keys, &crate::base64::encode(&data));
-            self.held.push(Held { id: placement.image, x: placement.x, pixels, used: self.clock, rows: Vec::new() });
+            )
+            .as_bytes(),
+        );
+        self.files_sent.push_back((self.draws, path));
+        while self.files_sent.front().is_some_and(|(draw, _)| draw + FILE_DRAWS < self.draws) {
+            if let Some((_, old)) = self.files_sent.pop_front() {
+                let _ = std::fs::remove_file(old);
+            }
         }
-        self.placements = next.into_iter().zip(shows).filter(|(_, shows)| *shows).map(|(p, _)| p).collect();
-        self.tidy(out, new.width as u64 * new.height as u64);
-        Ok(())
     }
 
     /// Note which images show, and delete those that haven't for longest
@@ -528,6 +622,31 @@ impl Layers {
             }
         }
     }
+}
+
+/// The shortest band of the page that holds `count` of the `placements`
+/// whole, as wide as they are together; sent as one strip, it takes the
+/// place of them all.
+fn crowded(placements: &[Rect], count: usize) -> Option<Rect> {
+    if count == 0 || count > placements.len() {
+        return None;
+    }
+    let mut best: Option<(u32, u32, u32)> = None;
+    for top in placements {
+        let mut bottoms: Vec<u32> = placements.iter().filter(|r| r.y >= top.y).map(|r| r.y + r.height).collect();
+        if bottoms.len() < count {
+            continue;
+        }
+        bottoms.sort_unstable();
+        let bottom = bottoms[count - 1].max(top.y + top.height);
+        if best.is_none_or(|(_, _, height)| bottom - top.y < height) {
+            best = Some((top.y, bottom, bottom - top.y));
+        }
+    }
+    let (y, bottom, _) = best?;
+    let inside = placements.iter().filter(|r| r.y >= y && r.y + r.height <= bottom);
+    let (left, right) = inside.fold((u32::MAX, 0), |(l, r), p| (l.min(p.x), r.max(p.x + p.width)));
+    (left < right).then_some(Rect { x: left, y, width: right - left, height: bottom - y })
 }
 
 /// Which of `placements`, bottom to top on a page `width` pixels wide,
@@ -1218,7 +1337,7 @@ pub(crate) mod tests {
         new.data[8 * 24..16 * 24].fill(9);
         let strips = [Rect { x: 0, y: 9, width: 8, height: 1 }, Rect { x: 0, y: 8, width: 8, height: 8 }];
         let page = Page { top: 2, cell, height: 40 };
-        assert_eq!(layers.patch(&mut out, &new, &whole_page(0), &strips, page), Ok(()));
+        assert!(layers.patch(&mut out, &new, &whole_page(0), &strips, None, page).is_ok());
         screen.feed(&out, cell);
         assert!(screen.page(2, cell, 8, 40) == new.data);
         nothing_left_behind(&layers, &screen);
@@ -1252,5 +1371,90 @@ pub(crate) mod tests {
             assert!(screen.page(2, cell, width, height) == new.data, "step {step}: sent {sent:?}");
             nothing_left_behind(&layers, &screen);
         }
+    }
+
+    #[test]
+    fn a_slow_scroll_never_sends_the_whole_page_again() {
+        // A few rows at a time, as a glide sends them: each step's rows
+        // are a strip of their own, and they pile up.
+        scroll_by_steps(3, 100, 400);
+        // Steps tall enough that the strips could be found again in held
+        // images, and placed from them rather than sent as one band.
+        scroll_by_steps(40, 800, 110);
+    }
+
+    fn scroll_by_steps(step_height: u32, rows: u16, steps: u32) {
+        let (cols, cell) = (2u16, (4u32, 5u32));
+        let (width, height) = (8, rows as u32 * cell.1);
+        let mut layers = Layers::default();
+        let mut screen = Screen::default();
+        for step in 0..steps {
+            let scrolled = step * step_height;
+            // Rows that differ, so that how far the page moved can be found.
+            let new =
+                frame(width, height, |x, y| (((y + scrolled) as u64 * 2_654_435_761 + x as u64 * 40_503) >> 13) as u8);
+            let mut out = Vec::new();
+            let sent = layers.draw(&mut out, &encode(&new), cols, rows, cell, 2).unwrap();
+            if step > 0 {
+                assert!(matches!(sent, Sent::Strips { .. }), "step {step}: sent {sent:?}");
+            }
+            screen.feed(&out, cell);
+            assert!(screen.page(2, cell, width, height) == new.data, "step {step}: sent {sent:?}");
+            nothing_left_behind(&layers, &screen);
+        }
+    }
+
+    #[test]
+    fn pixels_go_by_file_where_the_terminal_reads_files() {
+        let (cols, rows, cell) = (4u16, 10u16, (4u32, 4u32));
+        let mut layers = Layers::default();
+        layers.by_file(true);
+        let mut screen = Screen::default();
+        for scrolled in [0, 3, 40, 43] {
+            let new = frame(16, 40, |x, y| ((y + scrolled) * 7 % 251 + x) as u8);
+            let mut out = Vec::new();
+            let sent = layers.draw(&mut out, &encode(&new), cols, rows, cell, 2).unwrap();
+            let text = String::from_utf8(out.clone()).unwrap();
+            // Whole frames and strips alike: names of files, not pixels.
+            assert!(text.contains(",t=t,") && !text.contains("f=100") && !text.contains("o=z"), "{text:?}");
+            screen.feed(&out, cell);
+            assert!(screen.page(2, cell, 16, 40) == new.data, "after {sent:?}");
+        }
+        crate::term::graphics::tidy_frames();
+    }
+
+    #[test]
+    fn files_the_terminal_never_reads_are_removed() {
+        // Every frame new from top to bottom, as a video makes them, so
+        // each goes whole, by file, to a terminal that reads none of them.
+        let (cols, rows, cell) = (4u16, 10u16, (4u32, 4u32));
+        let mut layers = Layers::default();
+        layers.by_file(true);
+        let mut names = Vec::new();
+        for n in 0..FILE_DRAWS + 10 {
+            let new = frame(16, 40, |x, y| (x * 31 + y * 17 + n as u32 * 101) as u8);
+            let mut out = Vec::new();
+            layers.draw(&mut out, &encode(&new), cols, rows, cell, 2).unwrap();
+            names.extend(layers.files_sent.back().map(|(_, path)| path.clone()));
+        }
+        assert!(layers.files_sent.len() as u64 <= FILE_DRAWS + 1, "{} kept", layers.files_sent.len());
+        assert!(!names[0].exists() && names.last().unwrap().exists());
+        for (_, path) in layers.files_sent.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+        crate::term::graphics::tidy_frames();
+    }
+
+    #[test]
+    fn the_band_is_where_placements_crowd_most() {
+        let rect = |y, height| Rect { x: 0, y, width: 8, height };
+        // Thin strips close together at 100, and two tall ones apart.
+        let placements = [rect(0, 50), rect(100, 2), rect(102, 2), rect(104, 2), rect(300, 50)];
+        assert_eq!(crowded(&placements, 3), Some(rect(100, 6)));
+        assert_eq!(crowded(&placements, 0), None);
+        assert_eq!(crowded(&placements, 6), None);
+        // As wide as the placements in it.
+        let narrow = [Rect { x: 4, y: 10, width: 2, height: 1 }, Rect { x: 1, y: 11, width: 2, height: 1 }];
+        assert_eq!(crowded(&narrow, 2), Some(Rect { x: 1, y: 10, width: 5, height: 2 }));
     }
 }
