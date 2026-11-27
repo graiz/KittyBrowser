@@ -102,6 +102,35 @@ const LETTERS: &[(char, [&str; 6])] = &[
 /// split would show noise, and flicker as it changes from frame to frame.
 const WORTH: f64 = 12.0;
 
+/// Whether a computed `font-family` is an icon font's, by the first face
+/// in it: a text font may name a symbols font after it, and the system's
+/// symbol fonts are text.
+macro_rules! icon_face {
+    () => {
+        r#"(family => { const first = family.split(',')[0].replace(/["']/g, '').trim();
+  return /icon|symbol|awesome|glyph|fontello|icomoon/i.test(first) && !/^(noto sans symbols|apple symbols|segoe ui symbol)/i.test(first); })"#
+    };
+}
+
+/// Text an icon font draws as an icon: a name in lower case and
+/// underscores (a ligature's, `font_download`) or letters from the private
+/// use area, which only that font has.
+macro_rules! icon_text {
+    () => {
+        r#"/^\s*([a-z0-9_]{2,40}|[\ue000-\uf8ff]+)\s*$/"#
+    };
+}
+
+/// The elements that draw icons with a font, by the classes of the common
+/// icon fonts, kept in their own face and left to the pixels. Only these
+/// classes: one like `icon-home` is often on a link with words in it,
+/// whose icon is drawn before them; such icons are found by their face.
+macro_rules! icons {
+    () => {
+        r#"[class*="material-icons"], [class*="material-symbols"], [class*="google-symbols"], mat-icon, .fa, .fas, .far, .fal, .fad, .fab, .fa-solid, .fa-regular, .fa-brands, .glyphicon, .bi, .codicon, .octicon"#
+    };
+}
+
 /// Reads the text on screen, line by line as the page wrapped it: for each
 /// line of each text node in view, its colour, whether it is in a fixed
 /// box, its letters and the box they fill, in CSS pixels from the top left
@@ -120,11 +149,26 @@ const WORTH: f64 = 12.0;
 /// Once read, it hides the page's own text, in the document and each shadow
 /// root, so that frames show what is behind it: the letters are drawn over
 /// that, and a blurred copy of the page's own around them would only be
-/// noise. The text keeps its colour, to be read, and is only not painted;
-/// fields keep theirs, as their values aren't read. `SHOW_TEXT` undoes it.
+/// noise. What a page draws before and after an element (`::before`, an
+/// icon or an arrow) isn't text to read, so it is left to the pixels. Nor
+/// is the selection's highlight painted: the selected letters are drawn
+/// the other way round instead, and the highlight around them would come
+/// out as blocks. The text keeps its colour, to be read, and is only not
+/// painted; fields keep theirs, as their values aren't read. `SHOW_TEXT`
+/// undoes it.
 /// A constructed sheet, not a `<style>`, so a page's content security
 /// policy doesn't refuse it.
-pub const READ_TEXT: &str = r#"(() => {
+pub const READ_TEXT: &str = concat!(
+    r#"(() => {
+  const ICONS = `"#,
+    icons!(),
+    r#"`;
+  const ICON_FACE = "#,
+    icon_face!(),
+    r#";
+  const ICON_TEXT = "#,
+    icon_text!(),
+    r#";
   const BUDGET = 40, began = performance.now(), W = innerWidth, H = innerHeight;
   if (window.__kbTooMuch && began - window.__kbTooMuch < 5000) return JSON.stringify({ w: W, h: H, complex: true });
   if (!window.__kbHideText) {
@@ -132,18 +176,100 @@ pub const READ_TEXT: &str = r#"(() => {
     window.__kbHideText.replaceSync(`*:not(input, textarea, select) {
       -webkit-text-fill-color: transparent !important;
       text-decoration-color: transparent !important;
-      text-shadow: none !important; }`);
+      text-shadow: none !important; }
+    *::before, *::after { -webkit-text-fill-color: currentcolor !important; }
+    *:not(input, textarea)::selection { background-color: transparent !important; }`);
     window.__kbHidden = new Set();
   }
   const roots = [document], colours = [], index = new Map(), lines = [];
+  // The page's selection, to show which letters are in it.
+  const selection = getSelection();
+  const chosen = selection && !selection.isCollapsed
+    ? Array.from({ length: selection.rangeCount }, (_, k) => selection.getRangeAt(k)) : [];
+  // The white space a page's text collapses: spaces, tabs and line
+  // breaks, not a no-break space, which holds its place (and, in a row,
+  // its width), as \s would take it.
+  const SPACE = /[ \t\n\r\f]/;
   const range = document.createRange(), fixedness = new Map();
   const parent = el => el.parentElement || (el.parentNode && el.parentNode.host) || null;
+  // Whether text stays put in the window as the page scrolls: in a fixed
+  // box, or a sticky one that is stuck to the window, which is where its
+  // own top (or bottom) says; a sticky box not stuck yet scrolls with the
+  // page. One in a box that scrolls by itself sticks to that box, which
+  // the page's scroll doesn't move, so it is the page's.
+  const stuck = (el, style) => {
+    for (let up = parent(el); up && up !== document.body && up !== document.documentElement; up = parent(up)) {
+      if (up.nodeType === 1 && getComputedStyle(up).overflowY !== 'visible') return false;
+    }
+    const r = el.getBoundingClientRect(), top = parseFloat(style.top), bottom = parseFloat(style.bottom);
+    return (!isNaN(top) && Math.abs(r.top - top) < 1) || (!isNaN(bottom) && Math.abs(H - r.bottom - bottom) < 1);
+  };
   const fixed = el => {
     if (!el) return false;
-    if (!fixedness.has(el)) fixedness.set(el, getComputedStyle(el).position === 'fixed' || fixed(parent(el)));
+    if (!fixedness.has(el)) {
+      const style = getComputedStyle(el);
+      fixedness.set(el, style.position === 'fixed' || (style.position === 'sticky' && stuck(el, style)) || fixed(parent(el)));
+    }
     return fixedness.get(el);
   };
   const onScreen = r => r.width > 0 && r.bottom > 0 && r.top < H && r.right > 0 && r.left < W;
+  // Where an element's content shows: the window, cut by each box around
+  // it that clips what overflows it (a box that scrolls by itself); text
+  // outside, scrolled out of such a box, isn't shown.
+  const clips = new Map();
+  const clipOf = el => {
+    if (!el || el === document.body || el === document.documentElement) return [0, 0, W, H];
+    if (!clips.has(el)) {
+      const style = getComputedStyle(el);
+      // A fixed box escapes every box around it, an absolute one those up to
+      // the one it is placed in (a dropdown hanging out of its bar).
+      let holder = parent(el);
+      if (style.position === 'absolute') {
+        while (holder && holder !== document.body && holder !== document.documentElement && holder.nodeType === 1
+          && getComputedStyle(holder).position === 'static') holder = parent(holder);
+      }
+      let c = style.position === 'fixed' ? [0, 0, W, H] : clipOf(holder && holder.nodeType === 1 ? holder : null);
+      if (style.overflowX !== 'visible' || style.overflowY !== 'visible') {
+        const r = el.getBoundingClientRect();
+        c = [Math.max(c[0], r.left), Math.max(c[1], r.top), Math.min(c[2], r.right), Math.min(c[3], r.bottom)];
+      }
+      clips.set(el, c);
+    }
+    return clips.get(el);
+  };
+  const clipped = (el, x, y) => {
+    const [l, t, r, b] = clipOf(el);
+    return x < l || x >= r || y < t || y >= b;
+  };
+  // The boxes floating over the page (a cookie banner, a sticky header),
+  // found from the text in them: the painted box around such text, where
+  // it is fixed or sticky. Text of the page under one isn't shown.
+  const floating = new Map(), covers = [];
+  const floats = el => {
+    if (!el) return false;
+    if (!floating.has(el)) floating.set(el, /^(fixed|sticky)$/.test(getComputedStyle(el).position) || floats(parent(el)));
+    return floating.get(el);
+  };
+  const cover = el => {
+    for (let box = el; box && floats(box); box = parent(box)) {
+      if (!painted(box)) continue;
+      // A dialog kept hidden until it is opened covers nothing.
+      if (box.checkVisibility && !box.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return;
+      // Each, not only the nearest: a header's buttons are painted, and
+      // the header around them too.
+      if (!covers.some(c => c.box === box)) {
+        const r = box.getBoundingClientRect();
+        // On top where it is: a fixed background behind the page covers
+        // nothing.
+        const x = Math.min(Math.max((r.left + r.right) / 2, 0), W - 1), y = Math.min(Math.max((r.top + r.bottom) / 2, 0), H - 1);
+        const hit = onScreen(r) && box.getRootNode().elementFromPoint(x, y);
+        if (hit && (hit === box || box.contains(hit))) covers.push({ box, l: r.left, t: r.top, r: r.right, b: r.bottom });
+      }
+    }
+  };
+  // Only the page's own text: which of two floating boxes is on top
+  // isn't known, nor need be, as the hit test tells.
+  const covered = (el, x, y) => !floats(el) && covers.some(c => x >= c.l && x < c.r && y >= c.t && y < c.b);
   const painted = el => {
     if (/^(img|video|canvas|iframe|svg|picture|object|embed)$/.test(el.localName)) return true;
     const style = getComputedStyle(el);
@@ -152,6 +278,10 @@ pub const READ_TEXT: &str = r#"(() => {
   };
   // Whether the text in `el`, at x, y, is the first thing painted there.
   const seen = (el, node, x, y) => {
+    // The topmost element alone answers most of the time, for a third of
+    // the cost of all of them.
+    const top = node.getRootNode().elementFromPoint(x, y);
+    if (top && (top === el || el.contains(top) || top.contains(el))) return true;
     for (const hit of node.getRootNode().elementsFromPoint(x, y)) {
       if (hit === el || el.contains(hit) || hit.contains(el)) return true;
       if (painted(hit)) return false;
@@ -164,6 +294,17 @@ pub const READ_TEXT: &str = r#"(() => {
     range.selectNodeContents(node);
     if (!onScreen(range.getBoundingClientRect())) return;
     const style = getComputedStyle(el);
+    // An icon font's letters, which only it draws: shown by the pixels,
+    // its fill put back to be seen (and what the page had there kept, for
+    // SHOW_TEXT to put back). Words beside an icon are read as words.
+    // Only icon text: words in an icon class's element stay hidden in the
+    // pixels and are read, not drawn twice.
+    if ((el.closest(ICONS) && ICON_TEXT.test(node.data)) || ICON_FACE(style.fontFamily)) {
+      const filled = window.__kbFilled || (window.__kbFilled = new Map());
+      if (!filled.has(el)) filled.set(el, [el.style.getPropertyValue('-webkit-text-fill-color'), el.style.getPropertyPriority('-webkit-text-fill-color')]);
+      el.style.setProperty('-webkit-text-fill-color', 'currentcolor', 'important');
+      return;
+    }
     const rgba = (style.color.match(/[\d.]+/g) || []).map(Number);
     if (style.visibility !== 'visible' || rgba.length < 3 || (rgba.length > 3 && rgba[3] < 0.5)) return;
     // Text kept for screen readers alone: squeezed into a pixel and
@@ -173,46 +314,204 @@ pub const READ_TEXT: &str = r#"(() => {
     if (el.checkVisibility && !el.checkVisibility({ opacityProperty: true })) return;
     const key = rgba.slice(0, 3).join();
     const f = fixed(el), dx = f ? 0 : scrollX, dy = f ? 0 : scrollY, transform = style.textTransform;
-    let line = null, i = 0, checked = false;
-    const end = () => {
-      if (line) {
-        if (!index.has(key)) { index.set(key, colours.length); colours.push(rgba.slice(0, 3)); }
-        lines.push([index.get(key), f ? 1 : 0, line.text, line.l + dx, line.t + dy, line.r + dx, line.b + dy]);
-      }
-      line = null;
+    // Where the page collapses runs of white space, each run shows as one
+    // space, or none at the end of a line: a newline in the source between
+    // two words is a space between them, not a control character.
+    const collapse = !/^(pre|pre-wrap|break-spaces)$/.test(style.whiteSpace);
+    const data = node.data, n = data.length;
+    const inSelection = chosen.filter(r => r.intersectsNode(node)).map(r => [
+      r.startContainer === node ? r.startOffset : 0,
+      r.endContainer === node ? r.endOffset : n,
+    ]);
+    const box1 = (from, to) => { range.setStart(node, from); range.setEnd(node, to); return range.getBoundingClientRect(); };
+    // One letter's box. The first letter after a break at a soft hyphen has
+    // two, the end of the line before and the letter where it is, and
+    // their bounds would put it on the line before: the last with a width
+    // is the letter.
+    const glyph = at => {
+      range.setStart(node, at);
+      range.setEnd(node, at + width(at));
+      const boxes = range.getClientRects();
+      if (boxes.length < 2) return boxes[0] || range.getBoundingClientRect();
+      for (let k = boxes.length - 1; k >= 0; k--) if (boxes[k].width > 0) return boxes[k];
+      return boxes[boxes.length - 1];
     };
-    for (let ch of node.data) {
-      range.setStart(node, i);
-      range.setEnd(node, i + ch.length);
-      i += ch.length;
-      const r = range.getBoundingClientRect();
-      if (r.top >= H && line) break;
-      if (!onScreen(r)) continue;
+    const width = at => (data.codePointAt(at) > 0xffff ? 2 : 1);
+    // The letter at `at`, or the first after it with a box: collapsed
+    // white space has none, however long the run (an indented source
+    // line), so such a run is passed over at once rather than a letter at
+    // a time. A space that shows (between a link and the words after it)
+    // is a letter like any other.
+    const shown = /[^ \t\n\r\f]/g;
+    const letter = at => {
+      for (let k = 0; at < n && k < 64; k++) {
+        const r = glyph(at);
+        if (r.width > 0) return [at, r];
+        if (collapse && SPACE.test(data[at])) {
+          shown.lastIndex = at;
+          const next = shown.exec(data);
+          if (!next) return null;
+          at = next.index;
+        } else at += width(at);
+      }
+      return null;
+    };
+    const cased = ch => {
+      const c = transform === 'uppercase' ? ch.toUpperCase() : transform === 'lowercase' ? ch.toLowerCase() : ch;
+      return [...c].length === 1 ? c : ch;
+    };
+    let checked = false;
+    const gone = (x, y) => clipped(el, x, y) || covered(el, x, y);
+    const push = line => {
+      if (!line.text) return;
+      if (!index.has(key)) { index.set(key, colours.length); colours.push(rgba.slice(0, 3)); }
+      const entry = [index.get(key), f ? 1 : 0, line.text, line.l + dx, line.t + dy, line.r + dx, line.b + dy];
+      if (line.chosen.length) entry.push(line.chosen);
+      lines.push(entry);
+    };
+    // One line's letters from `from` to `to`, a box each, as the page put
+    // them: for a line that runs off the side of the window, or that
+    // something covers in part (a cookie banner over a code block), when
+    // each letter is looked for too.
+    const byLetter = (from, to, look) => {
+      let line = null;
+      for (let i = from; i < to; ) {
+        const w = width(i), ch = data.slice(i, i + w), r = glyph(i);
+        const picked = inSelection.some(([a, b]) => i >= a && i + w <= b);
+        i += w;
+        if (!onScreen(r)) continue;
+        if (look && !(collapse && SPACE.test(ch)) && gone(r.left + r.width / 2, r.top + r.height / 2)) {
+          if (line) push(line);
+          line = null;
+          continue;
+        }
+        // Lower down, or back to the left: another line (the next column).
+        if (line && (Math.abs(r.top - line.t) > r.height / 2 || r.left < line.r - r.width)) {
+          push(line);
+          line = null;
+        }
+        if (!line) line = { text: '', l: r.left, t: r.top, r: r.right, b: r.bottom, chosen: [], n: 0 };
+        if (picked) {
+          const last = line.chosen[line.chosen.length - 1];
+          if (last && last[1] === line.n) last[1] += 1;
+          else line.chosen.push([line.n, line.n + 1]);
+        }
+        line.n += 1;
+        // A soft hyphen with a box is where the page broke the line.
+        line.text += collapse && SPACE.test(ch) ? ' ' : ch === '\u00ad' ? '-' : cased(ch);
+        line.r = Math.max(line.r, r.right);
+        line.b = Math.max(line.b, r.bottom);
+      }
+      if (line) push(line);
+    };
+    // Line by line: where each ends is found by halving, as its letters
+    // share a top and the next line's are lower, so that a line costs a
+    // few boxes, not one a letter.
+    let at = 0;
+    while (at < n) {
+      const first = letter(at);
+      if (!first) break;
+      const [s0, r0] = first;
+      const sameLine = i => {
+        const found = letter(i);
+        return found && found[0] < n && Math.abs(found[1].top - r0.top) < Math.max(r0.height, 1) / 2;
+      };
+      // The last letter start on this line: lo is on it, hi isn't.
+      let lo = s0, hi = n;
+      while (hi - lo > 1) {
+        let mid = (lo + hi) >> 1;
+        if (data.charCodeAt(mid) >= 0xdc00 && data.charCodeAt(mid) <= 0xdfff) mid -= 1;
+        if (mid <= lo) break;
+        if (sameLine(mid)) lo = mid; else hi = mid;
+      }
+      const e = lo + width(lo);
+      const r = box1(s0, e);
+      at = e;
+      if (r.top >= H) break;
+      if (r.bottom <= 0 || r.width === 0) continue;
       if (!checked) {
         checked = true;
-        if (!seen(el, node, r.left + r.width / 2, r.top + r.height / 2)) break;
+        if (!seen(el, node, r0.left + r0.width / 2, r0.top + r0.height / 2)) break;
       }
-      if (line && (Math.abs(r.top - line.t) > r.height / 2 || r.left < line.r - r.width)) end();
-      const cased = transform === 'uppercase' ? ch.toUpperCase() : transform === 'lowercase' ? ch.toLowerCase() : ch;
-      if ([...cased].length === 1) ch = cased;
-      if (!line) line = { text: '', l: r.left, t: r.top, r: r.right, b: r.bottom };
-      line.text += ch;
-      line.r = Math.max(line.r, r.right);
-      line.b = Math.max(line.b, r.bottom);
+      // Taller than a line: the halving found a letter at this line's top
+      // further on, in the next column of text set in columns. Letter by
+      // letter, which breaks it where the page does.
+      if (r.bottom - r.top > r0.height * 1.6 + 1) { byLetter(s0, e, true); continue; }
+      if (r.left < 0 || r.right > W) { byLetter(s0, e, true); continue; }
+      // Under a floating box, or clipped, the line's box against theirs
+      // (a small button over the middle of a line is missed by looking at
+      // a few points): none of it, all of it, or some, letter by letter.
+      const middle = (r.top + r.bottom) / 2;
+      const [cl, ct, cr, cb] = clipOf(el);
+      if (r.right <= cl || r.left >= cr || middle < ct || middle >= cb) continue;
+      const over = floats(el) ? [] : covers.filter(c => r.left < c.r && r.right > c.l && middle >= c.t && middle < c.b);
+      if (over.some(c => r.left >= c.l && r.right <= c.r)) continue;
+      if (over.length || r.left < cl || r.right > cr) { byLetter(s0, e, true); continue; }
+      const line = { text: '', l: r.left, t: r.top, r: r.right, b: r.bottom, chosen: [], n: 0 };
+      for (let i = s0; i < e; ) {
+        const w = width(i);
+        let ch = data.slice(i, i + w);
+        const picked = inSelection.some(([a, b]) => i >= a && i + w <= b);
+        i += w;
+        if (collapse && SPACE.test(ch)) {
+          if (line.text.endsWith(' ')) continue;
+          ch = ' ';
+        } else if (ch === '\u00ad') {
+          // A soft hyphen shows only where the page broke the line at it.
+          if (i < e) continue;
+          ch = '-';
+        } else ch = cased(ch);
+        if (picked) {
+          const last = line.chosen[line.chosen.length - 1];
+          if (last && last[1] === line.n) last[1] += 1;
+          else line.chosen.push([line.n, line.n + 1]);
+        }
+        line.n += 1;
+        line.text += ch;
+      }
+      // A space the page put at the end of the line, where it wrapped, has
+      // no width there: it isn't shown.
+      if (collapse && line.text.endsWith(' ') && box1(e - 1, e).width === 0) {
+        line.text = line.text.slice(0, -1);
+        line.n -= 1;
+        line.chosen = line.chosen.map(([a, b]) => [a, Math.min(b, line.n)]).filter(([a, b]) => b > a);
+      }
+      push(line);
     }
-    end();
   };
+  // The text in view first, and the floating boxes it is in, so that the
+  // page's text under them is known before it is read.
+  const texts = [];
   const walk = root => {
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
     for (let node; (node = walker.nextNode()); ) {
-      if (node.nodeType === Node.TEXT_NODE) read(node);
-      else if (node.shadowRoot) { roots.push(node.shadowRoot); walk(node.shadowRoot); }
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (node.parentElement && /\S/.test(node.data)) {
+          range.selectNodeContents(node);
+          const box = range.getBoundingClientRect();
+          // Text wholly outside the box that clips it (a list folded to no
+          // height, a panel scrolled away) is passed over here, before
+          // any work on it.
+          const [l, t, r, b] = onScreen(box) ? clipOf(node.parentElement) : [0, 0, 0, 0];
+          if (onScreen(box) && box.right > l && box.left < r && box.bottom > t && box.top < b) {
+            texts.push(node);
+            if (floats(node.parentElement)) cover(node.parentElement);
+          }
+        }
+      } else if (node.shadowRoot) { roots.push(node.shadowRoot); walk(node.shadowRoot); }
       if (performance.now() - began > BUDGET) throw 'complex';
     }
   };
   try {
     const root = document.body || document.documentElement;
     if (root) walk(root);
+    for (const el of (window.__kbSnap && window.__kbSnap.floaters) || []) {
+      if (el.isConnected) cover(el);
+    }
+    for (const node of texts) {
+      read(node);
+      if (performance.now() - began > BUDGET) throw 'complex';
+    }
   } catch (e) {
     if (e !== 'complex') throw e;
     window.__kbTooMuch = performance.now();
@@ -227,17 +526,376 @@ pub const READ_TEXT: &str = r#"(() => {
     window.__kbHidden.add(root);
     root.adoptedStyleSheets = [...root.adoptedStyleSheets, window.__kbHideText];
   }
-  return JSON.stringify({ w: W, h: H, colours, lines });
-})()"#;
+  return JSON.stringify({ w: W, h: H, sx: scrollX, sy: scrollY, colours, lines });
+})()"#
+);
 
 /// Shows the text `READ_TEXT` hid, for the page in pixels again.
 pub const SHOW_TEXT: &str = r#"(() => {
   for (const root of window.__kbHidden || []) {
     root.adoptedStyleSheets = root.adoptedStyleSheets.filter(sheet => sheet !== window.__kbHideText);
   }
+  for (const [el, [was, priority]] of window.__kbFilled || []) {
+    if (el.style.getPropertyValue('-webkit-text-fill-color') !== 'currentcolor') continue;
+    if (was) el.style.setProperty('-webkit-text-fill-color', was, priority);
+    else el.style.removeProperty('-webkit-text-fill-color');
+  }
+  delete window.__kbFilled;
   delete window.__kbHideText;
   delete window.__kbHidden;
   delete window.__kbTooMuch;
+})()"#;
+
+/// Experimental: sets the page's type in a monospace face, a letter one
+/// cell wide and a line one cell high, `cell` being a cell's size in CSS
+/// pixels. Laid out so, the page breaks its lines where the terminal
+/// would, a letter of the page falls in each cell, and lines of text are a
+/// row apart, so scrolling by whole rows keeps them on the page under them.
+/// Headings lose their size (a terminal has one), but keep their weight;
+/// superscripts and subscripts sit on the line, as raised they would make
+/// it taller than a row.
+/// The size is measured, not assumed: the monospace face's advance at 100
+/// pixels, scaled to the cell. Wide letters (CJK) are set two cells wide,
+/// in an installed face scaled to fit. Icon fonts keep their face, so that
+/// their icons are drawn, by the pixels. `PLAIN_TYPE` undoes it.
+pub fn terminal_type(cell: (f64, f64)) -> String {
+    TERMINAL_TYPE.replace("__W__", &cell.0.to_string()).replace("__H__", &cell.1.to_string())
+}
+
+/// `terminal_type`'s script, with the cell's width and height to fill in.
+///
+/// Lines a row high keep the lines of a paragraph a whole number of rows
+/// apart, but the space between blocks is the page's own, so that each
+/// paragraph would start part way into a row, each at a different part.
+/// So blocks' margins and padding are rounded to whole rows too: padding
+/// with its border, and the margin to what makes margin, border and
+/// padding whole rows together, a pixel less, say, under a heading's
+/// underline. Values the page gives in other units than pixels (`auto`, to
+/// centre a box) are left alone. A picture or a table isn't lines of
+/// text, so its height is made whole rows by its bottom margin; a table
+/// row's height, and the space between rows, are rounded too. Each block is rounded once, its own
+/// inline values kept to put back: read in one pass and written in
+/// another, so the page lays itself out once, not once a block, and in
+/// at most `BUDGET` milliseconds a time, the rest the next time the text
+/// is read. When the cell changes size, or the page's style sheets change
+/// (a page still loading), they are put back and rounded again.
+const TERMINAL_TYPE: &str = concat!(
+    r#"(() => {
+  const ICONS = `"#,
+    icons!(),
+    r#"`;
+  const ICON_FACE = "#,
+    icon_face!(),
+    r#";
+  const ICON_TEXT = "#,
+    icon_text!(),
+    r#";
+  const W = (__W__), H = (__H__), BUDGET = 15, began = performance.now();
+  const FACE = 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace';
+  const WIDE_FACES = ['Hiragino Sans W3', 'HiraginoSans-W3', 'Hiragino Kaku Gothic ProN W3', 'HiraKakuProN-W3',
+    'PingFang SC Regular', 'PingFangSC-Regular', 'Apple SD Gothic Neo Regular', 'AppleSDGothicNeo-Regular',
+    'Noto Sans CJK JP Regular', 'NotoSansCJKjp-Regular', 'Noto Sans CJK SC Regular', 'WenQuanYi Micro Hei',
+    'Droid Sans Fallback'].map(name => `local("${name}")`).join(', ');
+  const WIDE_RANGE = 'U+1100-115F, U+2E80-303E, U+3041-33FF, U+3400-4DBF, U+4E00-A4CF, U+A960-A97F, U+AC00-D7A3, U+F900-FAFF, '
+    + 'U+FE10-FE19, U+FE30-FE6F, U+FF00-FF60, U+FFE0-FFE6, U+1B000-1B2FF, U+20000-3FFFD';
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.font = `100px ${FACE}`;
+  const advance = ctx.measureText('MMMMMMMMMM').width / 1000 || 0.6;
+  // Wide letters (CJK) in a face of their own, sized to two cells: such
+  // faces draw them an em wide, so they are scaled by what the em of one
+  // installed here measures, once it has loaded.
+  const wide = window.__kbWide || (window.__kbWide = { state: 'new' });
+  if (wide.state === 'new') {
+    wide.state = 'loading';
+    new FontFace('kb-wide-measure', WIDE_FACES, { unicodeRange: WIDE_RANGE }).load().then(face => {
+      document.fonts.add(face);
+      ctx.font = '100px kb-wide-measure';
+      const em = ctx.measureText('国国国国国国国国国国').width / 1000;
+      wide.face = new FontFace('kb-wide', WIDE_FACES, { unicodeRange: WIDE_RANGE, sizeAdjust: `${(200 * advance / em).toFixed(2)}%` });
+      document.fonts.add(wide.face);
+      wide.state = 'ready';
+    }, () => { wide.state = 'none'; });
+  }
+  // Icons keep their face and size, to be seen; a line a row high still.
+  const css = `*:not(svg, svg *, math, math *) {
+      line-height: ${H.toFixed(3)}px !important;
+      letter-spacing: 0 !important;
+      word-spacing: 0 !important; }
+    *:not(svg, svg *, math, math *, ${ICONS}) {
+      font-size: ${(W / advance).toFixed(3)}px !important;
+      font-family: "kb-wide", ${FACE} !important;
+      font-variant-ligatures: none !important;
+      text-rendering: optimizeSpeed !important; }
+    sup, sub { vertical-align: baseline !important; }`;
+  if (!window.__kbType) window.__kbType = new CSSStyleSheet();
+  if (window.__kbTypeCss !== css) { window.__kbType.replaceSync(css); window.__kbTypeCss = css; }
+  // The document once (the reader lists it among the roots it hid text in).
+  const roots = [...new Set([document, ...(window.__kbHidden || [])])];
+
+  // What kb writes into elements' own styles, and what was there before:
+  // put back only where it is still as kb left it, so that what the page
+  // has set since (a panel's height, opened) stays.
+  window.__kbUnsnap = () => {
+    const snap = window.__kbSnap;
+    if (!snap) return;
+    for (const [el, props] of snap.written) {
+      for (const [prop, [was, priority, wrote]] of props) {
+        if (el.style.getPropertyValue(prop) !== wrote) continue;
+        if (was) el.style.setProperty(prop, was, priority);
+        else el.style.removeProperty(prop);
+      }
+    }
+    snap.written.clear();
+    snap.done = new WeakSet();
+    snap.scanned = new WeakSet();
+    snap.boxes.clear();
+    snap.queue = null;
+  };
+  // Put back what kb wrote in `el` and what is inside it, and look at it
+  // again: its class has changed (an accordion opened), and with it what
+  // the page's own rules give it.
+  const again = el => {
+    const snap = window.__kbSnap;
+    for (const x of [el, ...el.querySelectorAll('*')]) {
+      const props = snap.written.get(x);
+      if (props) {
+        for (const [prop, [was, priority, wrote]] of props) {
+          if (x.style.getPropertyValue(prop) !== wrote) continue;
+          if (was) x.style.setProperty(prop, was, priority);
+          else x.style.removeProperty(prop);
+        }
+        snap.written.delete(x);
+      }
+      snap.done.delete(x);
+      snap.scanned.delete(x);
+      snap.boxes.delete(x);
+      if (snap.queue) snap.queue.push(x);
+    }
+  };
+  const sheets = roots.reduce((n, root) => n + root.styleSheets.length, 0);
+  const snap = window.__kbSnap
+    || (window.__kbSnap = { h: 0, wide: 0, sheets: 0, done: new WeakSet(), boxes: new Map(), written: new Map(),
+      iconQueue: new Set(), scanned: new WeakSet(), prune: 256, queue: null, watched: new WeakSet(), floaters: new Set() });
+  // What a page has taken out (a feed, a chat) isn't held on to: what kb
+  // wrote there is dropped once the records have doubled since last time.
+  if (snap.written.size > snap.prune) {
+    for (const el of snap.written.keys()) if (!el.isConnected) snap.written.delete(el);
+    for (const el of snap.iconQueue) if (!el.isConnected) snap.iconQueue.delete(el);
+    for (const el of snap.floaters) if (!el.isConnected) snap.floaters.delete(el);
+    snap.prune = Math.max(256, snap.written.size * 2);
+  }
+  // Put back and rounded again for another cell, or for style sheets come
+  // or gone (a page loading): once their count has held for three
+  // readings, as some pages add and drop a <style> as they run (on hover),
+  // which would undo the rounding each time.
+  if (snap.sheets === sheets) snap.held = null;
+  else snap.held = snap.held && snap.held[0] === sheets ? [sheets, snap.held[1] + 1] : [sheets, 1];
+  // And for another width, at which the page's media queries may give
+  // other margins.
+  if (snap.h !== H || snap.wide !== innerWidth || (snap.sheets !== sheets && snap.held[1] >= 3)) {
+    window.__kbUnsnap();
+    snap.h = H;
+    snap.wide = innerWidth;
+    snap.sheets = sheets;
+    snap.held = null;
+    // What was put back is looked at again, icons too, without waiting.
+    snap.iconAt = undefined;
+  }
+  const write = (el, prop, value) => {
+    if (!snap.written.has(el)) snap.written.set(el, new Map());
+    const props = snap.written.get(el);
+    const was = props.get(prop) || [el.style.getPropertyValue(prop), el.style.getPropertyPriority(prop)];
+    el.style.setProperty(prop, value, 'important');
+    props.set(prop, [was[0], was[1], el.style.getPropertyValue(prop)]);
+  };
+  // What is left to look at: every element once, then only what the page
+  // adds, or changes the class of, as a watcher on each root says, so
+  // that a reading doesn't go through the whole page to find them.
+  if (!snap.observer) {
+    snap.observer = new MutationObserver(changes => {
+      if (!snap.queue) return;
+      for (const change of changes) {
+        if (change.type === 'childList') {
+          for (const node of change.addedNodes) {
+            if (node.nodeType !== 1) continue;
+            snap.queue.push(node);
+            for (const el of node.querySelectorAll('*')) snap.queue.push(el);
+          }
+        } else if (change.target.nodeType === 1 && change.target.getElementsByTagName('*').length <= 400) {
+          // Not a class on the page itself, or a large part of it, which
+          // some pages change as they scroll: everything would be put back
+          // and rounded again each time, the page jumping between the two.
+          again(change.target);
+        }
+      }
+    });
+  }
+  if (!snap.queue) {
+    snap.queue = [];
+    // One at a time: a page's elements as one call's arguments are too
+    // many for it on a page of a hundred thousand.
+    for (const root of roots) for (const el of root.querySelectorAll('*')) snap.queue.push(el);
+  }
+  for (const root of roots) {
+    if (snap.watched.has(root)) continue;
+    snap.watched.add(root);
+    snap.observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'open'] });
+    if (root !== document) for (const el of root.querySelectorAll('*')) snap.queue.push(el);
+  }
+  // A batch of them, and what isn't done of it goes back at the front.
+  const fresh = snap.queue.splice(0, 3000).filter(el => el.isConnected && !snap.done.has(el));
+  // Where the sheet went is kept apart from the reader's list, which it
+  // empties when a page is too much to read, so that it can all be undone.
+  const typed = window.__kbTyped || (window.__kbTyped = new Set());
+  for (const root of roots) {
+    typed.add(root);
+    if (!root.adoptedStyleSheets.includes(window.__kbType)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, window.__kbType];
+  }
+
+  // Icon fonts a class doesn't name, found by their face: the page's own,
+  // read with kb's sheet off for a moment, and kept, with their size and
+  // ligatures, so that their icons are drawn. Only the first face in the
+  // list counts: a text font may name a symbols font after it. Turning the
+  // sheet off restyles the whole page, so only elements whose text could
+  // be an icon's are looked at (a name in lower case and underscores, as a
+  // ligature's, or letters from the private use area), queued, and at most
+  // every ICON_GAP.
+  const ICON_GAP = 2000;
+  // Text of its own, or, for an empty element, what its ::before or
+  // ::after puts there (an icon class like `icon-home` draws so).
+  const iconish = el => [...el.childNodes].some(n => n.nodeType === 3 && ICON_TEXT.test(n.data))
+    || (!el.firstElementChild && !/\S/.test(el.textContent)
+      && ['::before', '::after'].some(at => /[\ue000-\uf8ff]/.test(getComputedStyle(el, at).content)));
+  // Each element is looked at once, in a third of the time: the rest is
+  // for rounding, which must not wait on it. Timed from here, not from
+  // the script's start, and some each reading however long what came
+  // before took, so that neither loop is ever left no time at all.
+  const SOME = 64;
+  let scanFrom = performance.now(), scanned = 0;
+  for (const el of fresh) {
+    if (++scanned > SOME && performance.now() - scanFrom > BUDGET / 3) break;
+    if (snap.scanned.has(el)) continue;
+    snap.scanned.add(el);
+    if (el instanceof SVGElement || el.closest(ICONS) || !iconish(el)) continue;
+    snap.iconQueue.add(el);
+  }
+  if (snap.iconQueue.size && !(performance.now() - (snap.iconAt || -Infinity) < ICON_GAP)) {
+    snap.iconAt = performance.now();
+    window.__kbType.disabled = true;
+    const icons = [];
+    for (const el of snap.iconQueue) {
+      snap.iconQueue.delete(el);
+      if (!el.isConnected) continue;
+      const style = getComputedStyle(el);
+      if (ICON_FACE(style.fontFamily)) icons.push([el, style.fontFamily, style.fontSize]);
+    }
+    window.__kbType.disabled = false;
+    for (const [el, family, size] of icons) {
+      write(el, 'font-family', family);
+      write(el, 'font-size', size);
+      write(el, 'font-variant-ligatures', 'normal');
+      write(el, '-webkit-text-fill-color', 'currentcolor');
+    }
+  }
+
+  // What isn't text, whose height isn't lines: a picture, a table.
+  const BOX = /^(img|video|canvas|iframe|svg|object|embed|table)$/;
+  const rows = v => Math.round(v / H) * H;
+  const px = (style, side) => {
+    const v = style.getPropertyValue(side);
+    return v.endsWith('px') ? parseFloat(v) : null;
+  };
+  const writes = [];
+  let roundFrom = performance.now(), rounded = 0;
+  for (const el of fresh) {
+    if (++rounded > SOME && performance.now() - roundFrom > BUDGET * 2 / 3) break;
+    // Only what the icon scan has looked at, so that none is done before
+    // it is known whether it is an icon (the rest go back in the queue).
+    if (!snap.scanned.has(el)) continue;
+    snap.done.add(el);
+    const style = getComputedStyle(el);
+    // Floating boxes, for the reader: one with no text in it (a chat
+    // button) can't be found from the text, as the others are.
+    if (/^(fixed|sticky)$/.test(style.position)) snap.floaters.add(el);
+    const box = BOX.test(el.localName) && !(el.parentElement instanceof SVGElement)
+      && style.display !== 'none' && style.float === 'none' && !/^(absolute|fixed)$/.test(style.position);
+    if ((el instanceof SVGElement && !box) || /^(inline|contents|none)$/.test(style.display) && !box) continue;
+    // A table's rows, by a height the page gave one (a spacer row of a few
+    // pixels) or the space between them. A row its content sizes is whole
+    // rows already, and a height measured from its content would hold when
+    // the content changes: a row left far too tall when the pane widens,
+    // its cells centred in it, as a gap.
+    if (el.localName === 'tr' && el.computedStyleMap) {
+      const given = el.computedStyleMap().get('height');
+      const height = given instanceof CSSUnitValue && given.unit === 'px' ? given.value : 0;
+      if (height > 0 && Math.abs(rows(height) - height) > 0.01) writes.push([el, 'height', `${rows(height)}px`]);
+    }
+    if (/table/.test(style.display) && style.borderCollapse === 'separate') {
+      const [x, y = x] = style.borderSpacing.split(' ').map(parseFloat);
+      if (y && Math.abs(rows(y) - y) > 0.01) writes.push([el, 'border-spacing', `${x}px ${rows(y)}px`]);
+    }
+    if (box) snap.boxes.set(el, px(style, 'margin-bottom') ?? 0);
+    // Only what the page gave as a length: `auto` (a footer pushed to the
+    // bottom of its card) and percentages come out of getComputedStyle in
+    // pixels too, but are left alone, or they would be frozen.
+    const given = el.computedStyleMap ? el.computedStyleMap() : null;
+    const length = side => {
+      const v = px(style, side);
+      if (v === null || !given) return v;
+      const value = given.get(side);
+      return value instanceof CSSUnitValue && value.unit === 'px' ? v : null;
+    };
+    for (const edge of ['top', 'bottom']) {
+      const margin = length(`margin-${edge}`), padding = length(`padding-${edge}`);
+      const border = px(style, `border-${edge}-width`) || 0;
+      let inside = padding ?? px(style, `padding-${edge}`) ?? 0;
+      if (padding !== null) {
+        inside = Math.max(0, rows(padding + border) - border);
+        if (Math.abs(inside - padding) > 0.01) writes.push([el, `padding-${edge}`, `${inside}px`]);
+      }
+      if (margin !== null && !(edge === 'bottom' && snap.boxes.has(el))) {
+        let want = rows(margin + inside + border) - inside - border;
+        // A border's pixel or two come out of the margin (a heading's
+        // underline); more would pull the box over its neighbours, so the
+        // margin goes on to the next row instead.
+        while (margin >= 0 && want < -2) want += H;
+        if (Math.abs(want - margin) > 0.01) writes.push([el, `margin-${edge}`, `${want}px`]);
+      }
+    }
+  }
+  snap.queue.unshift(...fresh.filter(el => !snap.done.has(el)));
+  for (const [el, prop, value] of writes) write(el, prop, value);
+  // Then, laid out so, each box's bottom margin to what makes it whole
+  // rows, every time, as a picture's height changes when it loads.
+  const margins = [];
+  for (const [el, margin] of snap.boxes) {
+    if (!el.isConnected) {
+      snap.boxes.delete(el);
+      continue;
+    }
+    const height = el.getBoundingClientRect().height;
+    if (height < H) continue;
+    const want = Math.ceil((height + margin - 0.5) / H) * H - height;
+    const now = el.style.marginBottom === '' ? margin : parseFloat(el.style.marginBottom);
+    if (Math.abs(want - now) > 0.01) margins.push([el, want]);
+  }
+  for (const [el, want] of margins) write(el, 'margin-bottom', `${want}px`);
+})()"#
+);
+
+/// The page's own type again, after `terminal_type`, and its own margins
+/// and padding.
+pub const PLAIN_TYPE: &str = r#"(() => {
+  if (!window.__kbType) return;
+  for (const root of new Set([document, ...(window.__kbHidden || []), ...(window.__kbTyped || [])])) {
+    root.adoptedStyleSheets = root.adoptedStyleSheets.filter(sheet => sheet !== window.__kbType);
+  }
+  if (window.__kbUnsnap) window.__kbUnsnap();
+  if (window.__kbSnap && window.__kbSnap.observer) window.__kbSnap.observer.disconnect();
+  delete window.__kbTyped;
+  delete window.__kbType;
+  delete window.__kbTypeCss;
+  delete window.__kbSnap;
 })()"#;
 
 /// One shape: its character and its rectangles, in eighths across and
@@ -266,8 +924,13 @@ impl Cell {
 /// right edges and height in the page, as the pane shows it.
 type Spot = (usize, usize, f64, f64, f64);
 
-/// A letter of the page's text in a cell, and its colour.
-type Letter = Option<(char, [u8; 3])>;
+/// A letter of the page's text in a cell, its colour, and whether it is
+/// selected. `CONTINUED` is the right half of a wide letter in the cell
+/// before it.
+type Letter = Option<(char, [u8; 3], bool)>;
+
+/// What the cell after a wide letter holds: the letter's right half.
+const CONTINUED: char = '\0';
 
 /// The page's text as `READ_TEXT` read it.
 #[derive(Default, Debug, PartialEq)]
@@ -275,6 +938,11 @@ pub struct Text {
     /// The viewport it was read in, in CSS pixels.
     width: f64,
     height: f64,
+    /// How far the page was scrolled when it was read: newer than the last
+    /// frame's, and the only word of a scroll that changes no pixels (plain
+    /// text on white, whose letters are hidden), for which Chrome sends no
+    /// frame.
+    scroll: Option<(f64, f64)>,
     lines: Vec<Line>,
 }
 
@@ -286,9 +954,17 @@ struct Line {
     text: String,
     /// The box its letters fill, left, top, right, bottom.
     rect: [f64; 4],
+    /// The letters the page has selected, as runs from, to, counted in
+    /// the letters of `text`.
+    selected: Vec<(usize, usize)>,
 }
 
 impl Text {
+    /// How far the page was scrolled when the text was read.
+    pub fn scroll(&self) -> Option<(f64, f64)> {
+        self.scroll
+    }
+
     /// The text from `READ_TEXT`'s answer; None if it isn't one, or the
     /// page was too complex to read.
     pub fn parse(json: &str) -> Option<Text> {
@@ -311,10 +987,18 @@ impl Text {
                     fixed: line[1].as_u64() == Some(1),
                     text: line[2].as_str()?.to_owned(),
                     rect: [number(3)?, number(4)?, number(5)?, number(6)?],
+                    selected: line[7]
+                        .as_array()
+                        .map(|runs| {
+                            let at = |run: &serde_json::Value, i: usize| run[i].as_u64().unwrap_or(0) as usize;
+                            runs.iter().map(|run| (at(run, 0), at(run, 1))).collect()
+                        })
+                        .unwrap_or_default(),
                 })
             })
             .collect();
-        Some(Text { width: value["w"].as_f64()?, height: value["h"].as_f64()?, lines })
+        let scroll = value["sx"].as_f64().zip(value["sy"].as_f64());
+        Some(Text { width: value["w"].as_f64()?, height: value["h"].as_f64()?, scroll, lines })
     }
 }
 
@@ -421,12 +1105,15 @@ impl AsciiPage {
                     (_, None) => self.fit(&pixels, area),
                     // The letter in its colour, on whichever of the cell's
                     // two colours is further from it: the page behind it.
-                    (_, Some((ch, colour))) => {
+                    // Selected, the other way round, as a terminal shows
+                    // its own selection.
+                    (_, Some((ch, colour, selected))) => {
                         let Cell { fg, bg, .. } = self.fit(&pixels, area);
                         let bg = if distance(fg, colour) > distance(bg, colour) { fg } else { bg };
+                        let (fg, bg) = if selected { (bg, colour) } else { (colour, bg) };
                         match ch {
                             ' ' => Cell::flat(bg),
-                            _ => Cell { ch, fg: colour, bg },
+                            _ => Cell { ch, fg, bg },
                         }
                     }
                 };
@@ -437,6 +1124,19 @@ impl AsciiPage {
                 cells.push(cell);
             }
         }
+        // A wide letter and its right half are sent together: either
+        // written alone would leave half of one, or overwrite it.
+        let mut send = vec![false; count];
+        for &at in &changed {
+            send[at] = true;
+            if cells[at].ch == CONTINUED && at > 0 {
+                send[at - 1] = true;
+            }
+            if cell_width(cells[at].ch) == 2 && at + 1 < count {
+                send[at + 1] = true;
+            }
+        }
+        let changed: Vec<usize> = (0..count).filter(|&at| send[at]).collect();
         self.shown = cells;
         self.letters = letters;
         self.last = Some(pixels);
@@ -526,12 +1226,28 @@ impl AsciiPage {
                 .unwrap_or(cols)
                 .clamp(start, cols);
             let mut at = start;
-            for ch in line.text.chars().filter(|ch| fits_a_cell(*ch)).take(stop - start) {
-                let cell = &mut grid[row * cols + at];
-                if !cell.is_some_and(|(letter, _)| letter != ' ') {
-                    *cell = Some((if ch == '\u{a0}' { ' ' } else { ch }, line.colour));
+            let free = |cell: &Letter| !cell.is_some_and(|(letter, _, _)| letter != ' ');
+            let mut chars = line.text.chars().enumerate().peekable();
+            while let Some((k, ch)) = chars.next() {
+                // A symbol followed by U+FE0F asks to be shown as an emoji,
+                // two cells wide or one as the terminal's font has it.
+                let as_emoji = chars.peek().is_some_and(|&(_, next)| next == '\u{fe0f}');
+                let width = if as_emoji { 0 } else { cell_width(ch) };
+                if width == 0 {
+                    continue;
                 }
-                at += 1;
+                if at + width > stop {
+                    break;
+                }
+                let selected = line.selected.iter().any(|&(from, to)| k >= from && k < to);
+                let cells = &mut grid[row * cols + at..row * cols + at + width];
+                if cells.iter().all(free) {
+                    cells[0] = Some((if ch == '\u{a0}' { ' ' } else { ch }, line.colour, selected));
+                    if width == 2 {
+                        cells[1] = Some((CONTINUED, line.colour, selected));
+                    }
+                }
+                at += width;
             }
             taken[row] = Some((start, at, right));
         }
@@ -540,15 +1256,33 @@ impl AsciiPage {
 
     /// Draw again the page's cells within `rect`, once something drawn over
     /// them (a box, a menu) is gone.
-    pub fn repaint(&self, out: &mut Vec<u8>, rect: crate::ui::Rect) {
+    /// A wide letter the box's edge cut in two is drawn whole, its other
+    /// half too, unless that half is under a box still `drawn`: then the
+    /// half in `rect` is a space, so as not to write over that box.
+    pub fn repaint(&self, out: &mut Vec<u8>, rect: crate::ui::Rect, drawn: &[crate::ui::Rect]) {
         if self.shown.is_empty() {
             return;
         }
+        let (cols, top) = (self.cols as usize, self.top as usize);
+        let free = |at: usize| {
+            let (row, col) = ((top + at / cols) as u16, (at % cols + 1) as u16);
+            !drawn.iter().any(|r| row >= r.row && row < r.row + r.height && col >= r.col && col < r.col + r.width)
+        };
         let mut cells = Vec::new();
         for row in rect.row..rect.row + rect.height {
             let Some(row) = row.checked_sub(self.top).filter(|row| *row < self.rows) else { continue };
-            for col in rect.col.saturating_sub(1)..(rect.col - 1 + rect.width).min(self.cols) {
-                cells.push(row as usize * self.cols as usize + col as usize);
+            let (first, end) =
+                (rect.col.saturating_sub(1) as usize, ((rect.col - 1 + rect.width).min(self.cols)) as usize);
+            if first >= end {
+                continue;
+            }
+            let at = |col: usize| row as usize * cols + col;
+            if self.shown[at(first)].ch == CONTINUED && first > 0 && free(at(first - 1)) {
+                cells.push(at(first - 1));
+            }
+            cells.extend((first..end).map(at));
+            if cell_width(self.shown[at(end - 1)].ch) == 2 && end < cols && free(at(end)) {
+                cells.push(at(end));
             }
         }
         self.emit(out, &cells);
@@ -564,12 +1298,26 @@ impl AsciiPage {
         let mut s = String::from("\x1b[0m");
         let (mut fg, mut bg) = (None, None);
         let mut next = None;
+        // The wide letter just written, whose right half then goes with it,
+        // in the last column too, where the cursor has nowhere to go on to.
+        let mut wide = None;
         let width = self.cols as usize;
-        for &i in at {
+        for (k, &i) in at.iter().enumerate() {
+            let mut cell = self.shown[i];
+            // A wide letter and its right half go together. A half alone is
+            // the edge of a box being uncovered cutting the letter: it is a
+            // space, as the other half's cell is the box's, still drawn.
+            if cell.ch == CONTINUED {
+                if wide == Some(i.wrapping_sub(1)) {
+                    continue;
+                }
+                cell.ch = ' ';
+            } else if cell_width(cell.ch) == 2 && at.get(k + 1) != Some(&(i + 1)) {
+                cell.ch = ' ';
+            }
             if next != Some(i) {
                 let _ = write!(s, "\x1b[{};{}H", self.top as usize + i / width, i % width + 1);
             }
-            let cell = self.shown[i];
             if bg != Some(cell.bg) {
                 s.push_str(&self.sgr(48, cell.bg));
                 bg = Some(cell.bg);
@@ -579,9 +1327,12 @@ impl AsciiPage {
                 fg = Some(cell.fg);
             }
             s.push(cell.ch);
+            wide = (cell_width(cell.ch) == 2).then_some(i);
             // The cursor stays at the last column after writing it, rather
-            // than wrapping, so the next row always moves it.
-            next = (i % width + 1 < width).then_some(i + 1);
+            // than wrapping, so the next row always moves it. After a wide
+            // letter, where a terminal may not agree it took two cells, the
+            // next is placed again rather than trusted to follow.
+            next = (wide.is_none() && i % width + 1 < width).then_some(i + 1);
         }
         s.push_str("\x1b[0m");
         out.extend_from_slice(s.as_bytes());
@@ -777,31 +1528,98 @@ fn letter_rects(rows: &[&str; 6]) -> Vec<[u8; 4]> {
     rects
 }
 
-/// Whether `ch` takes exactly one cell, as the page's letters must to go
-/// where it laid them: not a control character (page text sent to the
-/// terminal as one could drive it), not one of no width that joins or
-/// reorders others, and not a wide one (CJK, most emoji), which takes two.
-/// Nor one of the scripts written right to left: a terminal would print
-/// them left to right a letter at a time, without joining them, and they
-/// are better left to the pixels.
-fn fits_a_cell(ch: char) -> bool {
+/// How many cells `ch` takes, 0 if it isn't printed: a control character
+/// (page text sent to the terminal as one could drive it), one of no width
+/// that joins or reorders others, an emoji (whose width terminals don't
+/// agree on), or one of the scripts written right to left, which a
+/// terminal would print left to right a letter at a time, unjoined, and
+/// are better left to the pixels. Wide letters (CJK) take two.
+pub(crate) fn cell_width(ch: char) -> usize {
     let c = ch as u32;
-    let zero =
-        matches!(c, 0x300..=0x36F | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0xFE00..=0xFE0F | 0xFEFF);
+    // Of no width: combining marks, joiners, direction marks, and the soft
+    // hyphen, which shows only where the page breaks a line at it.
+    let zero = matches!(
+        c,
+        0xAD | 0x300..=0x36F
+            | 0x61C
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x206F
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+            | 0xE0000..=0xE0FFF
+    );
+    // Wide as terminals draw them (East Asian Wide and Fullwidth), less
+    // the few neutral ones among them (U+303F, the Yijing hexagrams).
     let wide = matches!(
         c,
         0x1100..=0x115F
-            | 0x2E80..=0xA4CF
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0xA4CF
+            | 0xA960..=0xA97F
             | 0xAC00..=0xD7A3
             | 0xF900..=0xFAFF
-            | 0xFE30..=0xFE4F
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
             | 0xFF00..=0xFF60
             | 0xFFE0..=0xFFE6
+            | 0x1B000..=0x1B2FF
+            | 0x20000..=0x3FFFD
+    );
+    // Emoji, which terminals draw two cells wide or one, as their fonts
+    // have them: those that show as emoji by default (with U+FE0F after
+    // others, `place` drops them too).
+    let emoji = matches!(
+        c,
+        0x231A..=0x231B
+            | 0x23E9..=0x23EC
+            | 0x23F0
+            | 0x23F3
+            | 0x25FD..=0x25FE
+            | 0x2614..=0x2615
+            | 0x2648..=0x2653
+            | 0x267F
+            | 0x2693
+            | 0x26A1
+            | 0x26AA..=0x26AB
+            | 0x26BD..=0x26BE
+            | 0x26C4..=0x26C5
+            | 0x26CE
+            | 0x26D4
+            | 0x26EA
+            | 0x26F2..=0x26F3
+            | 0x26F5
+            | 0x26FA
+            | 0x26FD
+            | 0x2705
+            | 0x270A..=0x270B
+            | 0x2728
+            | 0x274C
+            | 0x274E
+            | 0x2753..=0x2755
+            | 0x2757
+            | 0x2795..=0x2797
+            | 0x27B0
+            | 0x27BF
+            | 0x2B1B..=0x2B1C
+            | 0x2B50
+            | 0x2B55
+            | 0x1F004
+            | 0x1F0CF
+            | 0x1F18E
+            | 0x1F191..=0x1F19A
+            | 0x1F200..=0x1F2FF
             | 0x1F300..=0x1FAFF
-            | 0x20000..
     );
     let right_to_left = matches!(c, 0x590..=0x8FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFC);
-    !ch.is_control() && !zero && !wide && !right_to_left
+    match () {
+        _ if ch.is_control() || zero || emoji || right_to_left || ch == CONTINUED => 0,
+        _ if wide => 2,
+        _ => 1,
+    }
 }
 
 fn distance(a: [u8; 3], b: [u8; 3]) -> i32 {
@@ -811,6 +1629,13 @@ fn distance(a: [u8; 3], b: [u8; 3]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_type_writes_whole_cells_as_numbers_a_script_can_use() {
+        // `12.toFixed(3)` is a syntax error; `(12).toFixed(3)` isn't.
+        let script = terminal_type((6.0, 12.0));
+        assert!(script.contains("const W = (6), H = (12),"), "{script}");
+    }
 
     const WHITE: [u8; 3] = [255; 3];
     const BLACK: [u8; 3] = [0; 3];
@@ -902,7 +1727,7 @@ mod tests {
         page.draw_pixels(&mut Vec::new(), frame(4, 3, |_, _| [9, 9, 9]), 4, 3, 2, (0.0, 0.0));
         let mut out = Vec::new();
         // Rows 1 to 3, columns 2 and 3: row 1 is the bar's, not the page's.
-        page.repaint(&mut out, crate::ui::Rect { col: 2, row: 1, width: 2, height: 3 });
+        page.repaint(&mut out, crate::ui::Rect { col: 2, row: 1, width: 2, height: 3 }, &[]);
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text, "\x1b[0m\x1b[2;2H\x1b[48;2;9;9;9m  \x1b[3;2H  \x1b[0m");
     }
@@ -947,14 +1772,25 @@ mod tests {
     }
 
     fn letters(grid: &[Letter], cols: usize) -> Vec<String> {
-        grid.chunks(cols).map(|row| row.iter().map(|l| l.map_or('.', |(ch, _)| ch)).collect()).collect()
+        grid.chunks(cols)
+            .map(|row| row.iter().map(|l| l.map_or('.', |(ch, _, _)| if ch == CONTINUED { '>' } else { ch })).collect())
+            .collect()
     }
 
     #[test]
     fn reads_the_pages_text() {
         let text = text();
         assert_eq!((text.width, text.height, text.lines.len()), (40.0, 20.0, 2));
-        let red = Line { colour: [255, 0, 0], fixed: true, text: "ab".into(), rect: [20.0, 10.0, 40.0, 20.0] };
+        assert_eq!(text.scroll(), None);
+        let scrolled = Text::parse(r#"{"w":40,"h":20,"sx":0,"sy":4044.5,"colours":[],"lines":[]}"#).unwrap();
+        assert_eq!(scrolled.scroll(), Some((0.0, 4044.5)));
+        let red = Line {
+            colour: [255, 0, 0],
+            fixed: true,
+            text: "ab".into(),
+            rect: [20.0, 10.0, 40.0, 20.0],
+            selected: Vec::new(),
+        };
         assert_eq!(text.lines[1], red);
         assert_eq!(Text::parse("not json"), None);
         assert_eq!(Text::parse(r#"{"w":40,"h":20,"complex":true}"#), None);
@@ -968,6 +1804,78 @@ mod tests {
         // Scrolled down 10 pixels: the page's text moves up out of view, and
         // the fixed box's stays put.
         assert_eq!(letters(&page.place(4, 2, (0.0, 10.0), (10.0, 10.0)), 4), ["....", "..ab"]);
+    }
+
+    #[test]
+    fn wide_letters_take_two_cells_and_selected_ones_say_so() {
+        let mut page = AsciiPage::new(Style::Letters);
+        // "漢字a" from the left of a 6-cell row, its second and third
+        // letters selected; then "漢字" with room for only one of them.
+        let json = r#"{"w":60,"h":20,"colours":[[0,0,0]],
+            "lines":[[0,0,"漢字a",0,0,50,10,[[1,3]]],[0,0,"漢字",30,10,60,20]]}"#;
+        page.text = Text::parse(json);
+        let grid = page.place(6, 2, (0.0, 0.0), (10.0, 10.0));
+        assert_eq!(letters(&grid, 6), ["漢>字>a.", "...漢>."]);
+        let selected: String = grid[..6].iter().map(|l| l.map_or('.', |(_, _, s)| if s { 's' } else { '-' })).collect();
+        assert_eq!(selected, "--sss.");
+    }
+
+    #[test]
+    fn a_wide_letter_is_sent_once_for_its_two_cells() {
+        let mut page = AsciiPage::new(Style::Letters);
+        page.text = Text::parse(r#"{"w":40,"h":10,"colours":[[0,0,0]],"lines":[[0,0,"字",0,0,20,10]]}"#);
+        let mut out = Vec::new();
+        page.draw_pixels(&mut out, frame(4, 1, |_, _| WHITE), 4, 1, 1, (0.0, 0.0));
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(out.matches('字').count(), 1, "{out:?}");
+        assert!(!out.contains('\0'), "{out:?}");
+        // A box gone from over one half draws the letter whole again; one
+        // still over the other half keeps it: that half is a space.
+        for col in [1, 2] {
+            let mut again = Vec::new();
+            page.repaint(&mut again, crate::ui::Rect { col, row: 1, width: 1, height: 1 }, &[]);
+            let again = String::from_utf8(again).unwrap();
+            assert!(again.contains("\x1b[1;1H") && again.matches('字').count() == 1, "{again:?}");
+            let other = crate::ui::Rect { col: 3 - col, row: 1, width: 1, height: 1 };
+            let mut kept = Vec::new();
+            page.repaint(&mut kept, crate::ui::Rect { col, row: 1, width: 1, height: 1 }, &[other]);
+            let kept = String::from_utf8(kept).unwrap();
+            assert!(!kept.contains('字') && kept.contains(&format!("\x1b[1;{col}H")), "{kept:?}");
+            assert!(!kept.contains(&format!("\x1b[1;{}H", 3 - col)), "{kept:?}");
+        }
+    }
+
+    #[test]
+    fn a_symbol_asked_to_show_as_an_emoji_is_left_out() {
+        let mut page = AsciiPage::new(Style::Letters);
+        // "❤️ ok": the heart with U+FE0F, which terminals may draw two wide.
+        page.text = Text::parse(r#"{"w":60,"h":10,"colours":[[0,0,0]],"lines":[[0,0,"a\u2764\ufe0fb ok",0,0,60,10]]}"#);
+        assert_eq!(letters(&page.place(6, 1, (0.0, 0.0), (10.0, 10.0)), 6), ["ab ok."]);
+    }
+
+    #[test]
+    fn after_a_wide_letter_the_cursor_is_placed_again() {
+        let mut page = AsciiPage::new(Style::Letters);
+        page.text = Text::parse(r#"{"w":40,"h":10,"colours":[[0,0,0]],"lines":[[0,0,"字a",0,0,30,10]]}"#);
+        let mut out = Vec::new();
+        page.draw_pixels(&mut out, frame(4, 1, |_, _| WHITE), 4, 1, 1, (0.0, 0.0));
+        let out = String::from_utf8(out).unwrap();
+        // The letter after it goes where kb says, in column 3, whatever the
+        // terminal made of the wide one.
+        let at = out.find('字').expect("the wide letter is drawn");
+        assert!(out[at..].contains("\x1b[1;3H"), "{out:?}");
+    }
+
+    #[test]
+    fn a_wide_letter_in_the_last_two_columns_stays() {
+        let mut page = AsciiPage::new(Style::Letters);
+        page.text = Text::parse(r#"{"w":40,"h":10,"colours":[[0,0,0]],"lines":[[0,0,"字",20,0,40,10]]}"#);
+        let mut out = Vec::new();
+        page.draw_pixels(&mut out, frame(4, 1, |_, _| WHITE), 4, 1, 1, (0.0, 0.0));
+        let out = String::from_utf8(out).unwrap();
+        // Written in columns 3 and 4, and nothing after it on that row.
+        let at = out.find('字').expect("the letter is drawn");
+        assert!(!out[at..].contains("\x1b[1;4H"), "{out:?}");
     }
 
     #[test]
@@ -1052,9 +1960,15 @@ mod tests {
 
     #[test]
     fn only_letters_of_one_cell_are_drawn_as_letters() {
-        assert!(fits_a_cell('a') && fits_a_cell('é') && fits_a_cell('—'));
-        assert!(!fits_a_cell('\x1b') && !fits_a_cell('\u{9b}') && !fits_a_cell('\u{202e}'));
-        assert!(!fits_a_cell('漢') && !fits_a_cell('😀') && !fits_a_cell('\u{301}'));
-        assert!(!fits_a_cell('ذ') && !fits_a_cell('ש'));
+        assert!(['a', 'é', '—'].iter().all(|&ch| cell_width(ch) == 1));
+        assert!(['\x1b', '\u{9b}', '\u{202e}', '\0', '\u{ad}', '\u{2028}', '\u{e0067}', '\u{e0100}']
+            .iter()
+            .all(|&ch| cell_width(ch) == 0));
+        assert!(['😀', '\u{301}', 'ذ', 'ש'].iter().all(|&ch| cell_width(ch) == 0));
+        assert!(['漢', 'ん', '한', '，'].iter().all(|&ch| cell_width(ch) == 2));
+        // Emoji, however terminals draw them, and the neutral ones among
+        // the wide.
+        assert!(['✅', '⭐', '⌚', '⚡', '🈁'].iter().all(|&ch| cell_width(ch) == 0));
+        assert!(['\u{303f}', '\u{4dc0}', '✓', '★'].iter().all(|&ch| cell_width(ch) == 1));
     }
 }

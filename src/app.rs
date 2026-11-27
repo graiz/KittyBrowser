@@ -47,10 +47,23 @@ const SHADE_AGE: Duration = Duration::from_millis(500);
 
 /// Find the element under a point and the pointer it calls for, as CSS
 /// names it: what the page asks for, or where it says `auto`, a text cursor
-/// over text and fields and an arrow elsewhere.
-const POINTER: &str = "((x, y) => { let e = document.elementFromPoint(x, y); \
+/// over text and fields and an arrow elsewhere. With `tips`, after a
+/// newline, what the page says of what is there that a picture drawn in
+/// characters can't: a picture's alt text, an SVG's title or label, a
+/// `title`, or the label of a button or link that shows only an icon.
+const POINTER: &str = "((x, y, tips) => { let e = document.elementFromPoint(x, y); \
   while (e && e.shadowRoot) { const i = e.shadowRoot.elementFromPoint(x, y); if (!i || i === e) break; e = i; } \
   if (!e) return 'default'; \
+  const said = v => (v || '').replace(/\\s+/g, ' ').trim().slice(0, 300); \
+  const tip = () => { for (const h of document.elementsFromPoint(x, y).slice(0, 8)) \
+    for (let el = h, k = 0; el && k < 4; el = el.parentElement, k++) { \
+      if (el.matches('img, area, input[type=image]') && said(el.alt)) return said(el.alt); \
+      if (el.localName === 'svg') { const t = el.querySelector(':scope > title'); \
+        if (said(t && t.textContent) || said(el.getAttribute('aria-label'))) return said(t && t.textContent) || said(el.getAttribute('aria-label')); } \
+      if (said(el.getAttribute('title'))) return said(el.getAttribute('title')); \
+      if (el.matches('a, button, [role=button]') && !said(el.textContent) && said(el.getAttribute('aria-label'))) return said(el.getAttribute('aria-label')); } \
+    return ''; }; \
+  const shape = (() => { \
   const c = getComputedStyle(e).cursor.split(',').pop().trim(); \
   if (c !== 'auto') return c; \
   if (e.isContentEditable || e.matches('textarea, input:not([type=button], [type=submit], [type=reset], \
@@ -58,7 +71,9 @@ const POINTER: &str = "((x, y) => { let e = document.elementFromPoint(x, y); \
   const r = document.caretRangeFromPoint && document.caretRangeFromPoint(x, y); \
   if (r && r.startContainer.nodeType === 3) { const t = document.createRange(); t.selectNodeContents(r.startContainer); \
     for (const b of t.getClientRects()) if (x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) return 'text'; } \
-  return 'default'; })";
+  return 'default'; })(); \
+  const said_there = tips ? tip() : ''; \
+  return said_there ? shape + '\\n' + said_there : shape; })";
 
 /// The pointer shapes terminals know, by their CSS names.
 const POINTERS: &[&str] = &[
@@ -338,6 +353,12 @@ const FALLBACK_CELL: (u32, u32) = (16, 34);
 /// In characters, the least time between readings of the page's text, and
 /// how long to wait for one.
 const TEXT_GAP: Duration = Duration::from_millis(100);
+/// How long after a key, click or scroll the text is read again with no
+/// frame: long enough for the glide that carries a scroll on.
+const TEXT_AFTER_INPUT: Duration = Duration::from_secs(1);
+/// How long the letters wait for a frame before following the scroll the
+/// text was read at.
+const TEXT_SCROLL_WAIT: Duration = Duration::from_millis(120);
 const TEXT_WAIT: Duration = Duration::from_secs(2);
 
 /// Append a line to the file named by KB_LOG, if set. For diagnosing
@@ -404,11 +425,16 @@ struct App {
     /// How far the page was scrolled in the newest frame, in CSS pixels,
     /// to keep the page's letters on it.
     frame_scroll: (f64, f64),
+    /// When the scroll in `frame_scroll` came with a frame.
+    frame_at: Instant,
     /// In characters: whether frames have come since the page's text was
     /// last read, when it was asked for, and the request in flight.
     text_wanted: bool,
     text_asked: Instant,
     text_request: Option<u64>,
+    /// In characters: whether the page's type is set to the terminal's,
+    /// a letter a cell (experimental; about:ascii-type, KB_ASCII_TYPE=off).
+    terminal_type: bool,
     /// Whether frames go through the pty only whole (`KB_TRANSFER=png`).
     png_only: bool,
     /// Browser zoom: 1 is 100%. It scales the device pixels per CSS pixel,
@@ -432,6 +458,9 @@ struct App {
     focused: bool,
     /// When the user or an agent last did something.
     last_input: Instant,
+    /// When the page was last acted on: a key, a click, a scroll, a drag
+    /// or a command, not the mouse passing over it.
+    last_action: Instant,
     /// Keeps each scroll on one axis.
     rails: crate::scroll::Rails,
     /// Spreads scrolls down over time.
@@ -456,6 +485,17 @@ struct App {
     /// The request for the pointer shape under the mouse, and where to ask
     /// next once it is answered.
     pointer_request: Option<u64>,
+    /// In characters: the cell the mouse is over, what the page says of
+    /// what is there (`POINTER`'s tip), and where that tip was drawn.
+    hover_cell: (u16, u16),
+    tip: Option<String>,
+    tip_rect: Option<ui::Rect>,
+    /// When the pointer was last asked about, and the tip last taken away.
+    pointer_asked: Instant,
+    tip_cleared: Instant,
+    /// The scroll the text was read at, and when, waiting for a frame that
+    /// may still come with it: used only if none has come by TEXT_SCROLL_WAIT.
+    text_scroll: Option<((f64, f64), Instant)>,
     pointer_next: Option<(f64, f64)>,
     pointer: String,
     /// The terminal's text and background colours, once it has said.
@@ -643,9 +683,11 @@ fn browse(
         graphics,
         ascii,
         frame_scroll: (0.0, 0.0),
+        frame_at: Instant::now(),
         text_wanted: false,
         text_asked: Instant::now(),
         text_request: None,
+        terminal_type: std::env::var("KB_ASCII_TYPE").map_or(true, |v| v != "off"),
         png_only: false,
         zoom: 1.0,
         fit_request: None,
@@ -657,6 +699,7 @@ fn browse(
         started: Instant::now(),
         focused: true,
         last_input: Instant::now(),
+        last_action: Instant::now(),
         rails: Default::default(),
         glide: Default::default(),
         glide_at: WheelAt::default(),
@@ -669,6 +712,12 @@ fn browse(
         bindings: Bindings::load(crate::data_dir().ok().map(|dir| dir.join("keys"))),
         notice: None,
         pointer_request: None,
+        hover_cell: (0, 0),
+        tip: None,
+        tip_rect: None,
+        pointer_asked: Instant::now(),
+        tip_cleared: Instant::now(),
+        text_scroll: None,
         pointer_next: None,
         pointer: "default".to_owned(),
         term_fg: None,
@@ -755,6 +804,21 @@ fn browse(
             matches!(message, Msg::Control(_) | Msg::Term(Event::Key(_) | Event::Mouse(_) | Event::Paste(_)))
         }) {
             app.last_input = Instant::now();
+        }
+        // What can move the page: not the mouse passing over it.
+        if messages.iter().any(|message| match message {
+            // A command that only reads (status, text) acts on nothing.
+            Msg::Control(request) => {
+                crate::commands::find(&request.command).is_none_or(|c| c.effect != crate::commands::Effect::Reads)
+            }
+            Msg::Term(Event::Key(_) | Event::Paste(_)) => true,
+            Msg::Term(Event::Mouse(mouse)) => mouse.kind != MouseKind::Move || mouse.button.is_some(),
+            _ => false,
+        }) {
+            app.last_action = Instant::now();
+            // A tip is for what the mouse rests on, which a key, a command
+            // or a scroll may have moved from under it.
+            app.clear_tip();
         }
         let mut messages = messages.into_iter().enumerate().peekable();
         while let Some((index, message)) = messages.next() {
@@ -938,6 +1002,15 @@ fn browse(
                         if app.text_request == Some(id) {
                             app.text_request = None;
                             let text = message["result"]["result"]["value"].as_str().and_then(Text::parse);
+                            // The text is drawn where the page was when it was
+                            // read, which a scroll over plain text may send no
+                            // frame to say; but never over a frame that came
+                            // since it was asked for, which is newer.
+                            if let Some(scroll) = text.as_ref().and_then(Text::scroll) {
+                                if app.frame_at < app.text_asked && scroll != app.frame_scroll {
+                                    app.text_scroll = Some((scroll, Instant::now()));
+                                }
+                            }
                             if let Some(ascii) = &mut app.ascii {
                                 ascii.set_text(text);
                                 new_frame = true;
@@ -978,6 +1051,8 @@ fn browse(
                             if fits && app.frame.as_deref() != Some(png.as_str()) {
                                 app.frame = Some(png);
                                 app.frame_scroll = app.chrome.frame_scroll();
+                                app.frame_at = Instant::now();
+                                app.text_scroll = None;
                                 app.text_wanted = true;
                                 app.frames += 1;
                                 // The blank page that comes first stays under the logo.
@@ -1062,6 +1137,17 @@ fn browse(
         // lag.
         if app.glided.elapsed() >= GLIDE_STEP {
             app.glide();
+        }
+        // The page scrolled with no frame to say so, for a while now: plain
+        // text on white, whose pixels didn't change. A frame that is only
+        // late would have come by now, with pixels to match.
+        if let Some((scroll, at)) = app.text_scroll {
+            // Frames come at most every frame_gap: the wait is past that.
+            if at.elapsed() >= app.frame_gap() + TEXT_SCROLL_WAIT {
+                app.text_scroll = None;
+                app.frame_scroll = scroll;
+                new_frame = true;
+            }
         }
         // While the terminal is still taking the last frame, hold this
         // drawing back; when it is ready (`Msg::Written`), it gets the
@@ -1337,6 +1423,7 @@ impl App {
         // The splash paints the pane black, help, dialogs and all.
         self.help_rect = None;
         self.modal_rects.clear();
+        self.tip_rect = None;
         self.render_help(&mut out);
         self.render_menu(&mut out);
         self.render_modal(&mut out);
@@ -1350,7 +1437,15 @@ impl App {
     fn uncover(&self, out: &mut Vec<u8>, rect: ui::Rect) {
         ui::blank(out, rect);
         if let Some(ascii) = &self.ascii {
-            ascii.repaint(out, rect);
+            // The boxes still drawn, which a wide letter at the edge mustn't
+            // be written over.
+            let drawn: Vec<ui::Rect> = [self.help_rect, self.tip_rect, self.menu_rect]
+                .into_iter()
+                .flatten()
+                .chain(self.modal_rects.iter().copied())
+                .filter(|other| *other != rect)
+                .collect();
+            ascii.repaint(out, rect, &drawn);
         }
     }
 
@@ -1363,7 +1458,8 @@ impl App {
         }
         self.ascii = match self.ascii.take() {
             Some(_) => {
-                self.chrome.evaluate(crate::term::ascii::SHOW_TEXT);
+                self.chrome.evaluate_everywhere(crate::term::ascii::PLAIN_TYPE);
+                self.chrome.evaluate_everywhere(crate::term::ascii::SHOW_TEXT);
                 None
             }
             None => Some(AsciiPage::new(Style::Blocks { sextants: true })),
@@ -1377,19 +1473,84 @@ impl App {
         self.draw(true);
     }
 
+    /// about:ascii-type: in characters, set the page's type to the
+    /// terminal's, a letter a cell, or back to its own.
+    fn toggle_terminal_type(&mut self) {
+        self.terminal_type = !self.terminal_type;
+        if !self.terminal_type {
+            self.chrome.evaluate_everywhere(crate::term::ascii::PLAIN_TYPE);
+        }
+        self.note(match (self.ascii.is_some(), self.terminal_type) {
+            (true, true) => "Page type: the terminal's",
+            (true, false) => "Page type: the page's own",
+            (false, true) => "In ASCII mode, the page's type will be the terminal's",
+            (false, false) => "In ASCII mode, the page's type will be its own",
+        });
+        self.text_wanted = true;
+    }
+
     /// In characters, read the page's text again once frames have come
-    /// since it was last read, at most every TEXT_GAP: the script is work
-    /// for the page, and meanwhile the letters follow the scroll each
-    /// frame comes with. A request with no answer (a page gone) is given
-    /// up after TEXT_WAIT.
+    /// since it was last read, or for a moment after the page was acted on
+    /// (not the mouse passing over it), at most
+    /// every TEXT_GAP: the script is work for the page, and meanwhile the
+    /// letters follow the scroll each frame comes with. Input counts as
+    /// well as frames because a scroll over plain text changes no pixels
+    /// (its letters are hidden), so Chrome sends no frame for it. A
+    /// request with no answer (a page gone) is given up after TEXT_WAIT.
     fn read_text(&mut self) {
         let waiting = self.text_request.is_some() && self.text_asked.elapsed() < TEXT_WAIT;
-        if self.ascii.is_none() || !self.text_wanted || waiting || self.text_asked.elapsed() < TEXT_GAP {
+        let wanted = self.text_wanted || self.last_action.elapsed() < TEXT_AFTER_INPUT;
+        if self.ascii.is_none() || !wanted || waiting || self.text_asked.elapsed() < TEXT_GAP {
             return;
         }
         self.text_wanted = false;
         self.text_asked = Instant::now();
+        // Set first, so the text is read as laid out in it.
+        if self.terminal_type {
+            let (cell_w, cell_h) = self.cell();
+            let scale = self.page_scale();
+            // A viewport set with kb ctl viewport is shrunk to fit its
+            // cells, each of which then holds more of the page.
+            let cell = match self.fixed {
+                Some(_) if self.shown.0 > 0 && self.shown.1 > 0 => {
+                    (self.viewport.0 as f64 / self.shown.0 as f64, self.viewport.1 as f64 / self.shown.1 as f64)
+                }
+                _ => (cell_w as f64 / scale, cell_h as f64 / scale),
+            };
+            self.chrome.evaluate(&crate::term::ascii::terminal_type(cell));
+        }
         self.text_request = Some(self.chrome.evaluate_value(crate::term::ascii::READ_TEXT));
+    }
+
+    /// In characters, draw the tip for what the mouse is over beside it,
+    /// and give back the cells an old one covered. Drawn with every frame,
+    /// as the page's cells under it may change.
+    ///
+    /// In two steps: the old tip's cells are given back before the boxes
+    /// are drawn (a box closing gives back its own), and the new tip drawn
+    /// after them, so that a box closing doesn't draw the page over it.
+    fn render_tip(&mut self, out: &mut Vec<u8>, layout: Option<(ui::Rect, Vec<String>)>) {
+        if let Some((rect, lines)) = layout.filter(|(_, lines)| !lines.is_empty()) {
+            ui::render_tip(out, rect, &lines);
+            self.tip_rect = Some(rect);
+        }
+    }
+
+    /// Where the tip goes now, if one is to be shown.
+    fn tip_layout(&self) -> Option<(ui::Rect, Vec<String>)> {
+        let (col, row) = self.hover_cell;
+        let shown = self.ascii.is_some() && !self.help && self.menu.is_none() && self.modal_rects.is_empty();
+        let tip = self.tip.as_deref().filter(|_| shown);
+        tip.map(|text| ui::tip_box(text, col, row, self.window.cols, self.window.rows))
+    }
+
+    /// Give back the cells an old tip covered, unless it is drawn there again.
+    fn uncover_tip(&mut self, out: &mut Vec<u8>, layout: Option<&(ui::Rect, Vec<String>)>) {
+        if let Some(old) = self.tip_rect.take() {
+            if layout.map(|(rect, _)| *rect) != Some(old) {
+                self.uncover(out, old);
+            }
+        }
     }
 
     /// Draw the help box, if it is open, over whatever is below the bar.
@@ -1439,6 +1600,7 @@ impl App {
     /// The page shown is at `url` now.
     fn went_to(&mut self, url: String) {
         log(format_args!("url {url}"));
+        self.clear_tip();
         self.committed |= url != "about:blank";
         self.history.record(&url);
         self.url = if url == "about:blank" { String::new() } else { url };
@@ -1558,9 +1720,12 @@ impl App {
             }
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge, self.chrome.windows()),
         }
+        let tip = self.tip_layout();
+        self.uncover_tip(&mut out, tip.as_ref());
         self.render_help(&mut out);
         self.render_menu(&mut out);
         self.render_modal(&mut out);
+        self.render_tip(&mut out, tip);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
         if frame {
@@ -1843,6 +2008,10 @@ impl App {
                     self.bar.blur(&self.url);
                     self.toggle_ascii();
                 }
+                Edit::Submit if self.bar.text().trim() == "about:ascii-type" => {
+                    self.bar.blur(&self.url);
+                    self.toggle_terminal_type();
+                }
                 Edit::Submit => match ui::normalize_url(&self.bar.text()) {
                     Some(url) => self.navigate(&url),
                     None => self.bar.blur(&self.url),
@@ -1952,18 +2121,12 @@ impl App {
     }
 
     fn open_menu(&mut self) {
-        self.open_menu_with(false);
-    }
-
-    /// Open the ⋮ menu, with its hidden items (ASCII mode) if `all`. A
-    /// terminal that can't draw images has no other mode to offer.
-    fn open_menu_with(&mut self, all: bool) {
         self.close_help();
         let offer = menu::Offer {
             windows: self.chrome.windows().1,
             devtools: self.chrome.has_devtools(),
-            hidden: all && self.graphics,
-            leave_ascii: self.ascii.is_some() && self.graphics,
+            images: self.graphics,
+            in_ascii: self.ascii.is_some(),
         };
         self.menu = Some(Menu::new(offer));
         if let Some(splash) = &mut self.splash {
@@ -2205,9 +2368,15 @@ impl App {
     fn reply(&mut self, id: u64, message: &serde_json::Value) -> bool {
         if self.pointer_request == Some(id) {
             self.pointer_request = None;
-            let shape = message["result"]["result"]["value"].as_str().unwrap_or("default");
+            let value = message["result"]["result"]["value"].as_str().unwrap_or("default");
+            let (shape, tip) = value.split_once('\n').map_or((value, None), |(shape, tip)| (shape, Some(tip)));
             let shape = if POINTERS.contains(&shape) { shape } else { "default" };
             self.set_pointer(shape);
+            // Not an answer asked before the tip was taken away (a scroll,
+            // a click), nor one for the bar the mouse has moved onto.
+            // Nor one for a point the mouse has since left.
+            let fresh = self.tip_cleared < self.pointer_asked && self.hover_cell.1 > 1 && self.pointer_next.is_none();
+            self.tip = tip.filter(|_| self.ascii.is_some() && fresh).map(str::to_owned);
             if let Some((x, y)) = self.pointer_next.take() {
                 self.ask_pointer(x, y);
             }
@@ -2279,7 +2448,19 @@ impl App {
             self.pointer_next = Some((x, y));
             return;
         }
-        self.pointer_request = Some(self.chrome.evaluate_value(&format!("{POINTER}({x}, {y})")));
+        let tips = self.ascii.is_some();
+        self.pointer_asked = Instant::now();
+        self.pointer_request = Some(self.chrome.evaluate_value(&format!("{POINTER}({x}, {y}, {tips})")));
+    }
+
+    /// Take the tip away, and any answer still coming for it.
+    fn clear_tip(&mut self) {
+        self.tip = None;
+        self.tip_cleared = Instant::now();
+        // Drawn away now, not with whatever is drawn next.
+        if self.tip_rect.is_some() {
+            self.undrawn.other = true;
+        }
     }
 
     fn set_pointer(&mut self, shape: &str) {
@@ -2388,6 +2569,12 @@ impl App {
         if matches!(mouse.button, Some(Button::Back | Button::Forward)) {
             return false;
         }
+        self.hover_cell = ((px / cell_w) as u16 + 1, (py / cell_h) as u16 + 1);
+        // The tip is for where the mouse rests: a click, the wheel or the
+        // bar takes it away, and the next move asks again.
+        if mouse.kind != MouseKind::Move || py < cell_h {
+            self.clear_tip();
+        }
         // A drag that began on the page stays with the page.
         if py < cell_h && self.buttons == 0 {
             let col = (px / cell_w) as usize + 1;
@@ -2405,14 +2592,14 @@ impl App {
                 };
                 self.set_pointer(shape);
             }
-            // Ctrl+click on ⋮ shows the hidden items too; a Mac's terminal
-            // may report Ctrl+click as the right button.
+            // A Mac's terminal may report Ctrl+click as the right button:
+            // on ⋮, it opens the menu as a click does.
             if mouse.kind == MouseKind::Press
                 && mouse.button == Some(Button::Right)
                 && self.find.is_none()
                 && self.bar_hit(col) == Hit::Menu
             {
-                self.open_menu_with(true);
+                self.open_menu();
                 return true;
             }
             if mouse.kind != MouseKind::Press || mouse.button != Some(Button::Left) {
@@ -2435,7 +2622,7 @@ impl App {
                 Hit::PreviousWindow => self.switch_window(-1),
                 Hit::NextWindow => self.switch_window(1),
                 Hit::CloseWindow => self.close_window(),
-                Hit::Menu => self.open_menu_with(mouse.ctrl),
+                Hit::Menu => self.open_menu(),
                 Hit::Nothing => {}
             }
             return true;

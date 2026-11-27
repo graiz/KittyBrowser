@@ -268,22 +268,41 @@ default. Things to try next:
 ### Characters (`ascii.rs`)
 
 In a terminal that can't draw images, with `KB_ASCII` set, or after ASCII
-mode is chosen in the ⋮ menu (shown when it is opened with Ctrl held; once
-on, the plain menu offers Exit ASCII mode) or `about:ascii` is typed in the
-address field, each frame is drawn in
+mode is chosen in the ⋮ menu (after Select element; once on, the same item
+offers Exit ASCII mode) or `about:ascii` is typed in the address field,
+each frame is drawn in
 characters instead. This is a branch in `App::draw` beside `PageImage`,
 which it shares nothing with but the decoder.
+
+Before the text is read, `terminal_type` sets the page's type to the
+terminal's: a monospace face sized so that a letter is one cell wide and a
+line one row high, wide letters (CJK) in an installed face scaled to two
+cells, and icon fonts left in their own face. Laid out so, the page breaks
+its lines where the terminal would and puts a letter in each cell. Blocks'
+margins and padding, table rows and the space between them are rounded to
+whole rows, and pictures and tables made whole rows by their bottom
+margins, so that every line of text sits the same way in its row and
+scrolling by whole rows keeps it on the page under it. A mouse over a
+drawn letter is then over that letter in the page, so a drag selects what
+is shown. `about:ascii-type` (or `KB_ASCII_TYPE=off`) keeps the page's own
+type instead.
 
 The page's text is printed as text. `READ_TEXT`, run in the page at most
 every 100 ms while frames come, returns each line of each text node in view,
 open shadow roots included, as the page wrapped it: its letters, its
-colour and its box, in document coordinates (viewport ones in fixed
-boxes). Text under something painted (a background, a picture) is left
-out, but not text under a transparent element: pages stretch links over
-whole cards to make them clickable. Text kept for screen readers (clipped
-to a pixel) is left out too. A page the script can't read in 40 ms is
-drawn from its pixels alone, its text shown again, until a try 5 seconds
-later.
+colour, its box, in document coordinates (viewport ones in fixed boxes),
+and which of its letters are selected, which are drawn the other way
+round. A line's end is found by halving, as its letters share a top, so a
+line costs a few boxes rather than one a letter. Collapsed white space
+(a newline in the source) is a space. Text under something painted (a
+background, a picture) is left out, but not text under a transparent
+element: pages stretch links over whole cards to make them clickable. The
+page's text under a floating box (a cookie banner, a sticky header) is
+left out line by line, and letter by letter at the box's edge; the boxes
+are found from the text in them. Text kept for screen readers (clipped to
+a pixel) and icon fonts' letters are left out too. A page the script
+can't read in 40 ms is drawn from its pixels alone, its text shown again,
+until a try 5 seconds later.
 Each frame carries the scroll it was drawn at (`Chrome::frame_scroll`), so
 the lines stay on the page as it scrolls between readings. A line starts in
 the cell where the page starts it, on the row through its middle, with one
@@ -292,9 +311,10 @@ page's, but lines break where the page breaks them. A line that runs long
 stops where the next text on its row starts, and one that follows another
 straight on (a link in a sentence) goes on after it. Text scrolls by whole
 rows, the scroll rounded to the nearest cell, so that lines at different
-heights in their cells move together instead of one after another. Only characters one cell wide are printed
-(no controls, no CJK or emoji), so page text can't move the cursor or
-drive the terminal. The script also hides the page's own text
+heights in their cells move together instead of one after another. Only
+characters one or two cells wide are printed (no controls, emoji or text
+written right to left), so page text can't move the cursor or drive the
+terminal; a wide letter is sent once for its two cells. The script also hides the page's own text
 (`-webkit-text-fill-color: transparent`, from a constructed sheet a
 content security policy can't refuse) so frames show what is behind it;
 `SHOW_TEXT` puts it back when the page goes back to pixels.
@@ -322,6 +342,9 @@ terminal that can't may lack them in its font, so there they need
 The page is in the cells themselves, not an image under them, so a box or
 menu that closes can't leave blanks for the page to show through:
 `App::uncover` draws the page's cells there again from what was last sent.
+Hovering a picture shows what the page says of it in a box beside the
+mouse (its alt text, an SVG's title, a `title`, an icon button's label),
+read by the same script that finds the pointer's shape.
 The agent's pointer and the logo are images, and aren't drawn.
 
 ### Size (`size.rs`)
