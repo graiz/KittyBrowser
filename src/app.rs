@@ -1509,7 +1509,15 @@ impl App {
         if self.terminal_type {
             let (cell_w, cell_h) = self.cell();
             let scale = self.page_scale();
-            self.chrome.evaluate(&crate::term::ascii::terminal_type((cell_w as f64 / scale, cell_h as f64 / scale)));
+            // A viewport set with kb ctl viewport is shrunk to fit its
+            // cells, each of which then holds more of the page.
+            let cell = match self.fixed {
+                Some(_) if self.shown.0 > 0 && self.shown.1 > 0 => {
+                    (self.viewport.0 as f64 / self.shown.0 as f64, self.viewport.1 as f64 / self.shown.1 as f64)
+                }
+                _ => (cell_w as f64 / scale, cell_h as f64 / scale),
+            };
+            self.chrome.evaluate(&crate::term::ascii::terminal_type(cell));
         }
         self.text_request = Some(self.chrome.evaluate_value(crate::term::ascii::READ_TEXT));
     }

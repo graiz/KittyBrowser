@@ -255,11 +255,16 @@ pub const READ_TEXT: &str = concat!(
       if (!painted(box)) continue;
       // A dialog kept hidden until it is opened covers nothing.
       if (box.checkVisibility && !box.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return;
+      // Each, not only the nearest: a header's buttons are painted, and
+      // the header around them too.
       if (!covers.some(c => c.box === box)) {
         const r = box.getBoundingClientRect();
-        if (onScreen(r)) covers.push({ box, l: r.left, t: r.top, r: r.right, b: r.bottom });
+        // On top where it is: a fixed background behind the page covers
+        // nothing.
+        const x = Math.min(Math.max((r.left + r.right) / 2, 0), W - 1), y = Math.min(Math.max((r.top + r.bottom) / 2, 0), H - 1);
+        const hit = onScreen(r) && box.getRootNode().elementFromPoint(x, y);
+        if (hit && (hit === box || box.contains(hit))) covers.push({ box, l: r.left, t: r.top, r: r.right, b: r.bottom });
       }
-      return;
     }
   };
   // Only the page's own text: which of two floating boxes is on top
@@ -683,7 +688,8 @@ const TERMINAL_TYPE: &str = concat!(
   // or gone (a page loading): once their count has held for three
   // readings, as some pages add and drop a <style> as they run (on hover),
   // which would undo the rounding each time.
-  if (snap.sheets !== sheets) snap.held = snap.held && snap.held[0] === sheets ? [sheets, snap.held[1] + 1] : [sheets, 1];
+  if (snap.sheets === sheets) snap.held = null;
+  else snap.held = snap.held && snap.held[0] === sheets ? [sheets, snap.held[1] + 1] : [sheets, 1];
   // And for another width, at which the page's media queries may give
   // other margins.
   if (snap.h !== H || snap.wide !== innerWidth || (snap.sheets !== sheets && snap.held[1] >= 3)) {
@@ -711,7 +717,9 @@ const TERMINAL_TYPE: &str = concat!(
       for (const change of changes) {
         if (change.type === 'childList') {
           for (const node of change.addedNodes) {
-            if (node.nodeType === 1) snap.queue.push(node, ...node.querySelectorAll('*'));
+            if (node.nodeType !== 1) continue;
+            snap.queue.push(node);
+            for (const el of node.querySelectorAll('*')) snap.queue.push(el);
           }
         } else if (change.target.nodeType === 1 && change.target.getElementsByTagName('*').length <= 400) {
           // Not a class on the page itself, or a large part of it, which
@@ -724,13 +732,15 @@ const TERMINAL_TYPE: &str = concat!(
   }
   if (!snap.queue) {
     snap.queue = [];
-    for (const root of roots) snap.queue.push(...root.querySelectorAll('*'));
+    // One at a time: a page's elements as one call's arguments are too
+    // many for it on a page of a hundred thousand.
+    for (const root of roots) for (const el of root.querySelectorAll('*')) snap.queue.push(el);
   }
   for (const root of roots) {
     if (snap.watched.has(root)) continue;
     snap.watched.add(root);
     snap.observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'open'] });
-    if (root !== document) snap.queue.push(...root.querySelectorAll('*'));
+    if (root !== document) for (const el of root.querySelectorAll('*')) snap.queue.push(el);
   }
   // A batch of them, and what isn't done of it goes back at the front.
   const fresh = snap.queue.splice(0, 3000).filter(el => el.isConnected && !snap.done.has(el));
@@ -757,9 +767,13 @@ const TERMINAL_TYPE: &str = concat!(
     || (!el.firstElementChild && !/\S/.test(el.textContent)
       && ['::before', '::after'].some(at => /[\ue000-\uf8ff]/.test(getComputedStyle(el, at).content)));
   // Each element is looked at once, in a third of the time: the rest is
-  // for rounding, which must not wait on it.
+  // for rounding, which must not wait on it. Timed from here, not from
+  // the script's start, and some each reading however long what came
+  // before took, so that neither loop is ever left no time at all.
+  const SOME = 64;
+  let scanFrom = performance.now(), scanned = 0;
   for (const el of fresh) {
-    if (performance.now() - began > BUDGET / 3) break;
+    if (++scanned > SOME && performance.now() - scanFrom > BUDGET / 3) break;
     if (snap.scanned.has(el)) continue;
     snap.scanned.add(el);
     if (el instanceof SVGElement || el.closest(ICONS) || !iconish(el)) continue;
@@ -792,8 +806,9 @@ const TERMINAL_TYPE: &str = concat!(
     return v.endsWith('px') ? parseFloat(v) : null;
   };
   const writes = [];
+  let roundFrom = performance.now(), rounded = 0;
   for (const el of fresh) {
-    if (performance.now() - began > BUDGET) break;
+    if (++rounded > SOME && performance.now() - roundFrom > BUDGET * 2 / 3) break;
     // Only what the icon scan has looked at, so that none is done before
     // it is known whether it is an icon (the rest go back in the queue).
     if (!snap.scanned.has(el)) continue;
