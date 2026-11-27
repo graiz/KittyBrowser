@@ -1142,7 +1142,8 @@ fn browse(
         // text on white, whose pixels didn't change. A frame that is only
         // late would have come by now, with pixels to match.
         if let Some((scroll, at)) = app.text_scroll {
-            if at.elapsed() >= TEXT_SCROLL_WAIT {
+            // Frames come at most every frame_gap: the wait is past that.
+            if at.elapsed() >= app.frame_gap() + TEXT_SCROLL_WAIT {
                 app.text_scroll = None;
                 app.frame_scroll = scroll;
                 new_frame = true;
@@ -1479,7 +1480,12 @@ impl App {
         if !self.terminal_type {
             self.chrome.evaluate_everywhere(crate::term::ascii::PLAIN_TYPE);
         }
-        self.note(if self.terminal_type { "Page type: the terminal's" } else { "Page type: the page's own" });
+        self.note(match (self.ascii.is_some(), self.terminal_type) {
+            (true, true) => "Page type: the terminal's",
+            (true, false) => "Page type: the page's own",
+            (false, true) => "In ASCII mode, the page's type will be the terminal's",
+            (false, false) => "In ASCII mode, the page's type will be its own",
+        });
         self.text_wanted = true;
     }
 
@@ -2360,7 +2366,8 @@ impl App {
             self.set_pointer(shape);
             // Not an answer asked before the tip was taken away (a scroll,
             // a click), nor one for the bar the mouse has moved onto.
-            let fresh = self.tip_cleared < self.pointer_asked && self.hover_cell.1 > 1;
+            // Nor one for a point the mouse has since left.
+            let fresh = self.tip_cleared < self.pointer_asked && self.hover_cell.1 > 1 && self.pointer_next.is_none();
             self.tip = tip.filter(|_| self.ascii.is_some() && fresh).map(str::to_owned);
             if let Some((x, y)) = self.pointer_next.take() {
                 self.ask_pointer(x, y);
@@ -2442,6 +2449,10 @@ impl App {
     fn clear_tip(&mut self) {
         self.tip = None;
         self.tip_cleared = Instant::now();
+        // Drawn away now, not with whatever is drawn next.
+        if self.tip_rect.is_some() {
+            self.undrawn.other = true;
+        }
     }
 
     fn set_pointer(&mut self, shape: &str) {

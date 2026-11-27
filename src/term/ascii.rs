@@ -483,7 +483,12 @@ pub const READ_TEXT: &str = concat!(
       if (node.nodeType === Node.TEXT_NODE) {
         if (node.parentElement && /\S/.test(node.data)) {
           range.selectNodeContents(node);
-          if (onScreen(range.getBoundingClientRect())) {
+          const box = range.getBoundingClientRect();
+          // Text wholly outside the box that clips it (a list folded to no
+          // height, a panel scrolled away) is passed over here, before
+          // any work on it.
+          const [l, t, r, b] = onScreen(box) ? clipOf(node.parentElement) : [0, 0, 0, 0];
+          if (onScreen(box) && box.right > l && box.left < r && box.bottom > t && box.top < b) {
             texts.push(node);
             if (floats(node.parentElement)) cover(node.parentElement);
           }
@@ -586,7 +591,8 @@ const TERMINAL_TYPE: &str = concat!(
     'PingFang SC Regular', 'PingFangSC-Regular', 'Apple SD Gothic Neo Regular', 'AppleSDGothicNeo-Regular',
     'Noto Sans CJK JP Regular', 'NotoSansCJKjp-Regular', 'Noto Sans CJK SC Regular', 'WenQuanYi Micro Hei',
     'Droid Sans Fallback'].map(name => `local("${name}")`).join(', ');
-  const WIDE_RANGE = 'U+1100-115F, U+2E80-A4CF, U+AC00-D7A3, U+F900-FAFF, U+FE30-FE4F, U+FF00-FF60, U+FFE0-FFE6, U+20000-3FFFD';
+  const WIDE_RANGE = 'U+1100-115F, U+2E80-303E, U+3041-33FF, U+3400-4DBF, U+4E00-A4CF, U+A960-A97F, U+AC00-D7A3, U+F900-FAFF, '
+    + 'U+FE10-FE19, U+FE30-FE6F, U+FF00-FF60, U+FFE0-FFE6, U+1B000-1B2FF, U+20000-3FFFD';
   const ctx = document.createElement('canvas').getContext('2d');
   ctx.font = `100px ${FACE}`;
   const advance = ctx.measureText('MMMMMMMMMM').width / 1000 || 0.6;
@@ -788,6 +794,9 @@ const TERMINAL_TYPE: &str = concat!(
   const writes = [];
   for (const el of fresh) {
     if (performance.now() - began > BUDGET) break;
+    // Only what the icon scan has looked at, so that none is done before
+    // it is known whether it is an icon (the rest go back in the queue).
+    if (!snap.scanned.has(el)) continue;
     snap.done.add(el);
     const style = getComputedStyle(el);
     // Floating boxes, for the reader: one with no text in it (a chat
@@ -867,6 +876,7 @@ pub const PLAIN_TYPE: &str = r#"(() => {
     root.adoptedStyleSheets = root.adoptedStyleSheets.filter(sheet => sheet !== window.__kbType);
   }
   if (window.__kbUnsnap) window.__kbUnsnap();
+  if (window.__kbSnap && window.__kbSnap.observer) window.__kbSnap.observer.disconnect();
   delete window.__kbTyped;
   delete window.__kbType;
   delete window.__kbTypeCss;
@@ -1202,8 +1212,12 @@ impl AsciiPage {
                 .clamp(start, cols);
             let mut at = start;
             let free = |cell: &Letter| !cell.is_some_and(|(letter, _, _)| letter != ' ');
-            for (k, ch) in line.text.chars().enumerate() {
-                let width = cell_width(ch);
+            let mut chars = line.text.chars().enumerate().peekable();
+            while let Some((k, ch)) = chars.next() {
+                // A symbol followed by U+FE0F asks to be shown as an emoji,
+                // two cells wide or one as the terminal's font has it.
+                let as_emoji = chars.peek().is_some_and(|&(_, next)| next == '\u{fe0f}');
+                let width = if as_emoji { 0 } else { cell_width(ch) };
                 if width == 0 {
                     continue;
                 }
@@ -1300,9 +1314,10 @@ impl AsciiPage {
             s.push(cell.ch);
             wide = (cell_width(cell.ch) == 2).then_some(i);
             // The cursor stays at the last column after writing it, rather
-            // than wrapping, so the next row always moves it.
-            let step = cell_width(cell.ch).max(1);
-            next = (i % width + step < width).then_some(i + step);
+            // than wrapping, so the next row always moves it. After a wide
+            // letter, where a terminal may not agree it took two cells, the
+            // next is placed again rather than trusted to follow.
+            next = (wide.is_none() && i % width + 1 < width).then_some(i + 1);
         }
         s.push_str("\x1b[0m");
         out.extend_from_slice(s.as_bytes());
@@ -1520,18 +1535,70 @@ pub(crate) fn cell_width(ch: char) -> usize {
             | 0xFEFF
             | 0xE0000..=0xE0FFF
     );
+    // Wide as terminals draw them (East Asian Wide and Fullwidth), less
+    // the few neutral ones among them (U+303F, the Yijing hexagrams).
     let wide = matches!(
         c,
         0x1100..=0x115F
-            | 0x2E80..=0xA4CF
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0xA4CF
+            | 0xA960..=0xA97F
             | 0xAC00..=0xD7A3
             | 0xF900..=0xFAFF
-            | 0xFE30..=0xFE4F
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
             | 0xFF00..=0xFF60
             | 0xFFE0..=0xFFE6
+            | 0x1B000..=0x1B2FF
             | 0x20000..=0x3FFFD
     );
-    let emoji = matches!(c, 0x1F300..=0x1FAFF);
+    // Emoji, which terminals draw two cells wide or one, as their fonts
+    // have them: those that show as emoji by default (with U+FE0F after
+    // others, `place` drops them too).
+    let emoji = matches!(
+        c,
+        0x231A..=0x231B
+            | 0x23E9..=0x23EC
+            | 0x23F0
+            | 0x23F3
+            | 0x25FD..=0x25FE
+            | 0x2614..=0x2615
+            | 0x2648..=0x2653
+            | 0x267F
+            | 0x2693
+            | 0x26A1
+            | 0x26AA..=0x26AB
+            | 0x26BD..=0x26BE
+            | 0x26C4..=0x26C5
+            | 0x26CE
+            | 0x26D4
+            | 0x26EA
+            | 0x26F2..=0x26F3
+            | 0x26F5
+            | 0x26FA
+            | 0x26FD
+            | 0x2705
+            | 0x270A..=0x270B
+            | 0x2728
+            | 0x274C
+            | 0x274E
+            | 0x2753..=0x2755
+            | 0x2757
+            | 0x2795..=0x2797
+            | 0x27B0
+            | 0x27BF
+            | 0x2B1B..=0x2B1C
+            | 0x2B50
+            | 0x2B55
+            | 0x1F004
+            | 0x1F0CF
+            | 0x1F18E
+            | 0x1F191..=0x1F19A
+            | 0x1F200..=0x1F2FF
+            | 0x1F300..=0x1FAFF
+    );
     let right_to_left = matches!(c, 0x590..=0x8FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFC);
     match () {
         _ if ch.is_control() || zero || emoji || right_to_left || ch == CONTINUED => 0,
@@ -1764,6 +1831,27 @@ mod tests {
     }
 
     #[test]
+    fn a_symbol_asked_to_show_as_an_emoji_is_left_out() {
+        let mut page = AsciiPage::new(Style::Letters);
+        // "❤️ ok": the heart with U+FE0F, which terminals may draw two wide.
+        page.text = Text::parse(r#"{"w":60,"h":10,"colours":[[0,0,0]],"lines":[[0,0,"a\u2764\ufe0fb ok",0,0,60,10]]}"#);
+        assert_eq!(letters(&page.place(6, 1, (0.0, 0.0), (10.0, 10.0)), 6), ["ab ok."]);
+    }
+
+    #[test]
+    fn after_a_wide_letter_the_cursor_is_placed_again() {
+        let mut page = AsciiPage::new(Style::Letters);
+        page.text = Text::parse(r#"{"w":40,"h":10,"colours":[[0,0,0]],"lines":[[0,0,"字a",0,0,30,10]]}"#);
+        let mut out = Vec::new();
+        page.draw_pixels(&mut out, frame(4, 1, |_, _| WHITE), 4, 1, 1, (0.0, 0.0));
+        let out = String::from_utf8(out).unwrap();
+        // The letter after it goes where kb says, in column 3, whatever the
+        // terminal made of the wide one.
+        let at = out.find('字').expect("the wide letter is drawn");
+        assert!(out[at..].contains("\x1b[1;3H"), "{out:?}");
+    }
+
+    #[test]
     fn a_wide_letter_in_the_last_two_columns_stays() {
         let mut page = AsciiPage::new(Style::Letters);
         page.text = Text::parse(r#"{"w":40,"h":10,"colours":[[0,0,0]],"lines":[[0,0,"字",20,0,40,10]]}"#);
@@ -1863,5 +1951,9 @@ mod tests {
             .all(|&ch| cell_width(ch) == 0));
         assert!(['😀', '\u{301}', 'ذ', 'ש'].iter().all(|&ch| cell_width(ch) == 0));
         assert!(['漢', 'ん', '한', '，'].iter().all(|&ch| cell_width(ch) == 2));
+        // Emoji, however terminals draw them, and the neutral ones among
+        // the wide.
+        assert!(['✅', '⭐', '⌚', '⚡', '🈁'].iter().all(|&ch| cell_width(ch) == 0));
+        assert!(['\u{303f}', '\u{4dc0}', '✓', '★'].iter().all(|&ch| cell_width(ch) == 1));
     }
 }
