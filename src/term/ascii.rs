@@ -177,7 +177,7 @@ pub const READ_TEXT: &str = concat!(
       -webkit-text-fill-color: transparent !important;
       text-decoration-color: transparent !important;
       text-shadow: none !important; }
-    :is(${ICONS}), *::before, *::after { -webkit-text-fill-color: currentcolor !important; }
+    *::before, *::after { -webkit-text-fill-color: currentcolor !important; }
     *:not(input, textarea)::selection { background-color: transparent !important; }`);
     window.__kbHidden = new Set();
   }
@@ -186,6 +186,10 @@ pub const READ_TEXT: &str = concat!(
   const selection = getSelection();
   const chosen = selection && !selection.isCollapsed
     ? Array.from({ length: selection.rangeCount }, (_, k) => selection.getRangeAt(k)) : [];
+  // The white space a page's text collapses: spaces, tabs and line
+  // breaks, not a no-break space, which holds its place (and, in a row,
+  // its width), as \s would take it.
+  const SPACE = /[ \t\n\r\f]/;
   const range = document.createRange(), fixedness = new Map();
   const parent = el => el.parentElement || (el.parentNode && el.parentNode.host) || null;
   // Whether text stays put in the window as the page scrolls: in a fixed
@@ -288,8 +292,9 @@ pub const READ_TEXT: &str = concat!(
     // An icon font's letters, which only it draws: shown by the pixels,
     // its fill put back to be seen (and what the page had there kept, for
     // SHOW_TEXT to put back). Words beside an icon are read as words.
-    if (el.closest(ICONS) && ICON_TEXT.test(node.data)) return;
-    if (ICON_FACE(style.fontFamily)) {
+    // Only icon text: words in an icon class's element stay hidden in the
+    // pixels and are read, not drawn twice.
+    if ((el.closest(ICONS) && ICON_TEXT.test(node.data)) || ICON_FACE(style.fontFamily)) {
       const filled = window.__kbFilled || (window.__kbFilled = new Map());
       if (!filled.has(el)) filled.set(el, [el.style.getPropertyValue('-webkit-text-fill-color'), el.style.getPropertyPriority('-webkit-text-fill-color')]);
       el.style.setProperty('-webkit-text-fill-color', 'currentcolor', 'important');
@@ -332,12 +337,12 @@ pub const READ_TEXT: &str = concat!(
     // line), so such a run is passed over at once rather than a letter at
     // a time. A space that shows (between a link and the words after it)
     // is a letter like any other.
-    const shown = /\S/g;
+    const shown = /[^ \t\n\r\f]/g;
     const letter = at => {
       for (let k = 0; at < n && k < 64; k++) {
         const r = glyph(at);
         if (r.width > 0) return [at, r];
-        if (collapse && /\s/.test(data[at])) {
+        if (collapse && SPACE.test(data[at])) {
           shown.lastIndex = at;
           const next = shown.exec(data);
           if (!next) return null;
@@ -370,7 +375,7 @@ pub const READ_TEXT: &str = concat!(
         const picked = inSelection.some(([a, b]) => i >= a && i + w <= b);
         i += w;
         if (!onScreen(r)) continue;
-        if (look && !(collapse && /\s/.test(ch)) && gone(r.left + r.width / 2, r.top + r.height / 2)) {
+        if (look && !(collapse && SPACE.test(ch)) && gone(r.left + r.width / 2, r.top + r.height / 2)) {
           if (line) push(line);
           line = null;
           continue;
@@ -388,7 +393,7 @@ pub const READ_TEXT: &str = concat!(
         }
         line.n += 1;
         // A soft hyphen with a box is where the page broke the line.
-        line.text += collapse && /\s/.test(ch) ? ' ' : ch === '\u00ad' ? '-' : cased(ch);
+        line.text += collapse && SPACE.test(ch) ? ' ' : ch === '\u00ad' ? '-' : cased(ch);
         line.r = Math.max(line.r, r.right);
         line.b = Math.max(line.b, r.bottom);
       }
@@ -428,19 +433,22 @@ pub const READ_TEXT: &str = concat!(
       // letter, which breaks it where the page does.
       if (r.bottom - r.top > r0.height * 1.6 + 1) { byLetter(s0, e, true); continue; }
       if (r.left < 0 || r.right > W) { byLetter(s0, e, true); continue; }
-      // Under a floating box, or clipped, at the line's start, middle and
-      // end: none of it, all of it, or some, letter by letter.
+      // Under a floating box, or clipped, the line's box against theirs
+      // (a small button over the middle of a line is missed by looking at
+      // a few points): none of it, all of it, or some, letter by letter.
       const middle = (r.top + r.bottom) / 2;
-      const hidden = [r.left + 1, (r.left + r.right) / 2, r.right - 1].map(x => gone(x, middle));
-      if (hidden.every(Boolean)) continue;
-      if (hidden.some(Boolean)) { byLetter(s0, e, true); continue; }
+      const [cl, ct, cr, cb] = clipOf(el);
+      if (r.right <= cl || r.left >= cr || middle < ct || middle >= cb) continue;
+      const over = floats(el) ? [] : covers.filter(c => r.left < c.r && r.right > c.l && middle >= c.t && middle < c.b);
+      if (over.some(c => r.left >= c.l && r.right <= c.r)) continue;
+      if (over.length || r.left < cl || r.right > cr) { byLetter(s0, e, true); continue; }
       const line = { text: '', l: r.left, t: r.top, r: r.right, b: r.bottom, chosen: [], n: 0 };
       for (let i = s0; i < e; ) {
         const w = width(i);
         let ch = data.slice(i, i + w);
         const picked = inSelection.some(([a, b]) => i >= a && i + w <= b);
         i += w;
-        if (collapse && /\s/.test(ch)) {
+        if (collapse && SPACE.test(ch)) {
           if (line.text.endsWith(' ')) continue;
           ch = ' ';
         } else if (ch === '\u00ad') {
@@ -487,6 +495,9 @@ pub const READ_TEXT: &str = concat!(
   try {
     const root = document.body || document.documentElement;
     if (root) walk(root);
+    for (const el of (window.__kbSnap && window.__kbSnap.floaters) || []) {
+      if (el.isConnected) cover(el);
+    }
     for (const node of texts) {
       read(node);
       if (performance.now() - began > BUDGET) throw 'complex';
@@ -627,15 +638,39 @@ const TERMINAL_TYPE: &str = concat!(
     snap.done = new WeakSet();
     snap.scanned = new WeakSet();
     snap.boxes.clear();
+    snap.queue = null;
+  };
+  // Put back what kb wrote in `el` and what is inside it, and look at it
+  // again: its class has changed (an accordion opened), and with it what
+  // the page's own rules give it.
+  const again = el => {
+    const snap = window.__kbSnap;
+    for (const x of [el, ...el.querySelectorAll('*')]) {
+      const props = snap.written.get(x);
+      if (props) {
+        for (const [prop, [was, priority, wrote]] of props) {
+          if (x.style.getPropertyValue(prop) !== wrote) continue;
+          if (was) x.style.setProperty(prop, was, priority);
+          else x.style.removeProperty(prop);
+        }
+        snap.written.delete(x);
+      }
+      snap.done.delete(x);
+      snap.scanned.delete(x);
+      snap.boxes.delete(x);
+      if (snap.queue) snap.queue.push(x);
+    }
   };
   const sheets = roots.reduce((n, root) => n + root.styleSheets.length, 0);
   const snap = window.__kbSnap
-    || (window.__kbSnap = { h: 0, sheets: 0, done: new WeakSet(), boxes: new Map(), written: new Map(), iconQueue: new Set(), scanned: new WeakSet(), prune: 256 });
+    || (window.__kbSnap = { h: 0, wide: 0, sheets: 0, done: new WeakSet(), boxes: new Map(), written: new Map(),
+      iconQueue: new Set(), scanned: new WeakSet(), prune: 256, queue: null, watched: new WeakSet(), floaters: new Set() });
   // What a page has taken out (a feed, a chat) isn't held on to: what kb
   // wrote there is dropped once the records have doubled since last time.
   if (snap.written.size > snap.prune) {
     for (const el of snap.written.keys()) if (!el.isConnected) snap.written.delete(el);
     for (const el of snap.iconQueue) if (!el.isConnected) snap.iconQueue.delete(el);
+    for (const el of snap.floaters) if (!el.isConnected) snap.floaters.delete(el);
     snap.prune = Math.max(256, snap.written.size * 2);
   }
   // Put back and rounded again for another cell, or for style sheets come
@@ -643,9 +678,12 @@ const TERMINAL_TYPE: &str = concat!(
   // readings, as some pages add and drop a <style> as they run (on hover),
   // which would undo the rounding each time.
   if (snap.sheets !== sheets) snap.held = snap.held && snap.held[0] === sheets ? [sheets, snap.held[1] + 1] : [sheets, 1];
-  if (snap.h !== H || (snap.sheets !== sheets && snap.held[1] >= 3)) {
+  // And for another width, at which the page's media queries may give
+  // other margins.
+  if (snap.h !== H || snap.wide !== innerWidth || (snap.sheets !== sheets && snap.held[1] >= 3)) {
     window.__kbUnsnap();
     snap.h = H;
+    snap.wide = innerWidth;
     snap.sheets = sheets;
     snap.held = null;
     // What was put back is looked at again, icons too, without waiting.
@@ -658,10 +696,38 @@ const TERMINAL_TYPE: &str = concat!(
     el.style.setProperty(prop, value, 'important');
     props.set(prop, [was[0], was[1], el.style.getPropertyValue(prop)]);
   };
-  const fresh = [];
-  for (const root of roots) {
-    for (const el of root.querySelectorAll('*')) if (!snap.done.has(el)) fresh.push(el);
+  // What is left to look at: every element once, then only what the page
+  // adds, or changes the class of, as a watcher on each root says, so
+  // that a reading doesn't go through the whole page to find them.
+  if (!snap.observer) {
+    snap.observer = new MutationObserver(changes => {
+      if (!snap.queue) return;
+      for (const change of changes) {
+        if (change.type === 'childList') {
+          for (const node of change.addedNodes) {
+            if (node.nodeType === 1) snap.queue.push(node, ...node.querySelectorAll('*'));
+          }
+        } else if (change.target.nodeType === 1 && change.target.getElementsByTagName('*').length <= 400) {
+          // Not a class on the page itself, or a large part of it, which
+          // some pages change as they scroll: everything would be put back
+          // and rounded again each time, the page jumping between the two.
+          again(change.target);
+        }
+      }
+    });
   }
+  if (!snap.queue) {
+    snap.queue = [];
+    for (const root of roots) snap.queue.push(...root.querySelectorAll('*'));
+  }
+  for (const root of roots) {
+    if (snap.watched.has(root)) continue;
+    snap.watched.add(root);
+    snap.observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'open'] });
+    if (root !== document) snap.queue.push(...root.querySelectorAll('*'));
+  }
+  // A batch of them, and what isn't done of it goes back at the front.
+  const fresh = snap.queue.splice(0, 3000).filter(el => el.isConnected && !snap.done.has(el));
   // Where the sheet went is kept apart from the reader's list, which it
   // empties when a page is too much to read, so that it can all be undone.
   const typed = window.__kbTyped || (window.__kbTyped = new Set());
@@ -724,6 +790,9 @@ const TERMINAL_TYPE: &str = concat!(
     if (performance.now() - began > BUDGET) break;
     snap.done.add(el);
     const style = getComputedStyle(el);
+    // Floating boxes, for the reader: one with no text in it (a chat
+    // button) can't be found from the text, as the others are.
+    if (/^(fixed|sticky)$/.test(style.position)) snap.floaters.add(el);
     const box = BOX.test(el.localName) && !(el.parentElement instanceof SVGElement)
       && style.display !== 'none' && style.float === 'none' && !/^(absolute|fixed)$/.test(style.position);
     if ((el instanceof SVGElement && !box) || /^(inline|contents|none)$/.test(style.display) && !box) continue;
@@ -770,6 +839,7 @@ const TERMINAL_TYPE: &str = concat!(
       }
     }
   }
+  snap.queue.unshift(...fresh.filter(el => !snap.done.has(el)));
   for (const [el, prop, value] of writes) write(el, prop, value);
   // Then, laid out so, each box's bottom margin to what makes it whole
   // rows, every time, as a picture's height changes when it loads.
@@ -1199,6 +1269,9 @@ impl AsciiPage {
         let mut s = String::from("\x1b[0m");
         let (mut fg, mut bg) = (None, None);
         let mut next = None;
+        // The wide letter just written, whose right half then goes with it,
+        // in the last column too, where the cursor has nowhere to go on to.
+        let mut wide = None;
         let width = self.cols as usize;
         for (k, &i) in at.iter().enumerate() {
             let mut cell = self.shown[i];
@@ -1206,7 +1279,7 @@ impl AsciiPage {
             // the edge of a box being uncovered cutting the letter: it is a
             // space, as the other half's cell is the box's, still drawn.
             if cell.ch == CONTINUED {
-                if next == Some(i + 1) {
+                if wide == Some(i.wrapping_sub(1)) {
                     continue;
                 }
                 cell.ch = ' ';
@@ -1225,6 +1298,7 @@ impl AsciiPage {
                 fg = Some(cell.fg);
             }
             s.push(cell.ch);
+            wide = (cell_width(cell.ch) == 2).then_some(i);
             // The cursor stays at the last column after writing it, rather
             // than wrapping, so the next row always moves it.
             let step = cell_width(cell.ch).max(1);
@@ -1687,6 +1761,18 @@ mod tests {
             assert!(!kept.contains('字') && kept.contains(&format!("\x1b[1;{col}H")), "{kept:?}");
             assert!(!kept.contains(&format!("\x1b[1;{}H", 3 - col)), "{kept:?}");
         }
+    }
+
+    #[test]
+    fn a_wide_letter_in_the_last_two_columns_stays() {
+        let mut page = AsciiPage::new(Style::Letters);
+        page.text = Text::parse(r#"{"w":40,"h":10,"colours":[[0,0,0]],"lines":[[0,0,"字",20,0,40,10]]}"#);
+        let mut out = Vec::new();
+        page.draw_pixels(&mut out, frame(4, 1, |_, _| WHITE), 4, 1, 1, (0.0, 0.0));
+        let out = String::from_utf8(out).unwrap();
+        // Written in columns 3 and 4, and nothing after it on that row.
+        let at = out.find('字').expect("the letter is drawn");
+        assert!(!out[at..].contains("\x1b[1;4H"), "{out:?}");
     }
 
     #[test]

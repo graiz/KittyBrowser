@@ -356,6 +356,9 @@ const TEXT_GAP: Duration = Duration::from_millis(100);
 /// How long after a key, click or scroll the text is read again with no
 /// frame: long enough for the glide that carries a scroll on.
 const TEXT_AFTER_INPUT: Duration = Duration::from_secs(1);
+/// How long the letters wait for a frame before following the scroll the
+/// text was read at.
+const TEXT_SCROLL_WAIT: Duration = Duration::from_millis(120);
 const TEXT_WAIT: Duration = Duration::from_secs(2);
 
 /// Append a line to the file named by KB_LOG, if set. For diagnosing
@@ -487,6 +490,12 @@ struct App {
     hover_cell: (u16, u16),
     tip: Option<String>,
     tip_rect: Option<ui::Rect>,
+    /// When the pointer was last asked about, and the tip last taken away.
+    pointer_asked: Instant,
+    tip_cleared: Instant,
+    /// The scroll the text was read at, and when, waiting for a frame that
+    /// may still come with it: used only if none has come by TEXT_SCROLL_WAIT.
+    text_scroll: Option<((f64, f64), Instant)>,
     pointer_next: Option<(f64, f64)>,
     pointer: String,
     /// The terminal's text and background colours, once it has said.
@@ -706,6 +715,9 @@ fn browse(
         hover_cell: (0, 0),
         tip: None,
         tip_rect: None,
+        pointer_asked: Instant::now(),
+        tip_cleared: Instant::now(),
+        text_scroll: None,
         pointer_next: None,
         pointer: "default".to_owned(),
         term_fg: None,
@@ -795,14 +807,18 @@ fn browse(
         }
         // What can move the page: not the mouse passing over it.
         if messages.iter().any(|message| match message {
-            Msg::Control(_) | Msg::Term(Event::Key(_) | Event::Paste(_)) => true,
+            // A command that only reads (status, text) acts on nothing.
+            Msg::Control(request) => {
+                crate::commands::find(&request.command).is_none_or(|c| c.effect != crate::commands::Effect::Reads)
+            }
+            Msg::Term(Event::Key(_) | Event::Paste(_)) => true,
             Msg::Term(Event::Mouse(mouse)) => mouse.kind != MouseKind::Move || mouse.button.is_some(),
             _ => false,
         }) {
             app.last_action = Instant::now();
             // A tip is for what the mouse rests on, which a key, a command
             // or a scroll may have moved from under it.
-            app.tip = None;
+            app.clear_tip();
         }
         let mut messages = messages.into_iter().enumerate().peekable();
         while let Some((index, message)) = messages.next() {
@@ -991,8 +1007,8 @@ fn browse(
                             // frame to say; but never over a frame that came
                             // since it was asked for, which is newer.
                             if let Some(scroll) = text.as_ref().and_then(Text::scroll) {
-                                if app.frame_at < app.text_asked {
-                                    app.frame_scroll = scroll;
+                                if app.frame_at < app.text_asked && scroll != app.frame_scroll {
+                                    app.text_scroll = Some((scroll, Instant::now()));
                                 }
                             }
                             if let Some(ascii) = &mut app.ascii {
@@ -1036,6 +1052,7 @@ fn browse(
                                 app.frame = Some(png);
                                 app.frame_scroll = app.chrome.frame_scroll();
                                 app.frame_at = Instant::now();
+                                app.text_scroll = None;
                                 app.text_wanted = true;
                                 app.frames += 1;
                                 // The blank page that comes first stays under the logo.
@@ -1120,6 +1137,16 @@ fn browse(
         // lag.
         if app.glided.elapsed() >= GLIDE_STEP {
             app.glide();
+        }
+        // The page scrolled with no frame to say so, for a while now: plain
+        // text on white, whose pixels didn't change. A frame that is only
+        // late would have come by now, with pixels to match.
+        if let Some((scroll, at)) = app.text_scroll {
+            if at.elapsed() >= TEXT_SCROLL_WAIT {
+                app.text_scroll = None;
+                app.frame_scroll = scroll;
+                new_frame = true;
+            }
         }
         // While the terminal is still taking the last frame, hold this
         // drawing back; when it is ready (`Msg::Written`), it gets the
@@ -1484,18 +1511,31 @@ impl App {
     /// In characters, draw the tip for what the mouse is over beside it,
     /// and give back the cells an old one covered. Drawn with every frame,
     /// as the page's cells under it may change.
-    fn render_tip(&mut self, out: &mut Vec<u8>) {
-        let (col, row) = self.hover_cell;
-        let tip = self.tip.as_deref().filter(|_| self.ascii.is_some() && !self.help && self.menu.is_none());
-        let layout = tip.map(|text| ui::tip_box(text, col, row, self.window.cols, self.window.rows));
-        if let Some(old) = self.tip_rect.take() {
-            if layout.as_ref().map(|(rect, _)| *rect) != Some(old) {
-                self.uncover(out, old);
-            }
-        }
+    ///
+    /// In two steps: the old tip's cells are given back before the boxes
+    /// are drawn (a box closing gives back its own), and the new tip drawn
+    /// after them, so that a box closing doesn't draw the page over it.
+    fn render_tip(&mut self, out: &mut Vec<u8>, layout: Option<(ui::Rect, Vec<String>)>) {
         if let Some((rect, lines)) = layout.filter(|(_, lines)| !lines.is_empty()) {
             ui::render_tip(out, rect, &lines);
             self.tip_rect = Some(rect);
+        }
+    }
+
+    /// Where the tip goes now, if one is to be shown.
+    fn tip_layout(&self) -> Option<(ui::Rect, Vec<String>)> {
+        let (col, row) = self.hover_cell;
+        let shown = self.ascii.is_some() && !self.help && self.menu.is_none() && self.modal_rects.is_empty();
+        let tip = self.tip.as_deref().filter(|_| shown);
+        tip.map(|text| ui::tip_box(text, col, row, self.window.cols, self.window.rows))
+    }
+
+    /// Give back the cells an old tip covered, unless it is drawn there again.
+    fn uncover_tip(&mut self, out: &mut Vec<u8>, layout: Option<&(ui::Rect, Vec<String>)>) {
+        if let Some(old) = self.tip_rect.take() {
+            if layout.map(|(rect, _)| *rect) != Some(old) {
+                self.uncover(out, old);
+            }
         }
     }
 
@@ -1546,7 +1586,7 @@ impl App {
     /// The page shown is at `url` now.
     fn went_to(&mut self, url: String) {
         log(format_args!("url {url}"));
-        self.tip = None;
+        self.clear_tip();
         self.committed |= url != "about:blank";
         self.history.record(&url);
         self.url = if url == "about:blank" { String::new() } else { url };
@@ -1666,10 +1706,12 @@ impl App {
             }
             None => ui::render_bar(&mut out, &mut self.bar, cols, self.loading, None, badge, self.chrome.windows()),
         }
-        self.render_tip(&mut out);
+        let tip = self.tip_layout();
+        self.uncover_tip(&mut out, tip.as_ref());
         self.render_help(&mut out);
         self.render_menu(&mut out);
         self.render_modal(&mut out);
+        self.render_tip(&mut out, tip);
         out.extend_from_slice(b"\x1b[?2026l");
         term::write(&out);
         if frame {
@@ -2316,7 +2358,10 @@ impl App {
             let (shape, tip) = value.split_once('\n').map_or((value, None), |(shape, tip)| (shape, Some(tip)));
             let shape = if POINTERS.contains(&shape) { shape } else { "default" };
             self.set_pointer(shape);
-            self.tip = tip.filter(|_| self.ascii.is_some()).map(str::to_owned);
+            // Not an answer asked before the tip was taken away (a scroll,
+            // a click), nor one for the bar the mouse has moved onto.
+            let fresh = self.tip_cleared < self.pointer_asked && self.hover_cell.1 > 1;
+            self.tip = tip.filter(|_| self.ascii.is_some() && fresh).map(str::to_owned);
             if let Some((x, y)) = self.pointer_next.take() {
                 self.ask_pointer(x, y);
             }
@@ -2389,7 +2434,14 @@ impl App {
             return;
         }
         let tips = self.ascii.is_some();
+        self.pointer_asked = Instant::now();
         self.pointer_request = Some(self.chrome.evaluate_value(&format!("{POINTER}({x}, {y}, {tips})")));
+    }
+
+    /// Take the tip away, and any answer still coming for it.
+    fn clear_tip(&mut self) {
+        self.tip = None;
+        self.tip_cleared = Instant::now();
     }
 
     fn set_pointer(&mut self, shape: &str) {
@@ -2502,7 +2554,7 @@ impl App {
         // The tip is for where the mouse rests: a click, the wheel or the
         // bar takes it away, and the next move asks again.
         if mouse.kind != MouseKind::Move || py < cell_h {
-            self.tip = None;
+            self.clear_tip();
         }
         // A drag that began on the page stays with the page.
         if py < cell_h && self.buttons == 0 {
