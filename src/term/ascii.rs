@@ -217,7 +217,14 @@ pub const READ_TEXT: &str = concat!(
     if (!el || el === document.body || el === document.documentElement) return [0, 0, W, H];
     if (!clips.has(el)) {
       const style = getComputedStyle(el);
-      let c = style.position === 'fixed' ? [0, 0, W, H] : clipOf(parent(el));
+      // A fixed box escapes every box around it, an absolute one those up to
+      // the one it is placed in (a dropdown hanging out of its bar).
+      let holder = parent(el);
+      if (style.position === 'absolute') {
+        while (holder && holder !== document.body && holder !== document.documentElement && holder.nodeType === 1
+          && getComputedStyle(holder).position === 'static') holder = parent(holder);
+      }
+      let c = style.position === 'fixed' ? [0, 0, W, H] : clipOf(holder && holder.nodeType === 1 ? holder : null);
       if (style.overflowX !== 'visible' || style.overflowY !== 'visible') {
         const r = el.getBoundingClientRect();
         c = [Math.max(c[0], r.left), Math.max(c[1], r.top), Math.min(c[2], r.right), Math.min(c[3], r.bottom)];
@@ -600,7 +607,8 @@ const TERMINAL_TYPE: &str = concat!(
     sup, sub { vertical-align: baseline !important; }`;
   if (!window.__kbType) window.__kbType = new CSSStyleSheet();
   if (window.__kbTypeCss !== css) { window.__kbType.replaceSync(css); window.__kbTypeCss = css; }
-  const roots = [document, ...(window.__kbHidden || [])];
+  // The document once (the reader lists it among the roots it hid text in).
+  const roots = [...new Set([document, ...(window.__kbHidden || [])])];
 
   // What kb writes into elements' own styles, and what was there before:
   // put back only where it is still as kb left it, so that what the page
@@ -630,10 +638,16 @@ const TERMINAL_TYPE: &str = concat!(
     for (const el of snap.iconQueue) if (!el.isConnected) snap.iconQueue.delete(el);
     snap.prune = Math.max(256, snap.written.size * 2);
   }
-  if (snap.h !== H || snap.sheets !== sheets) {
+  // Put back and rounded again for another cell, or for style sheets come
+  // or gone (a page loading): once their count has held for three
+  // readings, as some pages add and drop a <style> as they run (on hover),
+  // which would undo the rounding each time.
+  if (snap.sheets !== sheets) snap.held = snap.held && snap.held[0] === sheets ? [sheets, snap.held[1] + 1] : [sheets, 1];
+  if (snap.h !== H || (snap.sheets !== sheets && snap.held[1] >= 3)) {
     window.__kbUnsnap();
     snap.h = H;
     snap.sheets = sheets;
+    snap.held = null;
     // What was put back is looked at again, icons too, without waiting.
     snap.iconAt = undefined;
   }
@@ -648,7 +662,11 @@ const TERMINAL_TYPE: &str = concat!(
   for (const root of roots) {
     for (const el of root.querySelectorAll('*')) if (!snap.done.has(el)) fresh.push(el);
   }
+  // Where the sheet went is kept apart from the reader's list, which it
+  // empties when a page is too much to read, so that it can all be undone.
+  const typed = window.__kbTyped || (window.__kbTyped = new Set());
   for (const root of roots) {
+    typed.add(root);
     if (!root.adoptedStyleSheets.includes(window.__kbType)) root.adoptedStyleSheets = [...root.adoptedStyleSheets, window.__kbType];
   }
 
@@ -709,10 +727,14 @@ const TERMINAL_TYPE: &str = concat!(
     const box = BOX.test(el.localName) && !(el.parentElement instanceof SVGElement)
       && style.display !== 'none' && style.float === 'none' && !/^(absolute|fixed)$/.test(style.position);
     if ((el instanceof SVGElement && !box) || /^(inline|contents|none)$/.test(style.display) && !box) continue;
-    // A table's rows, by their own height or the space between them, as
-    // a spacer row of a few pixels in a table laid out with them.
-    if (el.localName === 'tr') {
-      const height = el.getBoundingClientRect().height;
+    // A table's rows, by a height the page gave one (a spacer row of a few
+    // pixels) or the space between them. A row its content sizes is whole
+    // rows already, and a height measured from its content would hold when
+    // the content changes: a row left far too tall when the pane widens,
+    // its cells centred in it, as a gap.
+    if (el.localName === 'tr' && el.computedStyleMap) {
+      const given = el.computedStyleMap().get('height');
+      const height = given instanceof CSSUnitValue && given.unit === 'px' ? given.value : 0;
       if (height > 0 && Math.abs(rows(height) - height) > 0.01) writes.push([el, 'height', `${rows(height)}px`]);
     }
     if (/table/.test(style.display) && style.borderCollapse === 'separate') {
@@ -771,10 +793,11 @@ const TERMINAL_TYPE: &str = concat!(
 /// and padding.
 pub const PLAIN_TYPE: &str = r#"(() => {
   if (!window.__kbType) return;
-  for (const root of [document, ...(window.__kbHidden || [])]) {
+  for (const root of new Set([document, ...(window.__kbHidden || []), ...(window.__kbTyped || [])])) {
     root.adoptedStyleSheets = root.adoptedStyleSheets.filter(sheet => sheet !== window.__kbType);
   }
   if (window.__kbUnsnap) window.__kbUnsnap();
+  delete window.__kbTyped;
   delete window.__kbType;
   delete window.__kbTypeCss;
   delete window.__kbSnap;
@@ -1134,15 +1157,33 @@ impl AsciiPage {
 
     /// Draw again the page's cells within `rect`, once something drawn over
     /// them (a box, a menu) is gone.
-    pub fn repaint(&self, out: &mut Vec<u8>, rect: crate::ui::Rect) {
+    /// A wide letter the box's edge cut in two is drawn whole, its other
+    /// half too, unless that half is under a box still `drawn`: then the
+    /// half in `rect` is a space, so as not to write over that box.
+    pub fn repaint(&self, out: &mut Vec<u8>, rect: crate::ui::Rect, drawn: &[crate::ui::Rect]) {
         if self.shown.is_empty() {
             return;
         }
+        let (cols, top) = (self.cols as usize, self.top as usize);
+        let free = |at: usize| {
+            let (row, col) = ((top + at / cols) as u16, (at % cols + 1) as u16);
+            !drawn.iter().any(|r| row >= r.row && row < r.row + r.height && col >= r.col && col < r.col + r.width)
+        };
         let mut cells = Vec::new();
         for row in rect.row..rect.row + rect.height {
             let Some(row) = row.checked_sub(self.top).filter(|row| *row < self.rows) else { continue };
-            for col in rect.col.saturating_sub(1)..(rect.col - 1 + rect.width).min(self.cols) {
-                cells.push(row as usize * self.cols as usize + col as usize);
+            let (first, end) =
+                (rect.col.saturating_sub(1) as usize, ((rect.col - 1 + rect.width).min(self.cols)) as usize);
+            if first >= end {
+                continue;
+            }
+            let at = |col: usize| row as usize * cols + col;
+            if self.shown[at(first)].ch == CONTINUED && first > 0 && free(at(first - 1)) {
+                cells.push(at(first - 1));
+            }
+            cells.extend((first..end).map(at));
+            if cell_width(self.shown[at(end - 1)].ch) == 2 && end < cols && free(at(end)) {
+                cells.push(at(end));
             }
         }
         self.emit(out, &cells);
@@ -1395,7 +1436,15 @@ pub(crate) fn cell_width(ch: char) -> usize {
     // hyphen, which shows only where the page breaks a line at it.
     let zero = matches!(
         c,
-        0xAD | 0x300..=0x36F | 0x61C | 0x180E | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFE00..=0xFE0F | 0xFEFF
+        0xAD | 0x300..=0x36F
+            | 0x61C
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x206F
+            | 0xFE00..=0xFE0F
+            | 0xFEFF
+            | 0xE0000..=0xE0FFF
     );
     let wide = matches!(
         c,
@@ -1522,7 +1571,7 @@ mod tests {
         page.draw_pixels(&mut Vec::new(), frame(4, 3, |_, _| [9, 9, 9]), 4, 3, 2, (0.0, 0.0));
         let mut out = Vec::new();
         // Rows 1 to 3, columns 2 and 3: row 1 is the bar's, not the page's.
-        page.repaint(&mut out, crate::ui::Rect { col: 2, row: 1, width: 2, height: 3 });
+        page.repaint(&mut out, crate::ui::Rect { col: 2, row: 1, width: 2, height: 3 }, &[]);
         let text = String::from_utf8(out).unwrap();
         assert_eq!(text, "\x1b[0m\x1b[2;2H\x1b[48;2;9;9;9m  \x1b[3;2H  \x1b[0m");
     }
@@ -1624,14 +1673,19 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         assert_eq!(out.matches('字').count(), 1, "{out:?}");
         assert!(!out.contains('\0'), "{out:?}");
-        // Uncovering one half alone, at a box's edge, draws a space there
-        // and leaves the cell beyond the edge alone.
+        // A box gone from over one half draws the letter whole again; one
+        // still over the other half keeps it: that half is a space.
         for col in [1, 2] {
             let mut again = Vec::new();
-            page.repaint(&mut again, crate::ui::Rect { col, row: 1, width: 1, height: 1 });
+            page.repaint(&mut again, crate::ui::Rect { col, row: 1, width: 1, height: 1 }, &[]);
             let again = String::from_utf8(again).unwrap();
-            assert!(!again.contains('字') && again.contains(&format!("\x1b[1;{col}H")), "{again:?}");
-            assert!(!again.contains(&format!("\x1b[1;{}H", 3 - col)), "{again:?}");
+            assert!(again.contains("\x1b[1;1H") && again.matches('字').count() == 1, "{again:?}");
+            let other = crate::ui::Rect { col: 3 - col, row: 1, width: 1, height: 1 };
+            let mut kept = Vec::new();
+            page.repaint(&mut kept, crate::ui::Rect { col, row: 1, width: 1, height: 1 }, &[other]);
+            let kept = String::from_utf8(kept).unwrap();
+            assert!(!kept.contains('字') && kept.contains(&format!("\x1b[1;{col}H")), "{kept:?}");
+            assert!(!kept.contains(&format!("\x1b[1;{}H", 3 - col)), "{kept:?}");
         }
     }
 
@@ -1718,7 +1772,9 @@ mod tests {
     #[test]
     fn only_letters_of_one_cell_are_drawn_as_letters() {
         assert!(['a', 'é', '—'].iter().all(|&ch| cell_width(ch) == 1));
-        assert!(['\x1b', '\u{9b}', '\u{202e}', '\0', '\u{ad}', '\u{2028}'].iter().all(|&ch| cell_width(ch) == 0));
+        assert!(['\x1b', '\u{9b}', '\u{202e}', '\0', '\u{ad}', '\u{2028}', '\u{e0067}', '\u{e0100}']
+            .iter()
+            .all(|&ch| cell_width(ch) == 0));
         assert!(['😀', '\u{301}', 'ذ', 'ש'].iter().all(|&ch| cell_width(ch) == 0));
         assert!(['漢', 'ん', '한', '，'].iter().all(|&ch| cell_width(ch) == 2));
     }

@@ -454,7 +454,11 @@ pub fn tip_box(text: &str, col: u16, row: u16, cols: u16, rows: u16) -> (Rect, V
         .map(|word| word.chars().filter(|&ch| cell_width(ch) > 0).collect::<String>())
         .filter(|word| !word.is_empty())
         .collect();
-    let most = TIP_WIDTH.min(cols.saturating_sub(4) as usize).max(1);
+    let most = TIP_WIDTH.min(cols.saturating_sub(4) as usize);
+    // Too narrow for a wide letter and its frame: no tip.
+    if most < 2 {
+        return (Rect { col, row, width: 0, height: 0 }, Vec::new());
+    }
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     let mut cut = false;
@@ -701,6 +705,12 @@ mod tests {
         // A word longer than a line is split; control characters are gone.
         let (_, lines) = tip_box(&format!("{}\x1b[2J", "a".repeat(60)), 1, 2, 80, 24);
         assert_eq!(lines, ["a".repeat(48), format!("{}[2J", "a".repeat(12))]);
+    }
+
+    #[test]
+    fn a_pane_too_narrow_for_a_wide_letter_has_no_tip() {
+        assert!(tip_box("漢字", 1, 2, 5, 24).1.is_empty());
+        assert_eq!(tip_box("漢字", 1, 2, 6, 24).1, ["漢", "字"]);
     }
 
     #[test]

@@ -800,6 +800,9 @@ fn browse(
             _ => false,
         }) {
             app.last_action = Instant::now();
+            // A tip is for what the mouse rests on, which a key, a command
+            // or a scroll may have moved from under it.
+            app.tip = None;
         }
         let mut messages = messages.into_iter().enumerate().peekable();
         while let Some((index, message)) = messages.next() {
@@ -1406,7 +1409,15 @@ impl App {
     fn uncover(&self, out: &mut Vec<u8>, rect: ui::Rect) {
         ui::blank(out, rect);
         if let Some(ascii) = &self.ascii {
-            ascii.repaint(out, rect);
+            // The boxes still drawn, which a wide letter at the edge mustn't
+            // be written over.
+            let drawn: Vec<ui::Rect> = [self.help_rect, self.tip_rect, self.menu_rect]
+                .into_iter()
+                .flatten()
+                .chain(self.modal_rects.iter().copied())
+                .filter(|other| *other != rect)
+                .collect();
+            ascii.repaint(out, rect, &drawn);
         }
     }
 
@@ -1535,6 +1546,7 @@ impl App {
     /// The page shown is at `url` now.
     fn went_to(&mut self, url: String) {
         log(format_args!("url {url}"));
+        self.tip = None;
         self.committed |= url != "about:blank";
         self.history.record(&url);
         self.url = if url == "about:blank" { String::new() } else { url };
