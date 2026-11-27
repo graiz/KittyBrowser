@@ -1162,6 +1162,14 @@ impl Chrome {
         self.send("Runtime.evaluate", json!({"expression": expression}));
     }
 
+    /// Run `expression` once in every open window, the ones not shown too:
+    /// to undo what was done in each while it was shown.
+    pub fn evaluate_everywhere(&mut self, expression: &str) {
+        for tab in &self.tabs {
+            let _ = self.tx.send("Runtime.evaluate", json!({"expression": expression}), Some(&tab.session));
+        }
+    }
+
     /// `kind` is mousePressed, mouseReleased or mouseMoved; `button` is the
     /// one that changed (or "none"); `buttons` is the mask of those held.
     #[allow(clippy::too_many_arguments)]

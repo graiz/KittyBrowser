@@ -503,6 +503,9 @@ pub fn tip_box(text: &str, col: u16, row: u16, cols: u16, rows: u16) -> (Rect, V
             last.push('…');
         }
     }
+    // On a pane too short for it all, as many lines as fit between the
+    // bar and the bottom with the frame; none if not one.
+    lines.truncate(rows.saturating_sub(3) as usize);
     let inner = lines.iter().map(|line| width_of(line)).max().unwrap_or(0);
     let width = (inner as u16 + 4).min(cols);
     let height = lines.len() as u16 + 2;
@@ -678,9 +681,13 @@ mod tests {
         // At the right edge it moves left; at the bottom it goes above.
         let (rect, _) = tip_box("How to Do Great Work", 75, 23, 80, 24);
         assert_eq!((rect.col, rect.row), (57, 20));
-        // Never over the top bar.
-        let (rect, _) = tip_box("x", 1, 1, 80, 2);
-        assert!(rect.row >= 2);
+        // Never over the top bar, nor past the bottom: on a pane too short
+        // for its frame there is no tip, and a short one takes what fits.
+        let (_, lines) = tip_box("x", 1, 1, 80, 2);
+        assert!(lines.is_empty());
+        let (rect, lines) = tip_box(&"word ".repeat(60), 1, 5, 80, 5);
+        assert_eq!(lines.len(), 2);
+        assert!(rect.row >= 2 && rect.row + rect.height - 1 <= 5, "{rect:?}");
     }
 
     #[test]

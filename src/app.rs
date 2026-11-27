@@ -1037,13 +1037,6 @@ fn browse(
                                 app.frames += 1;
                                 // The blank page that comes first stays under the logo.
                                 new_frame = app.splash.is_none() || app.committed;
-                            } else if fits && app.ascii.is_some() && app.chrome.frame_scroll() != app.frame_scroll {
-                                // The same pixels at another scroll (plain text
-                                // on white, its letters hidden): the letters move.
-                                app.frame_scroll = app.chrome.frame_scroll();
-                                app.frame_at = Instant::now();
-                                app.text_wanted = true;
-                                new_frame = true;
                             }
                         }
                         Some(PageEvent::Url(url)) => {
@@ -1426,8 +1419,8 @@ impl App {
         }
         self.ascii = match self.ascii.take() {
             Some(_) => {
-                self.chrome.evaluate(crate::term::ascii::PLAIN_TYPE);
-                self.chrome.evaluate(crate::term::ascii::SHOW_TEXT);
+                self.chrome.evaluate_everywhere(crate::term::ascii::PLAIN_TYPE);
+                self.chrome.evaluate_everywhere(crate::term::ascii::SHOW_TEXT);
                 None
             }
             None => Some(AsciiPage::new(Style::Blocks { sextants: true })),
@@ -1446,7 +1439,7 @@ impl App {
     fn toggle_terminal_type(&mut self) {
         self.terminal_type = !self.terminal_type;
         if !self.terminal_type {
-            self.chrome.evaluate(crate::term::ascii::PLAIN_TYPE);
+            self.chrome.evaluate_everywhere(crate::term::ascii::PLAIN_TYPE);
         }
         self.note(if self.terminal_type { "Page type: the terminal's" } else { "Page type: the page's own" });
         self.text_wanted = true;

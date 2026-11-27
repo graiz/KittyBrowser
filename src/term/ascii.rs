@@ -102,10 +102,6 @@ const LETTERS: &[(char, [&str; 6])] = &[
 /// split would show noise, and flicker as it changes from frame to frame.
 const WORTH: f64 = 12.0;
 
-/// The elements that draw icons with a font, by the classes of the common
-/// icon fonts: their letters are names (`font_download`) or private code
-/// points that only that font draws. They are left to the pixels: not read
-/// as text, not hidden, and kept in their own face.
 /// Whether a computed `font-family` is an icon font's, by the first face
 /// in it: a text font may name a symbols font after it, and the system's
 /// symbol fonts are text.
@@ -116,9 +112,22 @@ macro_rules! icon_face {
     };
 }
 
+/// Text an icon font draws as an icon: a name in lower case and
+/// underscores (a ligature's, `font_download`) or letters from the private
+/// use area, which only that font has.
+macro_rules! icon_text {
+    () => {
+        r#"/^\s*([a-z0-9_]{2,40}|[\ue000-\uf8ff]+)\s*$/"#
+    };
+}
+
+/// The elements that draw icons with a font, by the classes of the common
+/// icon fonts, kept in their own face and left to the pixels. Only these
+/// classes: one like `icon-home` is often on a link with words in it,
+/// whose icon is drawn before them; such icons are found by their face.
 macro_rules! icons {
     () => {
-        r#"[class*="material-icons"], [class*="material-symbols"], [class*="google-symbols"], mat-icon, .fa, .fas, .far, .fal, .fad, .fab, .fa-solid, .fa-regular, .fa-brands, .glyphicon, .bi, .codicon, .octicon, [class^="icon-"], [class*=" icon-"]"#
+        r#"[class*="material-icons"], [class*="material-symbols"], [class*="google-symbols"], mat-icon, .fa, .fas, .far, .fal, .fad, .fab, .fa-solid, .fa-regular, .fa-brands, .glyphicon, .bi, .codicon, .octicon"#
     };
 }
 
@@ -140,11 +149,13 @@ macro_rules! icons {
 /// Once read, it hides the page's own text, in the document and each shadow
 /// root, so that frames show what is behind it: the letters are drawn over
 /// that, and a blurred copy of the page's own around them would only be
-/// noise. Nor is the selection's highlight painted: the selected letters
-/// are drawn the other way round instead, and the highlight around them
-/// would come out as blocks. The text keeps its colour, to be read, and is
-/// only not painted; fields keep theirs, as their values aren't read.
-/// `SHOW_TEXT` undoes it.
+/// noise. What a page draws before and after an element (`::before`, an
+/// icon or an arrow) isn't text to read, so it is left to the pixels. Nor
+/// is the selection's highlight painted: the selected letters are drawn
+/// the other way round instead, and the highlight around them would come
+/// out as blocks. The text keeps its colour, to be read, and is only not
+/// painted; fields keep theirs, as their values aren't read. `SHOW_TEXT`
+/// undoes it.
 /// A constructed sheet, not a `<style>`, so a page's content security
 /// policy doesn't refuse it.
 pub const READ_TEXT: &str = concat!(
@@ -155,6 +166,9 @@ pub const READ_TEXT: &str = concat!(
   const ICON_FACE = "#,
     icon_face!(),
     r#";
+  const ICON_TEXT = "#,
+    icon_text!(),
+    r#";
   const BUDGET = 40, began = performance.now(), W = innerWidth, H = innerHeight;
   if (window.__kbTooMuch && began - window.__kbTooMuch < 5000) return JSON.stringify({ w: W, h: H, complex: true });
   if (!window.__kbHideText) {
@@ -163,7 +177,7 @@ pub const READ_TEXT: &str = concat!(
       -webkit-text-fill-color: transparent !important;
       text-decoration-color: transparent !important;
       text-shadow: none !important; }
-    :is(${ICONS}) { -webkit-text-fill-color: currentcolor !important; }
+    :is(${ICONS}), *::before, *::after { -webkit-text-fill-color: currentcolor !important; }
     *:not(input, textarea)::selection { background-color: transparent !important; }`);
     window.__kbHidden = new Set();
   }
@@ -195,6 +209,27 @@ pub const READ_TEXT: &str = concat!(
     return fixedness.get(el);
   };
   const onScreen = r => r.width > 0 && r.bottom > 0 && r.top < H && r.right > 0 && r.left < W;
+  // Where an element's content shows: the window, cut by each box around
+  // it that clips what overflows it (a box that scrolls by itself); text
+  // outside, scrolled out of such a box, isn't shown.
+  const clips = new Map();
+  const clipOf = el => {
+    if (!el || el === document.body || el === document.documentElement) return [0, 0, W, H];
+    if (!clips.has(el)) {
+      const style = getComputedStyle(el);
+      let c = style.position === 'fixed' ? [0, 0, W, H] : clipOf(parent(el));
+      if (style.overflowX !== 'visible' || style.overflowY !== 'visible') {
+        const r = el.getBoundingClientRect();
+        c = [Math.max(c[0], r.left), Math.max(c[1], r.top), Math.min(c[2], r.right), Math.min(c[3], r.bottom)];
+      }
+      clips.set(el, c);
+    }
+    return clips.get(el);
+  };
+  const clipped = (el, x, y) => {
+    const [l, t, r, b] = clipOf(el);
+    return x < l || x >= r || y < t || y >= b;
+  };
   // The boxes floating over the page (a cookie banner, a sticky header),
   // found from the text in them: the painted box around such text, where
   // it is fixed or sticky. Text of the page under one isn't shown.
@@ -243,9 +278,13 @@ pub const READ_TEXT: &str = concat!(
     range.selectNodeContents(node);
     if (!onScreen(range.getBoundingClientRect())) return;
     const style = getComputedStyle(el);
-    // An icon font's letters, which only it draws: shown by the pixels.
-    if (el.closest(ICONS)) return;
+    // An icon font's letters, which only it draws: shown by the pixels,
+    // its fill put back to be seen (and what the page had there kept, for
+    // SHOW_TEXT to put back). Words beside an icon are read as words.
+    if (el.closest(ICONS) && ICON_TEXT.test(node.data)) return;
     if (ICON_FACE(style.fontFamily)) {
+      const filled = window.__kbFilled || (window.__kbFilled = new Map());
+      if (!filled.has(el)) filled.set(el, [el.style.getPropertyValue('-webkit-text-fill-color'), el.style.getPropertyPriority('-webkit-text-fill-color')]);
       el.style.setProperty('-webkit-text-fill-color', 'currentcolor', 'important');
       return;
     }
@@ -268,6 +307,18 @@ pub const READ_TEXT: &str = concat!(
       r.endContainer === node ? r.endOffset : n,
     ]);
     const box1 = (from, to) => { range.setStart(node, from); range.setEnd(node, to); return range.getBoundingClientRect(); };
+    // One letter's box. The first letter after a break at a soft hyphen has
+    // two, the end of the line before and the letter where it is, and
+    // their bounds would put it on the line before: the last with a width
+    // is the letter.
+    const glyph = at => {
+      range.setStart(node, at);
+      range.setEnd(node, at + width(at));
+      const boxes = range.getClientRects();
+      if (boxes.length < 2) return boxes[0] || range.getBoundingClientRect();
+      for (let k = boxes.length - 1; k >= 0; k--) if (boxes[k].width > 0) return boxes[k];
+      return boxes[boxes.length - 1];
+    };
     const width = at => (data.codePointAt(at) > 0xffff ? 2 : 1);
     // The letter at `at`, or the first after it with a box: collapsed
     // white space has none, however long the run (an indented source
@@ -277,7 +328,7 @@ pub const READ_TEXT: &str = concat!(
     const shown = /\S/g;
     const letter = at => {
       for (let k = 0; at < n && k < 64; k++) {
-        const r = box1(at, at + width(at));
+        const r = glyph(at);
         if (r.width > 0) return [at, r];
         if (collapse && /\s/.test(data[at])) {
           shown.lastIndex = at;
@@ -293,6 +344,7 @@ pub const READ_TEXT: &str = concat!(
       return [...c].length === 1 ? c : ch;
     };
     let checked = false;
+    const gone = (x, y) => clipped(el, x, y) || covered(el, x, y);
     const push = line => {
       if (!line.text) return;
       if (!index.has(key)) { index.set(key, colours.length); colours.push(rgba.slice(0, 3)); }
@@ -307,14 +359,19 @@ pub const READ_TEXT: &str = concat!(
     const byLetter = (from, to, look) => {
       let line = null;
       for (let i = from; i < to; ) {
-        const w = width(i), ch = data.slice(i, i + w), r = box1(i, i + w);
+        const w = width(i), ch = data.slice(i, i + w), r = glyph(i);
         const picked = inSelection.some(([a, b]) => i >= a && i + w <= b);
         i += w;
         if (!onScreen(r)) continue;
-        if (look && !(collapse && /\s/.test(ch)) && covered(el, r.left + r.width / 2, r.top + r.height / 2)) {
+        if (look && !(collapse && /\s/.test(ch)) && gone(r.left + r.width / 2, r.top + r.height / 2)) {
           if (line) push(line);
           line = null;
           continue;
+        }
+        // Lower down, or back to the left: another line (the next column).
+        if (line && (Math.abs(r.top - line.t) > r.height / 2 || r.left < line.r - r.width)) {
+          push(line);
+          line = null;
         }
         if (!line) line = { text: '', l: r.left, t: r.top, r: r.right, b: r.bottom, chosen: [], n: 0 };
         if (picked) {
@@ -323,7 +380,8 @@ pub const READ_TEXT: &str = concat!(
           else line.chosen.push([line.n, line.n + 1]);
         }
         line.n += 1;
-        line.text += collapse && /\s/.test(ch) ? ' ' : cased(ch);
+        // A soft hyphen with a box is where the page broke the line.
+        line.text += collapse && /\s/.test(ch) ? ' ' : ch === '\u00ad' ? '-' : cased(ch);
         line.r = Math.max(line.r, r.right);
         line.b = Math.max(line.b, r.bottom);
       }
@@ -358,11 +416,15 @@ pub const READ_TEXT: &str = concat!(
         checked = true;
         if (!seen(el, node, r0.left + r0.width / 2, r0.top + r0.height / 2)) break;
       }
+      // Taller than a line: the halving found a letter at this line's top
+      // further on, in the next column of text set in columns. Letter by
+      // letter, which breaks it where the page does.
+      if (r.bottom - r.top > r0.height * 1.6 + 1) { byLetter(s0, e, true); continue; }
       if (r.left < 0 || r.right > W) { byLetter(s0, e, true); continue; }
-      // Under a floating box, at the line's start, middle and end: none of
-      // it, all of it, or some, letter by letter.
+      // Under a floating box, or clipped, at the line's start, middle and
+      // end: none of it, all of it, or some, letter by letter.
       const middle = (r.top + r.bottom) / 2;
-      const hidden = [r.left + 1, (r.left + r.right) / 2, r.right - 1].map(x => covered(el, x, middle));
+      const hidden = [r.left + 1, (r.left + r.right) / 2, r.right - 1].map(x => gone(x, middle));
       if (hidden.every(Boolean)) continue;
       if (hidden.some(Boolean)) { byLetter(s0, e, true); continue; }
       const line = { text: '', l: r.left, t: r.top, r: r.right, b: r.bottom, chosen: [], n: 0 };
@@ -374,6 +436,10 @@ pub const READ_TEXT: &str = concat!(
         if (collapse && /\s/.test(ch)) {
           if (line.text.endsWith(' ')) continue;
           ch = ' ';
+        } else if (ch === '\u00ad') {
+          // A soft hyphen shows only where the page broke the line at it.
+          if (i < e) continue;
+          ch = '-';
         } else ch = cased(ch);
         if (picked) {
           const last = line.chosen[line.chosen.length - 1];
@@ -441,6 +507,12 @@ pub const SHOW_TEXT: &str = r#"(() => {
   for (const root of window.__kbHidden || []) {
     root.adoptedStyleSheets = root.adoptedStyleSheets.filter(sheet => sheet !== window.__kbHideText);
   }
+  for (const [el, [was, priority]] of window.__kbFilled || []) {
+    if (el.style.getPropertyValue('-webkit-text-fill-color') !== 'currentcolor') continue;
+    if (was) el.style.setProperty('-webkit-text-fill-color', was, priority);
+    else el.style.removeProperty('-webkit-text-fill-color');
+  }
+  delete window.__kbFilled;
   delete window.__kbHideText;
   delete window.__kbHidden;
   delete window.__kbTooMuch;
@@ -486,6 +558,9 @@ const TERMINAL_TYPE: &str = concat!(
     r#"`;
   const ICON_FACE = "#,
     icon_face!(),
+    r#";
+  const ICON_TEXT = "#,
+    icon_text!(),
     r#";
   const W = (__W__), H = (__H__), BUDGET = 15, began = performance.now();
   const FACE = 'ui-monospace, Menlo, "DejaVu Sans Mono", monospace';
@@ -541,12 +616,20 @@ const TERMINAL_TYPE: &str = concat!(
       }
     }
     snap.written.clear();
-    snap.done.clear();
+    snap.done = new WeakSet();
+    snap.scanned = new WeakSet();
     snap.boxes.clear();
   };
   const sheets = roots.reduce((n, root) => n + root.styleSheets.length, 0);
   const snap = window.__kbSnap
-    || (window.__kbSnap = { h: 0, sheets: 0, done: new Set(), boxes: new Map(), written: new Map(), iconQueue: new Set() });
+    || (window.__kbSnap = { h: 0, sheets: 0, done: new WeakSet(), boxes: new Map(), written: new Map(), iconQueue: new Set(), scanned: new WeakSet(), prune: 256 });
+  // What a page has taken out (a feed, a chat) isn't held on to: what kb
+  // wrote there is dropped once the records have doubled since last time.
+  if (snap.written.size > snap.prune) {
+    for (const el of snap.written.keys()) if (!el.isConnected) snap.written.delete(el);
+    for (const el of snap.iconQueue) if (!el.isConnected) snap.iconQueue.delete(el);
+    snap.prune = Math.max(256, snap.written.size * 2);
+  }
   if (snap.h !== H || snap.sheets !== sheets) {
     window.__kbUnsnap();
     snap.h = H;
@@ -578,9 +661,19 @@ const TERMINAL_TYPE: &str = concat!(
   // ligature's, or letters from the private use area), queued, and at most
   // every ICON_GAP.
   const ICON_GAP = 2000;
-  const iconish = el => [...el.childNodes].some(n => n.nodeType === 3 && /^\s*([a-z0-9_]{2,40}|[\ue000-\uf8ff]+)\s*$/.test(n.data));
+  // Text of its own, or, for an empty element, what its ::before or
+  // ::after puts there (an icon class like `icon-home` draws so).
+  const iconish = el => [...el.childNodes].some(n => n.nodeType === 3 && ICON_TEXT.test(n.data))
+    || (!el.firstElementChild && !/\S/.test(el.textContent)
+      && ['::before', '::after'].some(at => /[\ue000-\uf8ff]/.test(getComputedStyle(el, at).content)));
+  // Each element is looked at once, in a third of the time: the rest is
+  // for rounding, which must not wait on it.
   for (const el of fresh) {
-    if (!(el instanceof SVGElement) && iconish(el) && !el.closest(ICONS)) snap.iconQueue.add(el);
+    if (performance.now() - began > BUDGET / 3) break;
+    if (snap.scanned.has(el)) continue;
+    snap.scanned.add(el);
+    if (el instanceof SVGElement || el.closest(ICONS) || !iconish(el)) continue;
+    snap.iconQueue.add(el);
   }
   if (snap.iconQueue.size && !(performance.now() - (snap.iconAt || -Infinity) < ICON_GAP)) {
     snap.iconAt = performance.now();
@@ -597,6 +690,7 @@ const TERMINAL_TYPE: &str = concat!(
       write(el, 'font-family', family);
       write(el, 'font-size', size);
       write(el, 'font-variant-ligatures', 'normal');
+      write(el, '-webkit-text-fill-color', 'currentcolor');
     }
   }
 
@@ -659,10 +753,15 @@ const TERMINAL_TYPE: &str = concat!(
   // rows, every time, as a picture's height changes when it loads.
   const margins = [];
   for (const [el, margin] of snap.boxes) {
-    const height = el.isConnected ? el.getBoundingClientRect().height : 0;
+    if (!el.isConnected) {
+      snap.boxes.delete(el);
+      continue;
+    }
+    const height = el.getBoundingClientRect().height;
     if (height < H) continue;
     const want = Math.ceil((height + margin - 0.5) / H) * H - height;
-    if (Math.abs(want - (parseFloat(el.style.marginBottom) || margin)) > 0.01) margins.push([el, want]);
+    const now = el.style.marginBottom === '' ? margin : parseFloat(el.style.marginBottom);
+    if (Math.abs(want - now) > 0.01) margins.push([el, want]);
   }
   for (const [el, want] of margins) write(el, 'margin-bottom', `${want}px`);
 })()"#
@@ -1060,22 +1159,18 @@ impl AsciiPage {
         let (mut fg, mut bg) = (None, None);
         let mut next = None;
         let width = self.cols as usize;
-        for &i in at {
-            let mut i = i;
+        for (k, &i) in at.iter().enumerate() {
             let mut cell = self.shown[i];
+            // A wide letter and its right half go together. A half alone is
+            // the edge of a box being uncovered cutting the letter: it is a
+            // space, as the other half's cell is the box's, still drawn.
             if cell.ch == CONTINUED {
-                // Written with the wide letter before it, or, alone (the
-                // edge of a box being uncovered), the letter again.
                 if next == Some(i + 1) {
                     continue;
                 }
-                match i % width > 0 && cell_width(self.shown[i - 1].ch) == 2 {
-                    true => {
-                        i -= 1;
-                        cell = self.shown[i];
-                    }
-                    false => cell.ch = ' ',
-                }
+                cell.ch = ' ';
+            } else if cell_width(cell.ch) == 2 && at.get(k + 1) != Some(&(i + 1)) {
+                cell.ch = ' ';
             }
             if next != Some(i) {
                 let _ = write!(s, "\x1b[{};{}H", self.top as usize + i / width, i % width + 1);
@@ -1296,8 +1391,12 @@ fn letter_rects(rows: &[&str; 6]) -> Vec<[u8; 4]> {
 /// are better left to the pixels. Wide letters (CJK) take two.
 pub(crate) fn cell_width(ch: char) -> usize {
     let c = ch as u32;
-    let zero =
-        matches!(c, 0x300..=0x36F | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0xFE00..=0xFE0F | 0xFEFF);
+    // Of no width: combining marks, joiners, direction marks, and the soft
+    // hyphen, which shows only where the page breaks a line at it.
+    let zero = matches!(
+        c,
+        0xAD | 0x300..=0x36F | 0x61C | 0x180E | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0xFE00..=0xFE0F | 0xFEFF
+    );
     let wide = matches!(
         c,
         0x1100..=0x115F
@@ -1525,10 +1624,15 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         assert_eq!(out.matches('字').count(), 1, "{out:?}");
         assert!(!out.contains('\0'), "{out:?}");
-        // Uncovering the letter's right half alone draws the whole letter.
-        let mut again = Vec::new();
-        page.repaint(&mut again, crate::ui::Rect { col: 2, row: 1, width: 1, height: 1 });
-        assert!(String::from_utf8(again).unwrap().contains("\x1b[1;1H"));
+        // Uncovering one half alone, at a box's edge, draws a space there
+        // and leaves the cell beyond the edge alone.
+        for col in [1, 2] {
+            let mut again = Vec::new();
+            page.repaint(&mut again, crate::ui::Rect { col, row: 1, width: 1, height: 1 });
+            let again = String::from_utf8(again).unwrap();
+            assert!(!again.contains('字') && again.contains(&format!("\x1b[1;{col}H")), "{again:?}");
+            assert!(!again.contains(&format!("\x1b[1;{}H", 3 - col)), "{again:?}");
+        }
     }
 
     #[test]
@@ -1614,7 +1718,7 @@ mod tests {
     #[test]
     fn only_letters_of_one_cell_are_drawn_as_letters() {
         assert!(['a', 'é', '—'].iter().all(|&ch| cell_width(ch) == 1));
-        assert!(['\x1b', '\u{9b}', '\u{202e}', '\0'].iter().all(|&ch| cell_width(ch) == 0));
+        assert!(['\x1b', '\u{9b}', '\u{202e}', '\0', '\u{ad}', '\u{2028}'].iter().all(|&ch| cell_width(ch) == 0));
         assert!(['😀', '\u{301}', 'ذ', 'ש'].iter().all(|&ch| cell_width(ch) == 0));
         assert!(['漢', 'ん', '한', '，'].iter().all(|&ch| cell_width(ch) == 2));
     }
