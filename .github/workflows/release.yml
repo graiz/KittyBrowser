@@ -1,6 +1,6 @@
 name: Release
 
-# Builds kb for macOS and Linux when a version tag is pushed (git tag v0.2.0
+# Builds kb for macOS, Linux and Windows when a version tag is pushed (git tag v0.2.0
 # && git push --tags), so people can install it without Rust. install.sh
 # downloads from here. Run by hand, it only builds, to check the builds work.
 
@@ -31,6 +31,10 @@ jobs:
             os: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -41,16 +45,30 @@ jobs:
       # by another workflow can't end up in it.
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           name=kb-${{ matrix.target }}
           mkdir "$name"
           cp target/${{ matrix.target }}/release/kb README.md LICENSE "$name"/
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = 'kb-${{ matrix.target }}'
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item 'target\${{ matrix.target }}\release\kb.exe', README.md, LICENSE -Destination $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content "$name.zip.sha256" -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
           name: kb-${{ matrix.target }}
-          path: kb-${{ matrix.target }}.tar.gz*
+          path: |
+            kb-${{ matrix.target }}.tar.gz*
+            kb-${{ matrix.target }}.zip*
 
   publish:
     needs: build
@@ -65,5 +83,7 @@ jobs:
       # Pinned: it runs with write access to the repository.
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: kb-*.tar.gz*
+          files: |
+            kb-*.tar.gz*
+            kb-*.zip*
           generate_release_notes: true

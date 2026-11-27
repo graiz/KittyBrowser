@@ -30,8 +30,34 @@ const FILES: [&str; 6] = [".netrc", ".npmrc", ".pypirc", ".git-credentials", ".p
 /// Why `path` looks secret, as words to finish "it holds ...", or None.
 pub fn sensitive(path: &Path) -> Option<String> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_owned());
-    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+    #[cfg(windows)]
+    if let Ok(data) = crate::platform::windows::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData) {
+        let data = data.canonicalize().unwrap_or(data);
+        for folder in [
+            "KittyBrowser",
+            "Google/Chrome/User Data",
+            "Microsoft/Edge/User Data",
+            "Chromium/User Data",
+            "BraveSoftware/Brave-Browser/User Data",
+        ] {
+            if windows_under(&path, &data.join(folder)) {
+                return Some("it is in a browser profile, with cookies and saved passwords".to_owned());
+            }
+        }
+    }
+    if let Some(home) = crate::platform::home() {
         let home = home.canonicalize().unwrap_or(home);
+        #[cfg(windows)]
+        for (folder, what) in FOLDERS {
+            if windows_under(&path, &home.join(folder)) {
+                return Some(format!("it is in ~/{folder}, {what}"));
+            }
+        }
+        #[cfg(windows)]
+        if FILES.iter().any(|file| windows_text(&path) == windows_text(&home.join(file))) {
+            return Some("it holds passwords or tokens".to_owned());
+        }
+        #[cfg(unix)]
         if let Ok(rest) = path.strip_prefix(&home) {
             for (folder, what) in FOLDERS {
                 if rest.starts_with(folder) {
@@ -45,8 +71,8 @@ pub fn sensitive(path: &Path) -> Option<String> {
     }
     // Browser profiles anywhere: cookies and saved passwords.
     let name = path.file_name().map_or(String::new(), |name| name.to_string_lossy().to_lowercase());
-    let text = path.to_string_lossy();
-    let in_profile = ["/Google/Chrome/", "/google-chrome/", "/Chromium/", "/chromium/", "/BraveSoftware/"]
+    let text = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    let in_profile = ["/google/chrome/", "/google-chrome/", "/chromium/", "/bravesoftware/", "/microsoft/edge/"]
         .iter()
         .any(|folder| text.contains(folder));
     if in_profile && ["cookies", "login data", "web data"].contains(&name.as_str()) {
@@ -79,18 +105,43 @@ fn looks_like_private_key(path: &Path) -> bool {
     start.trim_start().starts_with("-----BEGIN") && start.contains("PRIVATE KEY")
 }
 
+#[cfg(windows)]
+fn windows_text(path: &Path) -> String {
+    path.to_string_lossy().trim_start_matches(r"\\?\").replace('\\', "/").to_lowercase()
+}
+
+#[cfg(windows)]
+fn windows_under(path: &Path, folder: &Path) -> bool {
+    let text = windows_text(path);
+    let folder = windows_text(folder);
+    text == folder || text.strip_prefix(&folder).is_some_and(|rest| rest.starts_with('/'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn credentials_under_home_are_sensitive() {
-        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return };
+        let Some(home) = crate::platform::home() else { return };
         assert!(sensitive(&home.join(".ssh/config")).unwrap().contains("ssh keys"));
         assert!(sensitive(&home.join(".aws/credentials")).is_some());
         assert!(sensitive(&home.join(".kittybrowser/profile/Cookies")).is_some());
         assert!(sensitive(&home.join(".netrc")).is_some());
         assert!(sensitive(&home.join("Documents/report.pdf")).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_profiles_and_case_insensitive_credentials_are_sensitive() {
+        let home = crate::platform::home().unwrap();
+        assert!(sensitive(&home.join(".SSH").join("config")).is_some());
+        let local =
+            crate::platform::windows::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData).unwrap();
+        assert!(sensitive(&local.join("KITTYBROWSER").join("profile").join("Cookies")).is_some());
+        assert!(sensitive(&local.join("Microsoft").join("Edge").join("User Data").join("Local State")).is_some());
+        assert!(sensitive(&local.join("KittyBrowser-backup.txt")).is_none());
+        assert!(sensitive(Path::new(r"C:\other\Microsoft\Edge\User Data\Default\Cookies")).is_some());
     }
 
     #[test]

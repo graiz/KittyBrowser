@@ -87,7 +87,28 @@ impl Splash {
         }
         out.extend_from_slice(b"\x1b[0m");
 
-        if let Ok(path) = graphics::write_frame(&pixels.data) {
+        if crate::term::graphics() == crate::term::Graphics::Sixel {
+            let result =
+                crate::term::sixel::scale(pixels, width as u32 * cell.0, height as u32 * cell.1).and_then(|logo| {
+                    let mut canvas = Pixels {
+                        width: cols as u32 * cell.0,
+                        height: rows as u32 * cell.1,
+                        alpha: false,
+                        data: vec![0; cols as usize * cell.0 as usize * rows as usize * cell.1 as usize * 3],
+                    };
+                    crate::term::sixel::overlay(
+                        &mut canvas,
+                        &logo,
+                        (col - 1) as u32 * cell.0,
+                        (row - top) as u32 * cell.1,
+                        1.0,
+                    );
+                    crate::term::sixel::draw(out, &canvas, (top - 1) as u32 * cell.1)
+                });
+            if let Err(error) = result {
+                eprintln!("kb: couldn't draw the splash: {error}");
+            }
+        } else if let Ok(path) = graphics::write_frame(&pixels.data) {
             out.extend_from_slice(format!("\x1b[{row};{col}H").as_bytes());
             graphics::put_image_file(out, &path, pixels, ID, width, height);
         }
@@ -102,14 +123,21 @@ impl Splash {
     /// Append the escape that takes the logo away, leaving its black: it is
     /// an image above the text, so it would cover a box drawn over it.
     pub fn hide(out: &mut Vec<u8>) {
-        out.extend_from_slice(format!("\x1b_Ga=d,d=I,i={ID},q=2\x1b\\").as_bytes());
+        if crate::term::graphics() == crate::term::Graphics::Sixel {
+            out.extend_from_slice(b"\x1b[2;1H\x1b[J");
+        } else {
+            out.extend_from_slice(format!("\x1b_Ga=d,d=I,i={ID},q=2\x1b\\").as_bytes());
+        }
     }
 
     /// Append the escapes that remove the logo and its black, from the row
     /// `top` down. The page is drawn under cells with a colour of their own,
     /// so they must go before it can show.
     pub fn remove(out: &mut Vec<u8>, top: u16) {
-        out.extend_from_slice(format!("\x1b_Ga=d,d=I,i={ID},q=2\x1b\\\x1b[0m\x1b[{top};1H\x1b[J").as_bytes());
+        if crate::term::graphics() == crate::term::Graphics::Kitty {
+            Self::hide(out);
+        }
+        out.extend_from_slice(format!("\x1b[0m\x1b[{top};1H\x1b[J").as_bytes());
     }
 }
 

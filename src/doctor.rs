@@ -14,6 +14,7 @@ pub const TERMINALS: &[(&str, &str)] = &[
     ("kitty", "https://sw.kovidgoyal.net/kitty"),
     ("WezTerm", "https://wezterm.org"),
     ("Rex", "https://www.superlogical.com"),
+    ("Windows Terminal", "https://aka.ms/terminal"),
 ];
 
 /// How long kb waits for the terminal to say whether it draws kitty
@@ -65,6 +66,9 @@ fn terminal_name(program: Option<&str>, term: &str, rex: bool) -> Option<String>
 }
 
 fn terminal_name_here() -> Option<String> {
+    if std::env::var_os("WT_SESSION").is_some() {
+        return Some("Windows Terminal".to_owned());
+    }
     terminal_name(
         std::env::var("TERM_PROGRAM").ok().as_deref(),
         &std::env::var("TERM").unwrap_or_default(),
@@ -94,7 +98,7 @@ fn why_no_graphics(multiplexer: Option<&str>, terminal: Option<&str>) -> String 
     let this = terminal.filter(|name| !TERMINALS.iter().any(|(known, _)| known == name)).unwrap_or("this terminal");
     format!(
         "kb draws real web pages in your terminal, pixel for pixel, using the\n\
-         kitty graphics protocol, and {this} doesn't support it.\n\
+         kitty graphics protocol or Sixel, and {this} doesn't support it.\n\
          Run kb in a terminal that does:"
     )
 }
@@ -125,7 +129,7 @@ pub fn no_graphics() -> String {
 /// or no answer, means no.
 pub fn ask_for_ascii() -> bool {
     use std::io::Write;
-    eprint!("{}Kitty graphics isn't available here. Fall back to ASCII mode? [Y/n] ", no_graphics());
+    eprint!("{}Kitty graphics and Sixel aren't available here. Fall back to ASCII mode? [Y/n] ", no_graphics());
     let _ = std::io::stderr().flush();
     let mut answer = String::new();
     match std::io::stdin().read_line(&mut answer) {
@@ -168,18 +172,18 @@ pub fn run() -> i32 {
         Some(multiplexer) => report.note("terminal", &format!("{name}, through {multiplexer}")),
         None => report.note("terminal", &name),
     }
-    let terminal = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
+    let terminal = crate::term::is_terminal();
     let draws = crate::term::draws_graphics(ASK_DOCTOR);
     match (draws, multiplexer_here()) {
-        (Some(true), _) => report.ok("graphics", "the terminal draws kitty graphics"),
+        (Some(true), _) => report.ok("graphics", &format!("the terminal draws {:?}", crate::term::graphics())),
         (Some(false), Some(name)) => report.note(
             "graphics",
-            &format!("{name} doesn't pass kitty graphics on, so kb draws pages in characters; run kb outside it"),
+            &format!("{name} doesn't pass graphics on, so kb draws pages in characters; run kb outside it"),
         ),
         (Some(false), None) => report.note(
             "graphics",
             &format!(
-                "the terminal doesn't draw kitty graphics, so kb draws pages in characters; {} draw pixels",
+                "the terminal doesn't draw Kitty graphics or Sixel, so kb draws pages in characters; {} draw pixels",
                 terminal_list()
             ),
         ),
@@ -208,21 +212,27 @@ pub fn run() -> i32 {
             let probe = dir.join(".doctor");
             match std::fs::write(&probe, "") {
                 Ok(()) => {
+                    #[cfg(unix)]
                     use std::os::unix::fs::PermissionsExt;
                     let _ = std::fs::remove_file(&probe);
-                    let mode = std::fs::metadata(&dir).map_or(0o700, |file| file.permissions().mode() & 0o777);
-                    if mode & 0o077 == 0 {
-                        report.ok("data", &dir.display().to_string());
-                    } else {
-                        report.note(
-                            "data",
-                            &format!(
-                                "{} is mode {mode:o}, and this filesystem won't let kb make it private: other \
+                    #[cfg(unix)]
+                    {
+                        let mode = std::fs::metadata(&dir).map_or(0o700, |file| file.permissions().mode() & 0o777);
+                        if mode & 0o077 == 0 {
+                            report.ok("data", &dir.display().to_string());
+                        } else {
+                            report.note(
+                                "data",
+                                &format!(
+                                    "{} is mode {mode:o}, and this filesystem won't let kb make it private: other \
                                  users may reach your sign-ins and kb's socket, which runs script in your pages",
-                                dir.display()
-                            ),
-                        );
+                                    dir.display()
+                                ),
+                            );
+                        }
                     }
+                    #[cfg(windows)]
+                    report.ok("data", &format!("{} (current-user ACL)", dir.display()));
                 }
                 Err(error) => report.fail("data", &format!("can't write in {}: {error}", dir.display())),
             }
@@ -282,7 +292,7 @@ mod tests {
         // Ghostty's name, passed on through something kb didn't recognise.
         assert!(why_no_graphics(None, Some("Ghostty")).contains("and this terminal doesn't"));
         assert!(why_no_graphics(Some("Zellij"), Some("Ghostty")).contains("inside Zellij,"));
-        assert_eq!(terminal_list(), "Ghostty, kitty, WezTerm or Rex");
+        assert_eq!(terminal_list(), "Ghostty, kitty, WezTerm, Rex or Windows Terminal");
     }
 
     #[test]

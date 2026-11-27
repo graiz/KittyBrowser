@@ -10,7 +10,6 @@
 use crate::engine::chrome::{Chrome, PageEvent};
 use crate::term::size::{self, Window};
 use crate::term::{self, graphics};
-use std::io::Read;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -45,6 +44,7 @@ enum Transfer {
     /// As `Layers`, with the pixels left in files: what kb itself does
     /// when the terminal reads files.
     LayersByFile,
+    Sixel,
 }
 
 struct Mode {
@@ -54,6 +54,7 @@ struct Mode {
 }
 
 const MODES: &[Mode] = &[
+    Mode { name: "png, whole Sixel frames", source: Source::Png, transfer: Transfer::Sixel },
     Mode { name: "png through the pty", source: Source::Png, transfer: Transfer::Pty },
     Mode { name: "png, moved layers through the pty", source: Source::Png, transfer: Transfer::Layers },
     Mode { name: "png, moved layers by file", source: Source::Png, transfer: Transfer::LayersByFile },
@@ -96,6 +97,8 @@ struct Bench {
     replies: Vec<u8>,
     /// Errors the terminal reported for images.
     errors: usize,
+    parser: crate::term::input::Parser,
+    cell: Option<(u32, u32)>,
 }
 
 impl Bench {
@@ -106,6 +109,11 @@ impl Bench {
         match self.rx.recv_timeout(wait) {
             Ok(Msg::Chrome(message)) => Ok(self.chrome.handle(message)),
             Ok(Msg::Term(bytes)) => {
+                for event in self.parser.feed(&bytes) {
+                    if let crate::term::input::Event::CellSize { width, height } = event {
+                        self.cell = Some((width, height));
+                    }
+                }
                 self.replies.extend_from_slice(&bytes);
                 Ok(None)
             }
@@ -210,15 +218,20 @@ fn measure(url: &str, steps: usize, scale: f64, scene: Scene, modes: Option<&str
     });
     std::thread::spawn(move || {
         let mut buf = [0; 4096];
-        let mut stdin = std::io::stdin().lock();
-        while let Ok(n) = stdin.read(&mut buf) {
-            if n == 0 || tx.send(Msg::Term(buf[..n].to_vec())).is_err() {
-                return;
+        loop {
+            match term::read_input(&mut buf, Duration::from_millis(50)) {
+                Ok(Some(n)) if n > 0 => {
+                    if tx.send(Msg::Term(buf[..n].to_vec())).is_err() {
+                        return;
+                    }
+                }
+                Ok(None) => {}
+                _ => return,
             }
         }
     });
 
-    let mut bench = Bench { chrome, rx, replies: Vec::new(), errors: 0 };
+    let mut bench = Bench { chrome, rx, replies: Vec::new(), errors: 0, parser: Default::default(), cell: None };
     // Chrome is closed and its profile removed however this ends.
     let report = run_modes(&mut bench, url, steps, scale, scene, modes);
     bench.chrome.close();
@@ -237,7 +250,11 @@ fn run_modes(
     modes: Option<&str>,
 ) -> Result<String, String> {
     let window = settled_window()?;
-    let (cell_w, cell_h) = if window.width_px > 0 && window.height_px > 0 {
+    term::write(b"\x1b[16t\x1b[5n");
+    bench.answered(Duration::from_secs(5))?;
+    let (cell_w, cell_h) = if let Some(cell) = bench.cell {
+        cell
+    } else if window.width_px > 0 && window.height_px > 0 {
         ((window.width_px / window.cols) as u32, (window.height_px / window.rows) as u32)
     } else {
         (16, 34)
@@ -268,7 +285,10 @@ fn run_modes(
         "wire KB"
     );
     let (x, y) = (viewport.0 as f64 / 2.0, viewport.1 as f64 / 2.0);
-    for mode in MODES.iter().filter(|mode| modes.is_none_or(|word| mode.name.contains(word))) {
+    for mode in MODES.iter().filter(|mode| {
+        (matches!(mode.transfer, Transfer::Sixel) == (term::graphics() == term::Graphics::Sixel))
+            && modes.is_none_or(|word| mode.name.contains(word))
+    }) {
         bench.chrome.stop_screencast();
         if scene == Scene::Scroll {
             bench.chrome.evaluate("scrollTo(0, 0)");
@@ -305,6 +325,13 @@ fn run_modes(
 
             let mut out = b"\x1b[2;1H".to_vec();
             match mode.transfer {
+                Transfer::Sixel => {
+                    let pixels = crate::base64::decode(&data)
+                        .and_then(|bytes| graphics::decode_png(&bytes, Vec::new()))
+                        .ok_or("couldn't decode a frame")?;
+                    let pixels = term::sixel::scale(&pixels, width_px, height_px)?;
+                    term::sixel::draw(&mut out, &pixels, cell_h)?;
+                }
                 Transfer::Pty => graphics::put_png(&mut out, &data, cols, rows),
                 Transfer::Layers | Transfer::LayersByFile => {
                     layers.by_file(mode.transfer == Transfer::LayersByFile);
@@ -441,6 +468,10 @@ pub fn run(words: &[String]) -> i32 {
         }
     }
 
+    if term::draws_graphics(crate::doctor::ASK_KB) == Some(false) {
+        eprint!("{}", crate::doctor::no_graphics());
+        return 1;
+    }
     if let Err(error) = term::enter() {
         eprintln!("kb bench: {error}");
         return 1;

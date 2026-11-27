@@ -19,7 +19,10 @@ static WIPES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0
 /// Append the escape that drops every image, their data too.
 pub fn delete_all(out: &mut Vec<u8>) {
     WIPES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    out.extend_from_slice(DELETE);
+    match super::graphics() {
+        super::Graphics::Kitty => out.extend_from_slice(DELETE),
+        super::Graphics::Sixel => out.extend_from_slice(b"\x1b[2J"),
+    }
 }
 
 /// How many times every image has been dropped.
@@ -127,6 +130,7 @@ impl Frames {
             let folder = match &self.folder {
                 Some(folder) => folder,
                 None => {
+                    #[cfg(unix)]
                     sweep(&std::env::temp_dir());
                     let prefix = format!("{FRAMES_PREFIX}{}-", std::process::id());
                     self.folder.insert(crate::files::private_temp_dir(&prefix)?)
@@ -164,6 +168,7 @@ const FRAMES_PREFIX: &str = "tty-graphics-protocol-kb-";
 /// user's own, and nothing a running kb is using: a kb in a container
 /// sharing /tmp has process ids of its own, so a folder written to in the
 /// last `SWEEP_AFTER` is left too.
+#[cfg(unix)]
 fn sweep(dir: &std::path::Path) {
     use std::os::unix::fs::MetadataExt;
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -184,15 +189,18 @@ fn sweep(dir: &std::path::Path) {
 }
 
 /// How long frames sit unchanged before the sweep takes them.
+#[cfg(unix)]
 const SWEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// The process id in a frame folder or file's name, if it is one.
+#[cfg(unix)]
 fn run_of(name: &str) -> Option<i32> {
     let pid: i32 = name.strip_prefix(FRAMES_PREFIX)?.split('-').next()?.parse().ok()?;
     (pid > 0).then_some(pid)
 }
 
 /// Whether process `pid` is running, someone else's included.
+#[cfg(unix)]
 fn running(pid: i32) -> bool {
     pid as u32 == std::process::id()
         || unsafe { libc::kill(pid, 0) } == 0
@@ -331,6 +339,7 @@ pub fn png_size(png_base64: &str) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn decodes_png_and_jpeg() {
         let png = decode_png(include_bytes!("../../assets/logo.png"), Vec::new()).expect("the logo decodes");
@@ -372,6 +381,7 @@ mod tests {
         assert_eq!(escapes[2], "\x1b_Gm=0;AAAAAAAA");
     }
 
+    #[cfg(unix)]
     #[test]
     fn frames_are_private_and_go_with_their_folder() {
         use std::os::unix::fs::PermissionsExt;
@@ -411,6 +421,7 @@ mod tests {
         drop(held);
     }
 
+    #[cfg(unix)]
     #[test]
     fn frames_of_runs_that_are_over_are_swept() {
         assert_eq!(run_of("tty-graphics-protocol-kb-123-aZ09xy"), Some(123));

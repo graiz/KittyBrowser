@@ -1,5 +1,5 @@
 //! Decodes what the terminal sends: keys, mouse reports (SGR encoding, in
-//! cells or pixels), pastes, and replies to our queries.
+//! cells or pixels), Win32 keyboard reports, pastes, and replies to our queries.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KeyCode {
@@ -73,6 +73,8 @@ pub struct Mouse {
     /// 1-based, in cells or in pixels depending on the mode in effect.
     pub x: u32,
     pub y: u32,
+    /// Native console coordinates are cells even if VT reports use pixels.
+    pub cell_coordinates: bool,
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
@@ -87,7 +89,7 @@ impl Mouse {
         let (MouseKind::Wheel(x, y), MouseKind::Wheel(next_x, next_y)) = (self.kind, next.kind) else {
             return None;
         };
-        let same = |mouse: &Mouse| (mouse.x, mouse.y, mouse.ctrl, mouse.alt, mouse.shift);
+        let same = |mouse: &Mouse| (mouse.x, mouse.y, mouse.cell_coordinates, mouse.ctrl, mouse.alt, mouse.shift);
         (same(self) == same(next)).then_some(Mouse { kind: MouseKind::Wheel(x + next_x, y + next_y), ..*self })
     }
 }
@@ -128,6 +130,7 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 pub struct Parser {
     buf: Vec<u8>,
     pasting: bool,
+    win32_surrogate: Option<u16>,
 }
 
 impl Parser {
@@ -143,6 +146,17 @@ impl Parser {
         }
         self.buf.drain(..pos);
         events
+    }
+
+    /// After an input timeout, a lone Esc is a key rather than the start of
+    /// a sequence split across reads.
+    pub fn flush_escape(&mut self) -> Option<Event> {
+        if !self.pasting && self.buf == b"\x1b" {
+            self.buf.clear();
+            Some(Event::Key(Key::plain(KeyCode::Esc)))
+        } else {
+            None
+        }
     }
 
     /// Decode one item at `pos`, returning how many bytes it used, or `None`
@@ -161,8 +175,8 @@ impl Parser {
             return Some(used);
         }
         match rest.get(1) {
-            // Nothing follows in this read, so it's the Esc key itself.
-            None | Some(0x1b) => {
+            None => None,
+            Some(0x1b) => {
                 events.push(Event::Key(Key::plain(KeyCode::Esc)));
                 Some(1)
             }
@@ -171,6 +185,10 @@ impl Parser {
                 let body = std::str::from_utf8(&rest[2..end]).unwrap_or("");
                 if body == "200" && rest[end] == b'~' {
                     self.pasting = true;
+                } else if rest[end] == b'_' {
+                    if let Some((key, repeat)) = win32_key(body, &mut self.win32_surrogate) {
+                        events.extend(std::iter::repeat_n(Event::Key(key), repeat as usize));
+                    }
                 } else {
                     events.extend(csi(body, rest[end]));
                 }
@@ -233,6 +251,71 @@ impl Parser {
             }
         }
     }
+}
+
+/// Win32 input mode carries VK;scan;UTF-16;down;control-state;repeat.
+fn win32_key(body: &str, surrogate: &mut Option<u16>) -> Option<(Key, u16)> {
+    let mut fields = body.split(';').map(|n| n.parse::<u32>().ok());
+    let vk = u16::try_from(fields.next()??).ok()?;
+    let _scan = u16::try_from(fields.next()??).ok()?;
+    let unit = u16::try_from(fields.next()??).ok()?;
+    let down = fields.next()??;
+    let state = fields.next()??;
+    let repeat = u16::try_from(fields.next()??).ok()?;
+    if fields.next().is_some() || down != 1 || repeat == 0 {
+        return None;
+    }
+    let (mut ctrl, mut alt, shift) = (state & 12 != 0, state & 3 != 0, state & 16 != 0);
+    // Windows uses Ctrl+Alt for AltGr characters on international keyboards.
+    if ctrl && alt && unit > 32 && unit != 127 {
+        ctrl = false;
+        alt = false;
+    }
+    let code = match vk {
+        8 => KeyCode::Backspace,
+        9 if shift => KeyCode::BackTab,
+        9 => KeyCode::Tab,
+        13 => KeyCode::Enter,
+        27 => KeyCode::Esc,
+        33 => KeyCode::PageUp,
+        34 => KeyCode::PageDown,
+        35 => KeyCode::End,
+        36 => KeyCode::Home,
+        37 => KeyCode::Left,
+        38 => KeyCode::Up,
+        39 => KeyCode::Right,
+        40 => KeyCode::Down,
+        46 => KeyCode::Delete,
+        112..=123 => KeyCode::F((vk - 111) as u8),
+        _ => match unit {
+            0 if vk == 32 => KeyCode::Char(' '),
+            0 if (ctrl || alt) && (65..=90).contains(&vk) => KeyCode::Char((vk as u8 + 32) as char),
+            0 => return None,
+            8 | 127 => KeyCode::Backspace,
+            9 if shift => KeyCode::BackTab,
+            9 => KeyCode::Tab,
+            13 => KeyCode::Enter,
+            27 => KeyCode::Esc,
+            1..=26 => {
+                ctrl = true;
+                KeyCode::Char((unit as u8 - 1 + b'a') as char)
+            }
+            0xd800..=0xdbff => {
+                *surrogate = Some(unit);
+                return None;
+            }
+            _ => {
+                let point = match surrogate.take() {
+                    Some(high) if (0xdc00..=0xdfff).contains(&unit) => {
+                        0x10000 + ((high as u32 - 0xd800) << 10) + unit as u32 - 0xdc00
+                    }
+                    _ => unit as u32,
+                };
+                KeyCode::Char(char::from_u32(point).unwrap_or(char::REPLACEMENT_CHARACTER))
+            }
+        },
+    };
+    Some((Key { code, ctrl, alt, shift, cmd: false }, repeat))
 }
 
 /// A key that isn't an escape sequence: a control byte or one UTF-8
@@ -372,7 +455,16 @@ fn mouse(report: &str, pressed: bool) -> Option<Event> {
     } else {
         (MouseKind::Release, button)
     };
-    Some(Event::Mouse(Mouse { kind, button, x, y, shift: bits & 4 != 0, alt: bits & 8 != 0, ctrl: bits & 16 != 0 }))
+    Some(Event::Mouse(Mouse {
+        kind,
+        button,
+        x,
+        y,
+        cell_coordinates: false,
+        shift: bits & 4 != 0,
+        alt: bits & 8 != 0,
+        ctrl: bits & 16 != 0,
+    }))
 }
 
 #[cfg(test)]
@@ -439,7 +531,64 @@ mod tests {
 
     #[test]
     fn lone_escape_is_the_esc_key() {
-        assert_eq!(parse(b"\x1b"), [key(KeyCode::Esc)]);
+        let mut parser = Parser::default();
+        assert_eq!(parser.feed(b"\x1b"), []);
+        assert_eq!(parser.flush_escape(), Some(key(KeyCode::Esc)));
+        assert_eq!(parser.flush_escape(), None);
+        assert_eq!(parser.feed(b"\x1b["), []);
+        assert_eq!(parser.flush_escape(), None);
+        assert_eq!(parser.feed(b"A"), [key(KeyCode::Up)]);
+    }
+
+    #[test]
+    fn win32_keyboard_reports_preserve_keys_modifiers_and_repeats() {
+        assert_eq!(
+            parse(
+                b"\x1b[65;30;97;1;0;2_\x1b[65;30;97;0;0;1_\
+                \x1b[76;38;12;1;8;1_\x1b[37;75;0;1;0;1_\
+                \x1b[9;15;9;1;16;1_\x1b[89;21;0;1;2;1_\
+                \x1b[112;59;0;1;0;1_"
+            ),
+            [
+                key(KeyCode::Char('a')),
+                key(KeyCode::Char('a')),
+                Event::Key(Key { ctrl: true, ..Key::plain(KeyCode::Char('l')) }),
+                key(KeyCode::Left),
+                Event::Key(Key { shift: true, ..Key::plain(KeyCode::BackTab) }),
+                Event::Key(Key { alt: true, ..Key::plain(KeyCode::Char('y')) }),
+                key(KeyCode::F(1)),
+            ]
+        );
+        assert_eq!(parse(b"\x1b[16;42;0;1;16;1_\x1b[65;30;97;1;0;0_"), []);
+        assert_eq!(parse(b"\x1b[65;30;65536;1;0;1_\x1b[65;30;97;1;0;1;2_"), []);
+    }
+
+    #[test]
+    fn win32_keyboard_combines_surrogates_and_types_altgr_characters() {
+        assert_eq!(
+            parse(
+                b"\x1b[0;0;233;1;0;1_\x1b[0;0;55357;1;0;1_\
+                \x1b[0;0;55357;0;0;1_\x1b[0;0;56382;1;0;1_\
+                \x1b[81;16;64;1;9;1_"
+            ),
+            [key(KeyCode::Char('\u{e9}')), key(KeyCode::Char('\u{1f43e}')), key(KeyCode::Char('@'))]
+        );
+    }
+
+    #[test]
+    fn win32_and_mouse_reports_survive_every_read_boundary() {
+        let bytes = b"\x1b[65;30;97;1;0;1_\x1b[<0;12;3M\x1b[37;75;0;1;0;1_";
+        let expected = parse(bytes);
+        assert_eq!(expected.len(), 3);
+        for split in 1..bytes.len() {
+            let mut parser = Parser::default();
+            let mut events = parser.feed(&bytes[..split]);
+            events.extend(parser.feed(&bytes[split..]));
+            assert_eq!(events, expected, "split at {split}");
+        }
+        let mut parser = Parser::default();
+        let events: Vec<_> = bytes.iter().flat_map(|byte| parser.feed(&[*byte])).collect();
+        assert_eq!(events, expected);
     }
 
     #[test]
@@ -449,6 +598,7 @@ mod tests {
             button: Some(Button::Left),
             x: 12,
             y: 3,
+            cell_coordinates: false,
             ctrl: false,
             alt: false,
             shift: false,

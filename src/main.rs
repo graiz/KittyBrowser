@@ -14,6 +14,10 @@ mod dialog;
 mod doctor;
 mod downloads;
 mod engine;
+#[cfg(unix)]
+mod files;
+#[cfg(windows)]
+#[path = "files_windows.rs"]
 mod files;
 mod headless;
 mod history;
@@ -22,6 +26,7 @@ mod mcp;
 mod menu;
 mod modal;
 mod picker;
+mod platform;
 mod scroll;
 mod secrets;
 mod skill;
@@ -70,8 +75,14 @@ fn usage_error(message: &str) -> ! {
 /// can open it: the profile holds live sign-ins, and the socket runs script
 /// in them.
 pub fn data_dir() -> Result<std::path::PathBuf, String> {
+    #[cfg(unix)]
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    #[cfg(unix)]
     let dir = std::path::PathBuf::from(home).join(".kittybrowser");
+    #[cfg(windows)]
+    let dir = platform::windows::known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
+        .map_err(|e| format!("finding Local AppData: {e}"))?
+        .join("KittyBrowser");
     files::private_dir(&dir)?;
     Ok(dir)
 }
@@ -81,6 +92,7 @@ fn main() {
     // The subcommands print and exit, so a reader that stops early (kb list
     // | head) should end them quietly, as it would any Unix tool. Not the
     // browser: it writes to Chrome's pipe, and must outlive Chrome closing it.
+    #[cfg(unix)]
     if matches!(words.first().map(String::as_str), Some("ctl" | "list" | "keys" | "skill" | "mcp" | "doctor")) {
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     }

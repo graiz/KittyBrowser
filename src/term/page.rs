@@ -27,6 +27,7 @@ pub enum Route {
     /// Through the pty, whole PNG frames only (`KB_TRANSFER=png`): for a
     /// terminal with no more of the kitty protocol than that.
     Png,
+    Sixel,
 }
 
 /// The ways of drawing the page.
@@ -89,6 +90,23 @@ impl PageImage {
         cell: (u32, u32),
         top: u16,
     ) -> String {
+        if route == Route::Sixel {
+            let result = crate::base64::decode(png)
+                .and_then(|bytes| graphics::decode_png(&bytes, Vec::new()))
+                .ok_or_else(|| "couldn't decode Chrome's frame".to_owned())
+                .and_then(|pixels| {
+                    out.extend_from_slice(format!("\x1b[{top};1H").as_bytes());
+                    let pixels = super::sixel::scale(&pixels, cols as u32 * cell.0, rows as u32 * cell.1)?;
+                    super::sixel::draw(out, &pixels, (top.saturating_sub(1)) as u32 * cell.1)
+                });
+            return match result {
+                Ok(()) => "the whole frame, as Sixel".to_owned(),
+                Err(error) => {
+                    eprintln!("kb: couldn't draw the page: {error}");
+                    format!("Sixel failed: {error}")
+                }
+            };
+        }
         // Only what changed, when the frame lines up with the cells.
         // Otherwise (a fixed viewport, a frame from before a resize) one
         // image scaled to fit.

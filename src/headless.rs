@@ -14,6 +14,7 @@ use crate::devtools::{Devtools, Page};
 use crate::engine::chrome::{Chrome, PageEvent};
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -82,15 +83,25 @@ pub fn start(args: &[String]) -> Result<(), String> {
         .stderr(Stdio::piped());
     // Its own session: closing the terminal or pane that started it doesn't
     // stop it.
+    #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
             libc::setsid();
             Ok(())
         });
     }
-    let mut child = command.spawn().map_err(|e| format!("starting kb: {e}"))?;
+    #[cfg(unix)]
+    let (mut child, stdout, stderr) = {
+        let mut child = command.spawn().map_err(|e| format!("starting kb: {e}"))?;
+        let stdout = child.stdout.take().ok_or("no output from kb")?;
+        let stderr = child.stderr.take().ok_or("no errors from kb")?;
+        (child, stdout, stderr)
+    };
+    #[cfg(windows)]
+    let (mut child, stdout, stderr) =
+        crate::engine::chrome::windows::background(&command).map_err(|e| format!("starting kb: {e}"))?;
     let mut first = String::new();
-    let _ = BufReader::new(child.stdout.take().ok_or("no output from kb")?).read_line(&mut first);
+    let _ = BufReader::new(stdout).read_line(&mut first);
     let mut words = first.split_whitespace();
     let name = words.next().unwrap_or("").to_owned();
     // It says nothing on its output unless it started.
@@ -108,9 +119,7 @@ pub fn start(args: &[String]) -> Result<(), String> {
         }
         true => {
             let mut why = String::new();
-            if let Some(stderr) = child.stderr.take() {
-                let _ = BufReader::new(stderr).read_line(&mut why);
-            }
+            let _ = BufReader::new(stderr).read_line(&mut why);
             let _ = child.wait();
             let why = why.trim().trim_start_matches("kb: ");
             Err(if why.is_empty() { "kb didn't start".to_owned() } else { why.to_owned() })

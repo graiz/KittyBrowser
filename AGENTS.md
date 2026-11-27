@@ -13,7 +13,8 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-All four must pass before a change is done; CI runs them on macOS and Linux.
+All four must pass before a change is done; CI runs them on macOS, Linux,
+and Windows (x64 and ARM64).
 To check the Linux build from a Mac: `rustup target add
 x86_64-unknown-linux-gnu`, then `cargo clippy --target
 x86_64-unknown-linux-gnu -- -D warnings`.
@@ -68,7 +69,11 @@ tools/scroll/          replay a recorded scroll into kb and score it
   a reason the standard library can't meet, stated in the pull request.
 - **No async runtime.** Threads and channels; the app thread never blocks on
   Chrome. See "Agent tools" in docs/ARCHITECTURE.md for how commands wait.
-- **Unix only.** macOS and Linux; don't add code that breaks either.
+- **Native platforms.** macOS, Linux and Windows 11. Keep Unix and Win32
+  operations behind their platform gates; don't break another platform.
+  On Windows, `pwsh -File tests/windows-smoke.ps1` checks a debug build
+  against native Edge or Chrome. Graphical changes also need a check in
+  an updated Windows Terminal, which uses Sixel rather than Kitty images.
 - **Unit tests** go next to the code (`#[cfg(test)] mod tests`). Anything
   that parses or decides (input bytes, URLs, selectors, command arguments,
   sizes) should have them. Behaviour that needs Chrome is checked by hand in
@@ -125,3 +130,5 @@ bumps the patch.
 The control socket can run JavaScript in the user's logged-in pages. Keep it
 mode 0600 in the user's data directory, keep the MCP server off by default,
 and don't add ways to reach kb from the network.
+On Windows, use current-user DACLs and local-only named pipes; never replace
+private IPC with an unauthenticated local TCP port.

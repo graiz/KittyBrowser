@@ -8,11 +8,18 @@
 
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+#[path = "control_windows.rs"]
+mod windows;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
+#[cfg(windows)]
+use windows::{Listener as UnixListener, Stream as UnixStream};
 
 /// How long a client waits for the app to answer. Longer than the longest
 /// `wait` the app allows.
@@ -94,6 +101,7 @@ fn choose(text: &str) -> Result<Chosen, String> {
 }
 
 /// The longest path a Unix socket can have, less its terminating zero.
+#[cfg(unix)]
 fn longest_socket_path() -> usize {
     let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     address.sun_path.len() - 1
@@ -105,18 +113,45 @@ fn longest_socket_path() -> usize {
 #[derive(Clone, Debug)]
 pub struct Socket {
     path: PathBuf,
+    #[cfg(unix)]
     inode: u64,
+    #[cfg(windows)]
+    identity: (u32, u64),
 }
 
 impl Socket {
     pub fn remove(&self) {
+        #[cfg(unix)]
         if std::fs::metadata(&self.path).is_ok_and(|file| file.ino() == self.inode) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+        #[cfg(windows)]
+        if std::fs::File::open(&self.path)
+            .and_then(|file| crate::platform::windows::file_id(&file))
+            .is_ok_and(|identity| identity == self.identity)
+        {
             let _ = std::fs::remove_file(&self.path);
         }
     }
 }
 
 /// Listen on `socket`, readable only by the user.
+#[cfg(windows)]
+fn bind(socket: &std::path::Path) -> Result<(UnixListener, Socket), String> {
+    let listener = UnixListener::bind(socket).map_err(|e| format!("listening on {}: {e}", socket.display()))?;
+    match std::fs::remove_file(socket) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("removing stale {}: {e}", socket.display())),
+    }
+    let file = crate::files::write_new(socket, listener.endpoint().as_bytes(), 0o600)
+        .map_err(|e| format!("claiming {}: {e}", socket.display()))?;
+    let identity =
+        crate::platform::windows::file_id(&file).map_err(|e| format!("claiming {}: {e}", socket.display()))?;
+    Ok((listener, Socket { path: socket.to_owned(), identity }))
+}
+
+#[cfg(unix)]
 fn bind(socket: &std::path::Path) -> Result<(UnixListener, Socket), String> {
     let length = socket.as_os_str().len();
     if length > longest_socket_path() {
@@ -167,7 +202,12 @@ pub fn claim(name: Option<&str>) -> Result<Claim, String> {
     // Held until this returns, so two kbs starting together can't both
     // take the same number or name.
     let lock = std::fs::File::create(crate::data_dir()?.join("kb.lock")).map_err(|e| format!("locking: {e}"))?;
-    unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
+    #[cfg(unix)]
+    unsafe {
+        libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX)
+    };
+    #[cfg(windows)]
+    windows::lock(&lock).map_err(|e| format!("locking instances: {e}"))?;
 
     if let Some(name) = name {
         check_name(name)?;
@@ -217,11 +257,20 @@ impl Claim {
     /// returns false once the app has gone.
     pub fn listen(self, deliver: impl Fn(Request) -> bool + Send + Clone + 'static) {
         std::thread::spawn(move || {
-            for stream in self.listener.incoming().flatten() {
-                let deliver = deliver.clone();
-                std::thread::spawn(move || {
-                    let _ = serve(stream, deliver);
-                });
+            for stream in self.listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        let deliver = deliver.clone();
+                        std::thread::spawn(move || {
+                            if let Err(error) = serve(stream, deliver) {
+                                if error.kind() != io::ErrorKind::BrokenPipe {
+                                    eprintln!("kb: control connection failed: {error}");
+                                }
+                            }
+                        });
+                    }
+                    Err(error) => eprintln!("kb: accepting control connection: {error}"),
+                }
             }
         });
     }
@@ -307,7 +356,8 @@ fn places() -> Vec<Place> {
                 Chosen::Name(name) => named_socket(&name).ok()?,
                 Chosen::Number(n, _) => instance_socket(n).ok()?,
             };
-            let stream = UnixStream::connect(&socket).ok()?;
+            #[allow(unused_mut)]
+            let mut stream = UnixStream::connect(&socket).ok()?;
             stream.set_read_timeout(Some(WHERE_TIMEOUT)).ok()?;
             let Ok(Output::Text(text)) = exchange(stream, "where", json!({})) else { return None };
             let field = |name: &str| text.lines().find_map(|line| line.strip_prefix(name)).unwrap_or("").to_owned();
@@ -463,6 +513,7 @@ mod tests {
         assert_eq!(args, json!({"timeout": "2", "count": "1.5", "text": "done", "full": true}));
     }
 
+    #[cfg(unix)]
     #[test]
     fn long_socket_paths_are_refused_plainly() {
         let long = std::env::temp_dir().join("x".repeat(120)).join("kb.sock");
@@ -473,9 +524,24 @@ mod tests {
     fn the_socket_is_private() {
         let socket = std::env::temp_dir().join(format!("kb-socket-test-{}.sock", std::process::id()));
         let (_listener, bound) = bind(&socket).unwrap();
+        #[cfg(unix)]
         assert_eq!(std::fs::symlink_metadata(&socket).unwrap().mode() & 0o777, 0o600);
         bound.remove();
         assert!(!socket.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stale_claim_cannot_remove_its_replacement() {
+        let folder = crate::files::private_temp_dir("kb-claim-test-").unwrap();
+        let marker = folder.join("kb.sock");
+        let (_old_listener, old) = bind(&marker).unwrap();
+        let (_new_listener, new) = bind(&marker).unwrap();
+        old.remove();
+        assert!(marker.exists());
+        new.remove();
+        assert!(!marker.exists());
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     fn place(id: &str, pane: &str, session: &str) -> Place {

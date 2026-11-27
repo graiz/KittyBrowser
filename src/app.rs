@@ -214,6 +214,7 @@ fn picked(lines: &[String]) -> String {
 /// Set while an editor has the terminal, so that the input thread leaves
 /// the keys typed to it alone.
 static INPUT_PAUSED: AtomicBool = AtomicBool::new(false);
+static INPUT_GATE: Mutex<()> = Mutex::new(());
 
 /// The page's HTML as it is now, with its doctype, for View source.
 const SOURCE: &str = "(document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + \
@@ -563,7 +564,6 @@ fn browse(
     let input = tx.clone();
     std::thread::spawn(move || {
         let mut parser = Parser::default();
-        let mut buf = [0; 4096];
         loop {
             // While an editor has the terminal, its keys are its own. The
             // descriptor is read directly, with nothing buffered in between,
@@ -572,24 +572,31 @@ fn browse(
                 std::thread::sleep(Duration::from_millis(20));
                 continue;
             }
-            let mut ready = libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 };
-            if unsafe { libc::poll(&mut ready, 1, 50) } <= 0 || INPUT_PAUSED.load(Ordering::SeqCst) {
+            let gate = INPUT_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            if INPUT_PAUSED.load(Ordering::SeqCst) {
                 continue;
             }
-            let read = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
-            match usize::try_from(read) {
-                Ok(n) if n > 0 => {
-                    for event in parser.feed(&buf[..n]) {
+            match term::read_events(&mut parser, Duration::from_millis(50)) {
+                Ok(Some(events)) => {
+                    for event in events {
                         if let Event::Mouse(Mouse { kind: MouseKind::Wheel(dx, dy), x, y, .. }) = &event {
-                            crate::trace::event("tick", format_args!("{dx}\t{dy}\t{x},{y}\t{n} bytes"));
+                            crate::trace::event("tick", format_args!("{dx}\t{dy}\t{x},{y}"));
                         }
                         if input.send(Msg::Term(event)).is_err() {
                             return;
                         }
                     }
+                    drop(gate);
                 }
                 // Interrupted, as by a resize: read again.
-                Err(_) if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+                Ok(None) => {
+                    if let Some(event) = parser.flush_escape() {
+                        if input.send(Msg::Term(event)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 _ => {
                     let _ = input.send(Msg::TermClosed);
                     return;
@@ -709,8 +716,8 @@ fn browse(
     match std::env::var("KB_TRANSFER").as_deref() {
         Ok("png") => app.png_only = true,
         Ok("pty") => {}
-        _ if !app.graphics => {}
-        _ => app.file_query = graphics::ask_about_files(),
+        _ if app.graphics && term::graphics() == term::Graphics::Kitty => app.file_query = graphics::ask_about_files(),
+        _ => {}
     }
     app.chrome.hold_acks();
     app.chrome.start_screencast();
@@ -733,8 +740,11 @@ fn browse(
         if let Some(due) = app.glide.next_due(Instant::now()) {
             wait = wait.min(due.max(GLIDE_STEP.saturating_sub(app.glided.elapsed())));
         }
-        if let Some(splash_wait) =
-            app.splash.as_ref().filter(|_| app.by_file).and_then(|splash| splash.wait(app.loading))
+        if let Some(splash_wait) = app
+            .splash
+            .as_ref()
+            .filter(|_| app.by_file || term::graphics() == term::Graphics::Sixel)
+            .and_then(|splash| splash.wait(app.loading))
         {
             wait = wait.min(splash_wait);
         }
@@ -1075,7 +1085,9 @@ fn browse(
                 app.drawn_mark = term::mark();
             }
         }
-        if app.by_file && app.splash.as_ref().is_some_and(|splash| splash.due(app.loading)) {
+        if (app.by_file || term::graphics() == term::Graphics::Sixel)
+            && app.splash.as_ref().is_some_and(|splash| splash.due(app.loading))
+        {
             app.draw_splash();
         }
         app.move_cursor();
@@ -1288,6 +1300,9 @@ impl App {
             (
                 "frames",
                 match (self.by_file, self.png_only) {
+                    _ if term::graphics() == term::Graphics::Sixel => {
+                        "Sixel, whole palette-compressed frames".to_owned()
+                    }
                     (_, true) => "through the pty, whole PNG frames (KB_TRANSFER=png)".to_owned(),
                     (true, false) => "by file, what moved or changed".to_owned(),
                     (false, false) => "through the pty, what moved or changed".to_owned(),
@@ -1473,6 +1488,9 @@ impl App {
             self.uncover(&mut out, rect);
             term::write(&out);
         }
+        if term::graphics() == term::Graphics::Sixel {
+            self.draw(true);
+        }
     }
 
     /// Carry out `kb ctl viewport`: lay the page out at a given size, or go
@@ -1529,7 +1547,13 @@ impl App {
         // Synchronized update, so the terminal shows the result in one go.
         let mut out = b"\x1b[?2026h".to_vec();
         let cell = self.cell();
-        let frame = frame && (self.splash.is_none() || self.committed);
+        let sixel = self.ascii.is_none() && term::graphics() == term::Graphics::Sixel;
+        let frame = (frame || sixel) && (self.splash.is_none() || self.committed);
+        if sixel {
+            self.help_rect = None;
+            self.menu_rect = None;
+            self.modal_rects.clear();
+        }
         if frame && self.splash.take().is_some() {
             crate::splash::Splash::remove(&mut out, 2);
         }
@@ -1537,14 +1561,59 @@ impl App {
             let (cols, rows) = self.shown;
             let scaled = self.fixed.is_some();
             let route = match (self.by_file, self.png_only) {
+                _ if sixel => Route::Sixel,
                 (_, true) => Route::Png,
                 (true, false) => Route::Files,
                 (false, false) => Route::Layers,
             };
             let start = std::time::Instant::now();
-            let drawn = match &mut self.ascii {
-                Some(ascii) => ascii.draw(&mut out, png, cols, rows, 2, self.frame_scroll),
-                None => self.page.draw(&mut out, png, route, scaled, cols, rows, cell, 2),
+            let drawn = if let Some(ascii) = &mut self.ascii {
+                ascii.draw(&mut out, png, cols, rows, 2, self.frame_scroll)
+            } else if sixel {
+                let result = crate::base64::decode(png)
+                    .and_then(|bytes| graphics::decode_png(&bytes, Vec::new()))
+                    .ok_or_else(|| "couldn't decode Chrome's frame".to_owned())
+                    .and_then(|pixels| term::sixel::scale(&pixels, cols as u32 * cell.0, rows as u32 * cell.1))
+                    .and_then(|mut pixels| {
+                        if let Some(cursor) = &self.cursor {
+                            let opacity = self.agent_last.map_or(0.0, |at| {
+                                let elapsed = at.elapsed();
+                                if elapsed < DRIVEN {
+                                    1.0
+                                } else {
+                                    1.0 - (elapsed - DRIVEN).as_secs_f64() / cursor::FADE.as_secs_f64()
+                                }
+                            });
+                            if opacity > 0.0
+                                && !self.help
+                                && self.menu.is_none()
+                                && self.dialog.is_none()
+                                && self.picker.is_none()
+                                && !self.inspecting
+                            {
+                                let (x, y) = cursor.position(Instant::now(), (0.0, 0.0));
+                                let arrow = cursor::arrow((cell.1 as f64 * 1.6).round().max(8.0) as u32);
+                                term::sixel::overlay(
+                                    &mut pixels,
+                                    &arrow,
+                                    x.max(0.0) as u32,
+                                    (y - cell.1 as f64).max(0.0) as u32,
+                                    opacity,
+                                );
+                            }
+                        }
+                        term::sixel::draw(&mut out, &pixels, cell.1)
+                    });
+                match result {
+                    Ok(()) => "the whole frame, as Sixel".to_owned(),
+                    Err(error) => {
+                        self.notice = Some((format!("Couldn't draw the page: {error}"), Instant::now()));
+                        log(format_args!("Sixel error: {error}"));
+                        format!("Sixel failed: {error}")
+                    }
+                }
+            } else {
+                self.page.draw(&mut out, png, route, scaled, cols, rows, cell, 2)
             };
             crate::trace::event("draw", format_args!("{:.1}ms\t{drawn}", start.elapsed().as_secs_f64() * 1000.0));
             log(format_args!("drew {drawn}"));
@@ -1662,7 +1731,7 @@ impl App {
                         }
                     }
                     _ => {
-                        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| "/".into());
+                        let home = crate::platform::home().unwrap_or_default();
                         let start = self.last_folder.clone().unwrap_or(home);
                         self.picker = Some(Picker::new(question.id, *multiple, accept, &question.url, &start));
                         self.close_help();
@@ -1715,7 +1784,7 @@ impl App {
     /// The mouse while the page asks something: only the box answers it.
     fn modal_mouse(&mut self, mouse: Mouse) -> bool {
         let (cell_w, cell_h) = self.cell();
-        let (col, row) = if self.pixel_mouse {
+        let (col, row) = if self.pixel_mouse && !mouse.cell_coordinates {
             (mouse.x as usize / cell_w.max(1) as usize + 1, mouse.y as usize / cell_h.max(1) as usize + 1)
         } else {
             (mouse.x as usize, mouse.y as usize)
@@ -2038,14 +2107,19 @@ impl App {
         let editor = ["VISUAL", "EDITOR"]
             .iter()
             .find_map(|name| std::env::var(name).ok().filter(|value| !value.trim().is_empty()))
-            .unwrap_or_else(|| "vi".to_owned());
+            .unwrap_or_else(|| if cfg!(windows) { "notepad.exe" } else { "vi" }.to_owned());
         INPUT_PAUSED.store(true, Ordering::SeqCst);
+        let gate = INPUT_GATE.lock().unwrap_or_else(|e| e.into_inner());
         term::leave();
         term::lend(true);
+        drop(gate);
         // Through the shell, as $EDITOR can carry arguments (code --wait);
         // the file is passed as $1, never read as part of the command.
+        #[cfg(unix)]
         let child =
             std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(&path).spawn();
+        #[cfg(windows)]
+        let child = crate::platform::windows::editor(&editor, &path);
         match child {
             Ok(child) => self.editor = Some((child, editor)),
             Err(error) => {
@@ -2098,6 +2172,7 @@ impl App {
             }
             _ => 0.0,
         };
+        let expired = opacity == 0.0 && self.agent_last.is_some();
         if opacity == 0.0 {
             self.agent_last = None;
         }
@@ -2115,6 +2190,13 @@ impl App {
         let cursor = self.cursor.get_or_insert_with(|| AgentCursor::new(point.unwrap_or(middle)));
         if let Some(point) = point {
             cursor.aim(point);
+        }
+        if term::graphics() == term::Graphics::Sixel {
+            if expired || (cursor.due() && self.agent_last.is_some()) {
+                cursor.painted();
+                self.draw(true);
+            }
+            return;
         }
         let mut out = Vec::new();
         if opacity > 0.0 && !covered {
@@ -2163,7 +2245,10 @@ impl App {
             self.note("Nothing to copy");
             return;
         }
-        term::copy(text);
+        if let Err(error) = term::copy(text) {
+            self.note(&format!("Couldn't copy: {error}"));
+            return;
+        }
         let count = text.chars().count();
         self.note(&format!("Copied {count} character{}", if count == 1 { "" } else { "s" }));
     }
@@ -2260,12 +2345,16 @@ impl App {
                 self.note(&format!("Picked {selector}"));
                 return true;
             }
-            if let Some(selector) = value["selector"].as_str() {
-                term::copy(selector);
-            }
+            let copied = match value["selector"].as_str() {
+                Some(selector) => match term::copy(selector) {
+                    Ok(()) => "The selector is copied.".to_owned(),
+                    Err(error) => format!("Couldn't copy the selector: {error}."),
+                },
+                None => "No selector was returned.".to_owned(),
+            };
             let again = self.bindings.keys_for(Action::Inspect).into_iter().next().unwrap_or_default();
             lines.push(String::new());
-            lines.push(format!("\tThe selector is copied. {again} inspects another; any key closes this."));
+            lines.push(format!("\t{copied} {again} inspects another; any key closes this."));
             self.panel = Some(lines);
             self.open_help();
             return true;
@@ -2343,7 +2432,7 @@ impl App {
         // click anywhere else closes it.
         if let (true, Some(rect)) = (self.menu.is_some(), self.menu_rect) {
             let (cell_w, cell_h) = self.cell();
-            let (col, row) = if self.pixel_mouse {
+            let (col, row) = if self.pixel_mouse && !mouse.cell_coordinates {
                 (mouse.x as usize / cell_w.max(1) as usize + 1, mouse.y as usize / cell_h.max(1) as usize + 1)
             } else {
                 (mouse.x as usize, mouse.y as usize)
@@ -2372,7 +2461,7 @@ impl App {
         let (cell_w, cell_h) = (cell_w as f64, cell_h as f64);
         // Position in device pixels from the pane's top left. Cell reports
         // are taken at the middle of the cell.
-        let (px, py) = if self.pixel_mouse {
+        let (px, py) = if self.pixel_mouse && !mouse.cell_coordinates {
             (mouse.x as f64, mouse.y as f64)
         } else {
             ((mouse.x as f64 - 0.5) * cell_w, (mouse.y as f64 - 0.5) * cell_h)

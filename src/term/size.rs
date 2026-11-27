@@ -14,9 +14,26 @@ pub struct Window {
 }
 
 pub fn window() -> Option<Window> {
-    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-    if unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut size) } < 0 || size.ws_col == 0 || size.ws_row == 0 {
-        return None;
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::*;
+        let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { std::mem::zeroed() };
+        if unsafe { GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) } == 0 {
+            return None;
+        }
+        Some(Window {
+            cols: (info.srWindow.Right - info.srWindow.Left + 1) as u16,
+            rows: (info.srWindow.Bottom - info.srWindow.Top + 1) as u16,
+            width_px: 0,
+            height_px: 0,
+        })
     }
-    Some(Window { cols: size.ws_col, rows: size.ws_row, width_px: size.ws_xpixel, height_px: size.ws_ypixel })
+    #[cfg(unix)]
+    {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut size) } < 0 || size.ws_col == 0 || size.ws_row == 0 {
+            return None;
+        }
+        Some(Window { cols: size.ws_col, rows: size.ws_row, width_px: size.ws_xpixel, height_px: size.ws_ypixel })
+    }
 }
